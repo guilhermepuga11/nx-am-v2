@@ -1,137 +1,559 @@
 <script>
-/* ═══════════════════════════════════════
-   PARTNERS VIEW — reads from P directly
-   V3.0: Leading # rank column (follows current sorted order).
-═══════════════════════════════════════ */
-function setupPartnerFilters() {
-  var countries = new Set(), stages = new Set(), models = new Set(), tags = new Set();
-  P.forEach(function(d) {
-    if (d.country) countries.add(d.country);
-    if (d.stage) stages.add(d.stage);
-    if (d.model) models.add(d.model);
-    if (d.tags) d.tags.split(',').forEach(function(t) { var c = t.trim(); if (c && c.length < 30) tags.add(c); });
-  });
-  var pop = function(id, set) { var sel = document.getElementById(id); Array.from(set).sort().forEach(function(v) { sel.add(new Option(v, v)); }); };
-  pop('flt-country', countries); pop('flt-stage', stages); pop('flt-model', models);
-  document.getElementById('tagFilterBtns').innerHTML = Array.from(tags).sort().map(function(tag) {
-    return '<button class="filter-tag-btn" onclick="togglePartnersTag(\'' + esc(tag) + '\')" id="ptag-' + esc(tag.replace(/[^a-zA-Z0-9]/g, '_')) + '">' + esc(tag) + '</button>';
-  }).join('');
+/* ═══════════════════════════════════════════════════════════════════════════
+   REPLY CENTER (V3.8 — campaign-first)
+
+   Two modes:
+     - 'list'   → table of campaigns that have ≥1 partner reply.
+     - 'detail' → for one campaign, list of replies + thread + reply composer.
+
+   Why campaign-first: the previous flat-list-of-everything view buried the
+   triage signal under noise. Campaigns are the unit of work — pick the one
+   you care about, see who replied, deal with it.
+
+   "Needs reply" vs "Done" is computed server-side per row by inspecting the
+   thread's latest message. If the latest sender is @farfetch.com (us, or a
+   teammate replying via the shared mailbox) → done. Otherwise → needs_reply.
+   This means the "done" state automatically updates the moment the user hits
+   Send Reply on the inline composer (we re-fetch the thread post-send).
+
+   Direct (drawer) correspondence is intentionally excluded from this view —
+   triage those from the partner drawer's Correspondence tab.
+═══════════════════════════════════════════════════════════════════════════ */
+
+var rcState = {
+  mode: 'list',                // 'list' | 'detail'
+  days: 90,
+
+  // List mode
+  listLoading: false,
+  campaignsList: [],           // [{ id, name, templateKey, sent, replied, lastReply, ... }]
+  listFilter: '',
+
+  // Detail mode
+  detailLoading: false,
+  activeCampaignId: null,
+  detail: null,                // { campaignId, name, rows, totals }
+  stateFilter: 'needs_reply',  // 'needs_reply' | 'done' | 'all'
+
+  // Per-row interaction
+  expandedSheetRow: null,
+  threadCache: {},             // { threadId: messages[] }
+  sending: false
+};
+
+function initReplyCenterView() {
+  var host = document.getElementById('view-replies');
+  if (!host) return;
+  host.innerHTML = rcShellHtml_();
+  rcRouteRender_();
+  refreshIcons();
+  // First load: kick off list fetch unless we already have it.
+  if (!rcState.campaignsList.length) loadReplyCampaigns();
 }
 
-function togglePartnersTag(tag) {
-  var safeId = 'ptag-' + tag.replace(/[^a-zA-Z0-9]/g, '_');
-  var btn = document.getElementById(safeId);
-  if (partnersTagFilter.has(tag)) { partnersTagFilter.delete(tag); if (btn) btn.classList.remove('active'); }
-  else { partnersTagFilter.add(tag); if (btn) btn.classList.add('active'); }
-  filterPartners();
+function rcShellHtml_() {
+  return ''
+    + '<div id="rcShell" style="display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0">'
+      + '<div id="rcTopbar"></div>'
+      + '<div id="rcBody" style="flex:1;overflow-y:auto;background:var(--bg)"></div>'
+    + '</div>';
 }
 
-function sortPartners(col) {
-  if (partnersSortCol === col) partnersSortAsc = !partnersSortAsc;
-  else { partnersSortCol = col; partnersSortAsc = true; }
-  filterPartners();
+function rcRouteRender_() {
+  if (rcState.mode === 'detail') rcRenderDetail_();
+  else rcRenderList_();
 }
 
-function filterPartners() {
-  var q = document.getElementById('globalSearch').value.toLowerCase();
-  var fM = document.getElementById('flt-model').value;
-  var fS = document.getElementById('flt-stage').value;
-  var fC = document.getElementById('flt-country').value;
-  var filtered = P.filter(function(d) {
-    var mq = !q || (d.company || '').toLowerCase().includes(q) || (d.email || '').toLowerCase().includes(q) || (d.tags || '').toLowerCase().includes(q);
-    var mt = partnersTagFilter.size === 0 || Array.from(partnersTagFilter).every(function(f) {
-      return (d.tags || '').split(',').map(function(t) { return t.trim(); }).indexOf(f) > -1;
-    });
-    return mq && mt && (!fM || d.model === fM) && (!fS || d.stage === fS) && (!fC || d.country === fC);
-  });
-  if (partnersSortCol) {
-    filtered.sort(function(a, b) {
-      var va = a[partnersSortCol] || '', vb = b[partnersSortCol] || '';
-      if (typeof va === 'number' || typeof vb === 'number') return partnersSortAsc ? (va - vb) : (vb - va);
-      return partnersSortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
-    });
-  }
-  renderPartnersTable(filtered);
+/* ── LIST MODE ─────────────────────────────────────────────────────────── */
+
+function rcListTopbarHtml_() {
+  return ''
+    + '<div class="filter-bar" style="justify-content:space-between;padding:10px 14px">'
+      + '<div style="display:flex;align-items:center;gap:10px">'
+        + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Window</span>'
+        + '<select id="rcDays" class="nx-select" onchange="rcSetDays(parseInt(this.value,10))">'
+          + ['30','90','180','365','0'].map(function(v) {
+              var sel = parseInt(v, 10) === rcState.days ? ' selected' : '';
+              var label = v === '0' ? 'All time' : 'Last ' + v + ' days';
+              return '<option value="' + v + '"' + sel + '>' + label + '</option>';
+            }).join('')
+        + '</select>'
+        + '<input class="nx-input" id="rcListSearch" placeholder="Search campaigns…" oninput="rcState.listFilter=this.value.toLowerCase();rcRenderListBody_()" style="width:220px;font-size:11px;padding:5px 10px" value="' + esc(rcState.listFilter) + '">'
+        + '<span id="rcListCount" style="font-size:10px;color:var(--ink-4)">—</span>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:8px">'
+        + '<button class="btn-ghost" id="rcScanBtn" onclick="rcScanReplies()"><i data-lucide="search" style="width:12px;height:12px"></i> Scan replies</button>'
+        + '<button class="btn-ghost" onclick="loadReplyCampaigns()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>'
+      + '</div>'
+    + '</div>';
 }
 
-/* ═══════════════════════════════════════
-   PROPOSE PARTNER MODAL
-═══════════════════════════════════════ */
-function openProposePartnerModal() {
-  document.getElementById('ppName').value = '';
-  document.getElementById('ppCountry').value = '';
-  document.getElementById('ppEmail').value = '';
-  document.getElementById('ppLanguage').value = '';
-  document.getElementById('ppStage').value = 'Onboarding';
-  document.getElementById('ppModel').value = '3P';
-  document.getElementById('ppType').value = '';
-  document.getElementById('ppNotes').value = '';
-  document.getElementById('proposePartnerModal').style.display = 'flex';
+function rcRenderList_() {
+  document.getElementById('rcTopbar').innerHTML = rcListTopbarHtml_();
+  var body = document.getElementById('rcBody');
+  body.innerHTML = '<div id="rcListShell" style="padding:18px 24px">'
+    + '<div class="section-card" style="padding:0;overflow:hidden">'
+      + '<div id="rcListBody"></div>'
+    + '</div>'
+  + '</div>';
+  rcRenderListBody_();
   refreshIcons();
 }
 
-function closeProposePartnerModal() {
-  document.getElementById('proposePartnerModal').style.display = 'none';
+function rcRenderListBody_() {
+  var el = document.getElementById('rcListBody');
+  var countEl = document.getElementById('rcListCount');
+  if (!el) return;
+
+  if (rcState.listLoading) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:12px"><i data-lucide="loader-2" class="spin" style="width:14px;height:14px;vertical-align:middle"></i> Loading campaigns with replies…</div>';
+    if (countEl) countEl.textContent = '—';
+    refreshIcons();
+    return;
+  }
+
+  var q = rcState.listFilter || '';
+  var rows = (rcState.campaignsList || []).filter(function(c) {
+    if (!q) return true;
+    return (c.name || '').toLowerCase().indexOf(q) > -1 ||
+           (c.templateKey || '').toLowerCase().indexOf(q) > -1;
+  });
+  if (countEl) countEl.textContent = rows.length + (rows.length === 1 ? ' campaign' : ' campaigns');
+
+  if (!rows.length) {
+    el.innerHTML = '<div style="padding:48px 20px;text-align:center;color:var(--ink-4);font-size:12px">'
+      + '<i data-lucide="mail-check" style="width:28px;height:28px;opacity:0.4;display:block;margin:0 auto 10px"></i>'
+      + 'No campaigns with replies in this window.'
+    + '</div>';
+    refreshIcons();
+    return;
+  }
+
+  el.innerHTML = '<table class="nx-table">'
+    + '<thead><tr>'
+      + '<th>Last Reply</th>'
+      + '<th>Campaign</th>'
+      + '<th>Template</th>'
+      + '<th style="text-align:right">Replies</th>'
+      + '<th style="text-align:right">Of Sent</th>'
+      + '<th style="text-align:right">Reply Rate</th>'
+      + '<th style="text-align:center">Action</th>'
+    + '</tr></thead>'
+    + '<tbody>'
+      + rows.map(function(c) {
+          var lr = c.lastReply ? rcDateStr_(c.lastReply) : '—';
+          var rateClass = c.replyRate >= 0.20 ? 'val-positive' : c.replyRate >= 0.10 ? 'val-neutral' : 'val-negative';
+          var ratePct = Math.round((c.replyRate || 0) * 100);
+          return '<tr style="cursor:pointer" onclick="rcOpenCampaign(\'' + esc(c.id).replace(/\\/g, '\\\\').replace(/\x27/g, "\\'") + '\')">'
+            + '<td style="white-space:nowrap;font-variant-numeric:tabular-nums">' + esc(lr) + '</td>'
+            + '<td><span style="font-weight:600;color:var(--ink)">' + esc(c.name || '(Untitled)') + '</span></td>'
+            + '<td style="color:var(--ink-3)">' + esc(c.templateKey || '—') + '</td>'
+            + '<td style="text-align:right;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums">' + (c.replied || 0) + '</td>'
+            + '<td style="text-align:right;color:var(--ink-3);font-variant-numeric:tabular-nums">' + (c.sent || 0) + '</td>'
+            + '<td style="text-align:right" class="' + rateClass + '">' + ratePct + '%</td>'
+            + '<td style="text-align:center" onclick="event.stopPropagation()">'
+              + '<button class="icon-btn" style="width:26px;height:26px;margin:0 auto" onclick="rcOpenCampaign(\'' + esc(c.id).replace(/\\/g, '\\\\').replace(/\x27/g, "\\'") + '\')" title="Open replies"><i data-lucide="arrow-right" style="width:11px;height:11px"></i></button>'
+            + '</td>'
+          + '</tr>';
+        }).join('')
+    + '</tbody></table>';
+  refreshIcons();
 }
 
-function submitProposePartner() {
-  var name = document.getElementById('ppName').value.trim();
-  if (!name) { showToast('Partner name is required', 'error'); return; }
-  var payload = {
-    name: name,
-    country: document.getElementById('ppCountry').value.trim(),
-    email: document.getElementById('ppEmail').value.trim(),
-    language: document.getElementById('ppLanguage').value.trim(),
-    stage: document.getElementById('ppStage').value,
-    model: document.getElementById('ppModel').value,
-    partnerType: document.getElementById('ppType').value.trim(),
-    notes: document.getElementById('ppNotes').value.trim()
-  };
-  var btn = document.querySelector('#proposePartnerModal .btn-primary');
-  if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
+function rcSetDays(d) {
+  rcState.days = d;
+  loadReplyCampaigns();
+}
+
+function loadReplyCampaigns() {
+  rcState.listLoading = true;
+  rcRenderListBody_();
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (!useGAS) {
+    rcState.listLoading = false;
+    rcState.campaignsList = [];
+    rcRenderListBody_();
+    return;
+  }
   google.script.run
-    .withSuccessHandler(function(res) {
-      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:12px;height:12px"></i> Submit'; refreshIcons(); }
-      if (res && res.success) { closeProposePartnerModal(); showToast(res.message || 'Partner proposed', 'success'); }
-      else { showToast(res.error || 'Failed', 'error'); }
+    .withSuccessHandler(function(list) {
+      rcState.listLoading = false;
+      rcState.campaignsList = Array.isArray(list) ? list : [];
+      rcRenderListBody_();
     })
     .withFailureHandler(function(e) {
-      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:12px;height:12px"></i> Submit'; refreshIcons(); }
-      showToast('Error: ' + (e.message || e), 'error');
+      rcState.listLoading = false;
+      rcState.campaignsList = [];
+      rcRenderListBody_();
+      showToast('Load failed: ' + ((e && e.message) || e), 'error');
     })
-    .proposeNewPartner(payload);
+    .getReplyCampaignsList(rcState.days, _userTeam);
 }
 
-/* ═══════════════════════════════════════
-   PARTNERS TABLE RENDER — V3.0 with rank column
-═══════════════════════════════════════ */
-function renderPartnersTable(rows) {
-  var data = rows || P;
-  document.getElementById('partnersCount').textContent = data.length + ' records';
-  document.getElementById('partnersBody').innerHTML = data.map(function(d, i) {
-    var rank = i + 1;
-    var overdue = d.actionDate && d.actionDate < TODAY && !String(d.stage || '').includes('Inactive');
-    var tags = d.tags ? d.tags.split(',').map(function(t) { return '<span class="tag-chip">' + esc(t.trim()) + '</span>'; }).join('') : '';
-    var atHtml = (d.insight_tags || []).map(function(t) {
-      var c = autoColors[t] || '#f1f5f9;color:#64748b';
-      return '<span style="background:' + c + ';padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase;margin:1px">' + t + '</span>';
-    }).join('');
-    var emailIn = d.lastReceived && d.lastReceived !== '-' ? d.lastReceived : '—';
-    var emailOut = d.lastSent && d.lastSent !== '-' ? d.lastSent : '—';
-    return '<tr class="' + (overdue ? 'overdue' : '') + '" onclick="openDeal(' + d.row + ')">'
-      + '<td style="color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums">' + rank + '</td>'
-      + '<td style="font-weight:500;color:var(--ink)">' + esc(d.company) + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">' + esc(d.country || '') + '</div></td>'
-      + '<td style="font-size:11px;color:var(--ink-2);white-space:nowrap">' + esc(d.account_manager || '—') + '</td>'
-      + '<td><span class="pill ' + stageClass(d.stage) + '">' + esc(d.stage) + '</span></td>'
-      + '<td><span style="font-size:10px;font-weight:700;letter-spacing:0.06em;color:var(--ink-3)">' + esc(d.model || '3P') + '</span></td>'
-      + '<td style="text-align:right;font-weight:600">' + fGtv(d.cy_ytd) + '<div style="font-size:10px;margin-top:1px">' + fPctStr(d.ytd_pct, true) + '</div></td>'
-      + '<td style="text-align:right;font-size:11px;' + (emailIn === '—' ? 'color:var(--ink-4)' : 'color:var(--ink-2);font-weight:500') + '">' + esc(emailIn) + '</td>'
-      + '<td style="text-align:right;font-size:11px;' + (emailOut === '—' ? 'color:var(--ink-4)' : 'color:var(--ink-2);font-weight:500') + '">' + esc(emailOut) + '</td>'
-      + '<td>' + (atHtml || '<span style="color:var(--ink-4);font-size:11px">—</span>') + '</td>'
-      + '<td>' + tags + '</td>'
-      + '<td onclick="event.stopPropagation()"><button class="icon-btn" style="width:26px;height:26px;margin:0 auto" onclick="emailThisPartner(P.find(function(x){return x.row==' + d.row + ';}))"><i data-lucide="mail" style="width:11px;height:11px"></i></button></td>'
-      + '</tr>';
-  }).join('') || '<tr><td colspan="11" style="padding:40px;text-align:center;color:var(--ink-4)">No records matched.</td></tr>';
+/* ── DETAIL MODE ───────────────────────────────────────────────────────── */
+
+function rcOpenCampaign(campaignId) {
+  rcState.mode = 'detail';
+  rcState.activeCampaignId = campaignId;
+  rcState.detail = null;
+  rcState.expandedSheetRow = null;
+  rcState.stateFilter = 'needs_reply';
+  rcRenderDetail_();
+  loadCampaignReplies();
+}
+
+function rcBackToList() {
+  rcState.mode = 'list';
+  rcState.activeCampaignId = null;
+  rcState.detail = null;
+  rcState.expandedSheetRow = null;
+  rcRouteRender_();
+}
+
+function rcDetailTopbarHtml_() {
+  var d = rcState.detail;
+  var name = d ? (d.name || '(Untitled)') : 'Loading…';
+  var tmpl = d ? (d.templateKey || '—') : '';
+  var totals = d ? d.totals : { replied: 0, needsReply: 0, done: 0 };
+  return ''
+    + '<div class="filter-bar" style="justify-content:space-between;padding:10px 14px;align-items:center">'
+      + '<div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1">'
+        + '<button class="btn-ghost" onclick="rcBackToList()" style="flex-shrink:0"><i data-lucide="chevron-left" style="width:12px;height:12px"></i> Campaigns</button>'
+        + '<div style="min-width:0;flex:1">'
+          + '<div style="font-size:14px;font-weight:700;letter-spacing:-0.01em;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(name) + '</div>'
+          + '<div style="font-size:10px;color:var(--ink-4);margin-top:1px">Template: ' + esc(tmpl) + ' · ' + totals.replied + ' ' + (totals.replied === 1 ? 'reply' : 'replies') + '</div>'
+        + '</div>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">'
+        + '<button class="btn-ghost" onclick="loadCampaignReplies()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>'
+      + '</div>'
+    + '</div>'
+    + '<div style="padding:10px 14px;background:var(--bg);border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-shrink:0">'
+      + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Show</span>'
+      + '<div style="display:flex;gap:0;background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:2px">'
+        + rcStateBtn_('needs_reply', 'Needs Reply', totals.needsReply)
+        + rcStateBtn_('done', 'Done', totals.done)
+        + rcStateBtn_('all', 'All', totals.replied)
+      + '</div>'
+    + '</div>';
+}
+
+function rcStateBtn_(val, label, count) {
+  var active = rcState.stateFilter === val;
+  return '<button onclick="rcSetStateFilter(\'' + val + '\')" class="filter-tag-btn' + (active ? ' active' : '') + '" style="font-size:10px;padding:3px 10px;border-radius:5px">'
+    + label + ' <span style="opacity:0.7">' + count + '</span></button>';
+}
+
+function rcSetStateFilter(s) {
+  rcState.stateFilter = s;
+  rcRenderDetail_();
+}
+
+function rcRenderDetail_() {
+  document.getElementById('rcTopbar').innerHTML = rcDetailTopbarHtml_();
+  var body = document.getElementById('rcBody');
+  body.innerHTML = '<div id="rcDetailBody" style="padding:14px 18px"></div>';
+  rcRenderDetailBody_();
   refreshIcons();
+}
+
+function rcRenderDetailBody_() {
+  var el = document.getElementById('rcDetailBody');
+  if (!el) return;
+
+  if (rcState.detailLoading) {
+    el.innerHTML = '<div style="padding:60px;text-align:center;color:var(--ink-4);font-size:12px"><i data-lucide="loader-2" class="spin" style="width:14px;height:14px;vertical-align:middle"></i> Loading replies and inspecting threads…</div>';
+    refreshIcons();
+    return;
+  }
+  var d = rcState.detail;
+  if (!d) {
+    el.innerHTML = '<div style="padding:60px;text-align:center;color:var(--ink-4);font-size:12px">No data.</div>';
+    return;
+  }
+
+  var rows = d.rows.filter(function(r) {
+    if (rcState.stateFilter === 'all') return true;
+    if (rcState.stateFilter === 'needs_reply') return r.state === 'needs_reply' || r.state === 'unknown';
+    if (rcState.stateFilter === 'done') return r.state === 'done';
+    return true;
+  });
+
+  if (!rows.length) {
+    var emptyMsg = rcState.stateFilter === 'needs_reply'
+      ? 'Nothing waiting on you for this campaign — all replies handled.'
+      : rcState.stateFilter === 'done'
+      ? 'No replies marked done yet.'
+      : 'No replies in this campaign.';
+    var icon = rcState.stateFilter === 'needs_reply' ? 'check-circle-2' : 'inbox';
+    el.innerHTML = '<div style="padding:48px 20px;text-align:center;color:var(--ink-4);font-size:12px">'
+      + '<i data-lucide="' + icon + '" style="width:30px;height:30px;opacity:0.4;display:block;margin:0 auto 10px"></i>'
+      + emptyMsg
+    + '</div>';
+    refreshIcons();
+    return;
+  }
+
+  el.innerHTML = rows.map(rcReplyCardHtml_).join('');
+  refreshIcons();
+}
+
+function rcReplyCardHtml_(r) {
+  var statePill;
+  if (r.state === 'needs_reply') {
+    statePill = '<span style="background:#fffbeb;color:#b45309;border:1px solid #fde68a;padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em">NEEDS REPLY</span>';
+  } else if (r.state === 'done') {
+    statePill = '<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em">DONE</span>';
+  } else {
+    statePill = '<span style="background:var(--bg);color:var(--ink-4);border:1px solid var(--border);padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em">UNKNOWN</span>';
+  }
+
+  var lastDate = rcDateStr_(r.lastDate || r.replyDate || r.sentTimestamp);
+  var lastFromShort = (r.lastFrom || '').replace(/\s*<[^>]+>\s*$/, '').trim() || (r.lastFrom || '');
+  var isExpanded = rcState.expandedSheetRow === r.sheetRow;
+
+  var headerRow = '<div onclick="rcToggleRow(' + r.sheetRow + ')" style="padding:12px 16px;cursor:pointer;display:flex;align-items:flex-start;gap:12px">'
+    + '<div style="flex:1;min-width:0">'
+      + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">'
+        + '<span style="font-size:13px;font-weight:700;color:var(--ink);letter-spacing:-0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(r.partnerName || '—') + '</span>'
+        + statePill
+      + '</div>'
+      + '<div style="font-size:11.5px;color:var(--ink-2);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px">' + esc(r.subject || '—') + '</div>'
+      + '<div style="font-size:10px;color:var(--ink-4);display:flex;gap:10px;flex-wrap:wrap">'
+        + (r.lastFrom ? '<span><b>Last:</b> ' + esc(lastFromShort) + ' · ' + esc(lastDate) + '</span>' : '<span>Sent ' + esc(rcDateStr_(r.sentTimestamp)) + '</span>')
+        + (r.email ? '<span><b>To:</b> ' + esc(r.email) + '</span>' : '')
+      + '</div>'
+      + (r.lastSnippet ? '<div style="font-size:10.5px;color:var(--ink-3);margin-top:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(r.lastSnippet) + '</div>' : '')
+    + '</div>'
+    + '<i data-lucide="chevron-down" class="rc-chev" style="width:14px;height:14px;color:var(--ink-4);flex-shrink:0;margin-top:3px;transition:transform 0.15s;' + (isExpanded ? 'transform:rotate(180deg)' : '') + '"></i>'
+  + '</div>';
+
+  var expandedBody = isExpanded
+    ? '<div id="rcRowExpanded_' + r.sheetRow + '" style="border-top:1px solid var(--border);padding:14px 16px;background:var(--bg)">'
+        + '<div id="rcThread_' + r.sheetRow + '" style="margin-bottom:12px"></div>'
+        + rcReplyComposerHtml_(r)
+      + '</div>'
+    : '';
+
+  return '<div class="section-card" style="margin:0 0 8px;padding:0;overflow:hidden">'
+    + headerRow
+    + expandedBody
+  + '</div>';
+}
+
+function rcToggleRow(sheetRow) {
+  if (rcState.expandedSheetRow === sheetRow) {
+    rcState.expandedSheetRow = null;
+  } else {
+    rcState.expandedSheetRow = sheetRow;
+  }
+  rcRenderDetailBody_();
+  // After re-render, the expanded row needs its thread populated.
+  if (rcState.expandedSheetRow !== null) {
+    var r = rcCurrentRow_();
+    if (r) rcLoadThread_(r);
+  }
+}
+
+function rcReplyComposerHtml_(r) {
+  if (!r.threadId) {
+    return '<div style="padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--ink-4)">No Gmail thread linked — reply from your normal Gmail.</div>';
+  }
+  if (!_canSendShared) {
+    return '<div style="padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--ink-4)">Replies use the shared mailbox; your team isn\'t configured for that. Reply from your normal Gmail.</div>';
+  }
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px">'
+    + '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:6px">Reply (shared mailbox)</div>'
+    + '<div style="display:flex;gap:6px;margin-bottom:6px">'
+      + '<button class="btn-ghost" onclick="rcExecFmt(\'bold\')" style="padding:4px 8px;font-size:11px;font-weight:700">B</button>'
+      + '<button class="btn-ghost" onclick="rcExecFmt(\'italic\')" style="padding:4px 8px;font-size:11px;font-style:italic">I</button>'
+      + '<button class="btn-ghost" onclick="rcExecFmt(\'underline\')" style="padding:4px 8px;font-size:11px;text-decoration:underline">U</button>'
+      + '<button class="btn-ghost" onclick="rcInsertLink()" style="padding:4px 8px;font-size:11px"><i data-lucide="link" style="width:11px;height:11px"></i></button>'
+    + '</div>'
+    + '<div id="rcReplyEditor_' + r.sheetRow + '" contenteditable="true" data-placeholder="Type your reply…" style="min-height:100px;max-height:240px;overflow-y:auto;padding:10px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);font-family:Arial,sans-serif;font-size:13px;line-height:1.6;color:var(--ink);outline:none"></div>'
+    + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">'
+      + '<button class="btn-ghost" onclick="rcDiscardDraft(' + r.sheetRow + ')">Discard</button>'
+      + '<button class="btn-primary" id="rcSendBtn_' + r.sheetRow + '" onclick="rcSendReply(' + r.sheetRow + ')"><i data-lucide="send" style="width:12px;height:12px"></i> Send Reply</button>'
+    + '</div>'
+  + '</div>';
+}
+
+function rcCurrentRow_() {
+  if (!rcState.detail || rcState.expandedSheetRow == null) return null;
+  var rows = rcState.detail.rows;
+  for (var i = 0; i < rows.length; i++) if (rows[i].sheetRow === rcState.expandedSheetRow) return rows[i];
+  return null;
+}
+
+function loadCampaignReplies() {
+  if (!rcState.activeCampaignId) return;
+  rcState.detailLoading = true;
+  rcRenderDetailBody_();
+  google.script.run
+    .withSuccessHandler(function(d) {
+      rcState.detailLoading = false;
+      rcState.detail = d || { rows: [], totals: { replied: 0, needsReply: 0, done: 0 } };
+      // Topbar contains totals — re-render fully
+      rcRenderDetail_();
+    })
+    .withFailureHandler(function(e) {
+      rcState.detailLoading = false;
+      rcState.detail = { rows: [], totals: { replied: 0, needsReply: 0, done: 0 }, _error: (e && e.message) || String(e) };
+      rcRenderDetail_();
+      showToast('Load failed: ' + ((e && e.message) || e), 'error');
+    })
+    .getCampaignReplies(rcState.activeCampaignId, _userTeam);
+}
+
+/* ── THREAD inline render ─────────────────────────────────────────────── */
+
+function rcLoadThread_(r) {
+  var area = document.getElementById('rcThread_' + r.sheetRow);
+  if (!area) return;
+  if (!r.threadId) {
+    area.innerHTML = '<div style="padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--ink-4)">No thread linked.' + (r.bodySnippet ? '<div style="margin-top:6px;color:var(--ink-3)">' + esc(r.bodySnippet) + '</div>' : '') + '</div>';
+    refreshIcons();
+    return;
+  }
+  // Cache check
+  if (rcState.threadCache[r.threadId]) {
+    rcRenderThread_(rcState.threadCache[r.threadId], r);
+    return;
+  }
+  area.innerHTML = '<div style="padding:14px;text-align:center;color:var(--ink-4);font-size:11px"><i data-lucide="loader-2" class="spin" style="width:14px;height:14px;vertical-align:middle"></i> Loading thread…</div>';
+  refreshIcons();
+  google.script.run
+    .withSuccessHandler(function(msgs) {
+      var arr = Array.isArray(msgs) ? msgs : [];
+      rcState.threadCache[r.threadId] = arr;
+      // Only render if the row is still expanded
+      if (rcState.expandedSheetRow === r.sheetRow) rcRenderThread_(arr, r);
+    })
+    .withFailureHandler(function(e) {
+      var area2 = document.getElementById('rcThread_' + r.sheetRow);
+      if (area2) area2.innerHTML = '<div style="padding:12px;background:#fff1f2;border:1px solid #fecdd3;border-radius:8px;font-size:11px;color:#be123c">Thread load failed: ' + esc((e && e.message) || e) + '</div>';
+    })
+    .getThreadMessages(r.threadId);
+}
+
+function rcRenderThread_(msgs, r) {
+  var area = document.getElementById('rcThread_' + r.sheetRow);
+  if (!area) return;
+  if (!msgs || !msgs.length) {
+    area.innerHTML = '<div style="padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--ink-4)">Thread empty or inaccessible.</div>';
+    return;
+  }
+  var arr = msgs.slice().sort(function(a, b) { return (a.date || '').localeCompare(b.date || ''); });
+  area.innerHTML = arr.map(function(m, i) {
+    var isLatest = (i === arr.length - 1);
+    var ds = rcDateStr_(m.date);
+    var fromShort = (m.from || '').replace(/\s*<[^>]+>\s*$/, '').trim() || (m.from || '');
+    var bodyId = 'rcMsgBody_' + r.sheetRow + '_' + i;
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;overflow:hidden">'
+      + '<div onclick="rcToggleMsgBody(\'' + bodyId + '\',this)" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border)">'
+        + '<div style="flex:1;min-width:0">'
+          + '<div style="font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(fromShort) + '</div>'
+          + '<div style="font-size:10px;color:var(--ink-4);margin-top:1px">' + esc(ds) + '</div>'
+        + '</div>'
+        + '<i data-lucide="chevron-down" class="rc-chev" style="width:12px;height:12px;color:var(--ink-4);flex-shrink:0;transition:transform 0.15s;' + (isLatest ? 'transform:rotate(180deg)' : '') + '"></i>'
+      + '</div>'
+      + '<div id="' + bodyId + '" class="gmail-body-sandbox" style="' + (isLatest ? '' : 'display:none;') + 'padding:10px 12px;max-height:380px;overflow-y:auto">' + (m.body || '<i style="color:var(--ink-4)">(empty)</i>') + '</div>'
+    + '</div>';
+  }).join('');
+  refreshIcons();
+}
+
+function rcToggleMsgBody(bodyId, headerEl) {
+  var body = document.getElementById(bodyId);
+  if (!body) return;
+  var isHidden = body.style.display === 'none';
+  body.style.display = isHidden ? '' : 'none';
+  var chev = headerEl.querySelector('.rc-chev');
+  if (chev) chev.style.transform = isHidden ? 'rotate(180deg)' : '';
+}
+
+function rcDateStr_(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  var isToday = d.toDateString() === new Date().toDateString();
+  return isToday
+    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' }) + ' \xb7 ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/* ── Reply composer actions (per-row) ──────────────────────────────────── */
+function rcExecFmt(cmd) {
+  var sr = rcState.expandedSheetRow;
+  var ed = sr ? document.getElementById('rcReplyEditor_' + sr) : null;
+  if (ed) ed.focus();
+  document.execCommand(cmd, false, null);
+}
+
+function rcInsertLink() {
+  var url = prompt('Enter URL:');
+  if (!url) return;
+  var sr = rcState.expandedSheetRow;
+  var ed = sr ? document.getElementById('rcReplyEditor_' + sr) : null;
+  if (ed) ed.focus();
+  document.execCommand('createLink', false, url);
+}
+
+function rcDiscardDraft(sheetRow) {
+  var ed = document.getElementById('rcReplyEditor_' + sheetRow);
+  if (ed) ed.innerHTML = '';
+}
+
+function rcSendReply(sheetRow) {
+  if (rcState.sending) return;
+  var r = rcState.detail.rows.find(function(x) { return x.sheetRow === sheetRow; });
+  if (!r || !r.threadId) { showToast('No thread to reply to', 'error'); return; }
+  var ed = document.getElementById('rcReplyEditor_' + sheetRow);
+  if (!ed) return;
+  var body = ed.innerHTML.trim();
+  if (!body || body === '<br>') { showToast('Reply cannot be empty', 'error'); return; }
+
+  var btn = document.getElementById('rcSendBtn_' + sheetRow);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Sending…'; refreshIcons(); }
+  rcState.sending = true;
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      rcState.sending = false;
+      var ok = res && res.success !== false;
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:12px;height:12px"></i> Send Reply'; refreshIcons(); }
+      if (!ok) { showToast('Reply failed: ' + ((res && res.error) || 'Unknown'), 'error'); return; }
+      showToast('Reply sent', 'success');
+      // Evict thread cache so next thread render shows our new message,
+      // and re-fetch full campaign so the row's state flips needs_reply → done.
+      if (r.threadId) delete rcState.threadCache[r.threadId];
+      loadCampaignReplies();
+    })
+    .withFailureHandler(function(e) {
+      rcState.sending = false;
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:12px;height:12px"></i> Send Reply'; refreshIcons(); }
+      showToast('Reply failed: ' + (e.message || e), 'error');
+    })
+    .replyToThread(r.threadId, body, r.partnerName || '', _userTeam);
+}
+
+/* ── Scan all replies (top-right button on list mode) ─────────────────── */
+function rcScanReplies() {
+  var btn = document.getElementById('rcScanBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Scanning…'; refreshIcons(); }
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="search" style="width:12px;height:12px"></i> Scan replies'; refreshIcons(); }
+      var det = (res && res.detected) || 0;
+      var sc  = (res && res.scanned) || 0;
+      var camps = (res && res.campaigns) || 0;
+      showToast('Scanned ' + sc + ' across ' + camps + ' campaigns · ' + det + ' new ' + (det === 1 ? 'reply' : 'replies'), 'success');
+      loadReplyCampaigns();
+    })
+    .withFailureHandler(function(e) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="search" style="width:12px;height:12px"></i> Scan replies'; refreshIcons(); }
+      showToast('Scan failed: ' + (e.message || e), 'error');
+    })
+    .scanAllRecentReplies(rcState.days, _userTeam);
 }
 </script>

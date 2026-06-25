@@ -1,375 +1,286 @@
-<script>
-/* ═══════════════════════════════════════════════════════════════════════════
-   NX_SNAPSHOT — Frontend data layer (V3.1, Phase 4)
-   IndexedDB-backed instant hydrate + background refresh.
-   Reads only — writes still go through the existing live path until Phase 5.
+<style>
+  :root{--bg:#f5f5f3;--surface:#ffffff;--border:#e2e2de;--border-2:#c8c8c4;--ink:#0d0d0c;--ink-2:#2e2e2c;--ink-3:#888884;--ink-4:#b4b4b0;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--ink);font-family:'Barlow',sans-serif;font-weight:300;-webkit-font-smoothing:antialiased;overflow:hidden;height:100vh;}
+  body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='400' height='400' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:0.7;}
+  #app{position:relative;z-index:1;height:100vh;display:flex;}
+  .sidebar{width:220px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:22px 14px 16px;height:100vh;overflow-y:auto;position:relative;z-index:20;}
+  .logo-wordmark{font-family:'Barlow',sans-serif;font-weight:700;font-size:38px;letter-spacing:-0.04em;color:#000;line-height:1;display:flex;align-items:center;text-transform:uppercase;margin-bottom:4px;padding:0 4px;}
+  .logo-wordmark .dot{color:#a0a0a0;font-weight:400;margin:0 0.06em;font-size:0.75em;line-height:0;user-select:none;}
+  .nav-section-label{font-size:9px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-4);padding:0 8px;margin-bottom:5px;margin-top:18px;}
+  .nav-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-size:13px;font-weight:400;color:var(--ink-3);cursor:pointer;transition:background 0.15s,color 0.15s;margin-bottom:2px;}
+  .nav-item:hover{background:var(--bg);color:var(--ink);}
+  .nav-item.active{background:var(--ink);color:#fff;font-weight:500;}
+  .nav-item-ext{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-size:13px;font-weight:400;color:var(--ink-3);cursor:pointer;transition:background 0.15s,color 0.15s;margin-bottom:2px;text-decoration:none;}
+  .nav-item-ext:hover{background:var(--bg);color:var(--ink);}
+  .ctx-select{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:6px 24px 6px 8px;font-size:10px;font-family:'Barlow',sans-serif;font-weight:600;color:var(--ink);outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 fill=%22none%22%3E%3Cpath d=%22M1 1l4 4 4-4%22 stroke=%22%23b4b4b0%22 stroke-width=%221.5%22 stroke-linecap=%22round%22/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 8px center;}
+  .sidebar-footer{margin-top:auto;padding:12px 8px 0;border-top:1px solid var(--border);}
+  .main-area{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
+  .topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;height:54px;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;}
+  .topbar-title{font-size:14px;font-weight:700;letter-spacing:-0.01em;}
+  .content{flex:1;overflow-y:auto;padding:20px 24px;}
+  ::-webkit-scrollbar{width:5px;height:5px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  ::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:3px;}
+  .kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}
+  .kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;}
+  .kpi-label{font-size:9px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px;}
+  .kpi-value{font-size:22px;font-weight:700;letter-spacing:-0.03em;line-height:1;}
+  .kpi-sub{font-size:11px;color:var(--ink-3);margin-top:3px;}
+  .section-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:8px;}
+  .section-label{font-size:9px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+  .section-label::after{content:'';flex:1;height:1px;background:var(--border);}
+  .nx-table{width:100%;border-collapse:collapse;font-size:11.5px;}
+  .nx-table th{text-align:left;font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-2);padding:10px 12px 8px;border-bottom:2px solid var(--ink);position:sticky;top:0;background:#e8e8e5;z-index:2;cursor:pointer;white-space:nowrap;}
+  .nx-table th:hover{color:var(--ink-3);}
+  .nx-table td{padding:3px 12px;border-bottom:1px solid var(--border);color:var(--ink-2);}
+  .nx-table tr:last-child td{border-bottom:none;}
+  .nx-table tbody tr:hover td{background:var(--bg);cursor:pointer;}
+  .nx-table tbody tr.overdue td{background:#fff5f5;}
+  .pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:99px;font-size:9px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;}
+  .pill-stable{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;}
+  .pill-attention{background:#fffbeb;color:#b45309;border:1px solid #fde68a;}
+  .pill-onboard{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;}
+  .pill-issue{background:#fff1f2;color:#be123c;border:1px solid #fecdd3;}
+  .pill-inactive2{background:#f8fafc;color:var(--ink-4);border:1px solid var(--border);}
+  .tag-chip{display:inline-block;background:var(--bg);border:1px solid var(--border);padding:2px 7px;border-radius:6px;font-size:9px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-3);margin:1px;}
+  .filter-bar{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:6px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap;}
+  .nx-select{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:11.5px;font-family:'Barlow',sans-serif;color:var(--ink);outline:none;cursor:pointer;}
+  .nx-select:focus{border-color:var(--ink);}
+  .nx-input{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:11.5px;font-family:'Barlow',sans-serif;color:var(--ink);outline:none;width:200px;}
+  .nx-input:focus{border-color:var(--ink);}
+  /* V3.7.1 — native select styled to match nx-input; used by cockpit breakdown picker */
+  .nx-select{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:11.5px;font-family:'Barlow',sans-serif;color:var(--ink);outline:none;cursor:pointer;font-weight:600;}
+  .nx-select:focus{border-color:var(--ink);}
+  .filter-tag-btn{background:var(--bg);border:1px solid var(--border);border-radius:99px;padding:3px 10px;font-size:9px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4);cursor:pointer;transition:all 0.15s;white-space:nowrap;}
+  .filter-tag-btn:hover,.filter-tag-btn.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+  /* V3.7 — dim popover options under the cockpit "By ▾" pill */
+  .ck-dim-opt{display:block;width:100%;text-align:left;background:transparent;border:0;border-radius:5px;padding:6px 10px;font-size:11px;font-weight:600;color:var(--ink-2);cursor:pointer;font-family:'Barlow',sans-serif;letter-spacing:0.02em;transition:background 0.12s,color 0.12s;}
+  .ck-dim-opt:hover{background:var(--bg);color:var(--ink);}
+  .ck-dim-opt.active{background:var(--ink);color:#fff;}
+  #detailOverlay{position:fixed;inset:0;z-index:40;background:rgba(13,13,12,0.5);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;}
+  #detailDrawer{position:fixed;top:0;right:0;height:100%;width:100%;max-width:1200px;background:var(--surface);z-index:50;display:flex;flex-direction:column;border-left:1px solid var(--border);box-shadow:-20px 0 60px -10px rgba(13,13,12,0.2);transform:translateX(100%);transition:transform 0.3s cubic-bezier(0.16,1,0.3,1);}
+  #detailDrawer.open{transform:translateX(0);}
+  .drawer-header{padding:10px 22px 0;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
+  .drawer-tabs{display:flex;gap:0;padding:0 2px;}
+  .drawer-tab{padding:7px 12px;font-size:12px;font-weight:600;color:var(--ink-3);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:color 0.15s,border-color 0.15s;font-family:'Barlow',sans-serif;}
+  .drawer-tab.active{color:var(--ink);border-bottom-color:var(--ink);}
+  .ribbon-label{font-size:9px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:3px;}
+  .modal-overlay{position:fixed;inset:0;z-index:60;background:rgba(13,13,12,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:20px;}
+  .modal-box{background:var(--bg);border:1px solid var(--border-2);border-radius:20px;width:100%;max-width:500px;box-shadow:0 40px 80px -20px rgba(13,13,12,0.4);overflow:hidden;}
+  .modal-header{padding:16px 20px;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:space-between;}
+  .modal-body{padding:20px;overflow-y:auto;max-height:calc(100vh - 200px);}
+  .modal-footer{padding:14px 20px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface);}
+  .nx-field-label{font-size:9px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:5px;display:block;}
+  .nx-field-input{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font-size:12.5px;font-family:'Barlow',sans-serif;color:var(--ink);outline:none;transition:border-color 0.15s;}
+  .nx-field-input:focus{border-color:var(--ink);}
+  .btn-primary{background:var(--ink);color:#fff;border:none;padding:8px 18px;border-radius:10px;font-size:12px;font-weight:600;font-family:'Barlow',sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:opacity 0.15s;}
+  .btn-primary:hover{opacity:0.85;}
+  .btn-primary:disabled{opacity:0.4;cursor:not-allowed;}
+  .btn-ghost{background:var(--surface);color:var(--ink-2);border:1px solid var(--border);padding:8px 16px;border-radius:10px;font-size:12px;font-weight:500;font-family:'Barlow',sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:background 0.15s;}
+  .btn-ghost:hover{background:var(--bg);}
+  .icon-btn{width:32px;height:32px;border-radius:8px;background:var(--bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink-3);transition:all 0.15s;}
+  .icon-btn:hover{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .cal-day{flex:1;min-width:0;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 12px;display:flex;flex-direction:column;}
+  .cal-day.today{border-color:var(--ink);}
+  .cal-event{padding:6px 8px;border-radius:7px;margin-bottom:5px;font-size:10px;font-weight:600;border-left:2px solid;cursor:pointer;transition:opacity 0.12s;}
+  .cal-event:hover{opacity:0.75;}
+  .cal-event-detail{position:fixed;z-index:80;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 32px -6px rgba(13,13,12,0.2);padding:14px 16px;width:280px;display:none;}
+  .cal-event-gcal{background:var(--bg);border-color:var(--border-2);color:var(--ink-2);}
+  .cal-event-crm{background:#fff5f5;border-color:#fca5a5;color:#b91c1c;}
+  .cal-event-int{background:#faf5ff;border-color:#c4b5fd;color:#7c3aed;}
+  .email-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;cursor:pointer;transition:border-color 0.15s;margin-bottom:6px;}
+  .email-card:hover{border-color:var(--ink);}
+  .recip-compact{display:grid;grid-template-columns:20px 1fr 1fr;align-items:center;gap:8px;padding:3px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.1s;min-width:0;}
+  .recip-compact:hover{background:var(--bg);}
+  .recip-compact:last-child{border-bottom:none;}
+  .recip-compact input[type=checkbox]{accent-color:var(--ink);width:13px;height:13px;cursor:pointer;}
+  .send-progress-bar{height:3px;background:var(--border);border-radius:99px;overflow:hidden;margin-top:8px;}
+  .send-progress-fill{height:100%;background:var(--ink);border-radius:99px;transition:width 0.3s ease;}
+  .perf-tab{background:transparent;color:var(--ink-3);border:none;cursor:pointer;font-family:'Barlow',sans-serif;transition:all 0.15s;}
+  .perf-tab.active{background:var(--ink);color:#fff;}
+  .perf-tab:hover:not(.active){background:var(--bg);color:var(--ink);}
+  .sparkbar{display:inline-flex;align-items:flex-end;gap:1px;height:24px;vertical-align:middle;}
+  .sparkbar-bar{width:4px;border-radius:1px 1px 0 0;}
+  .btn-approve{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:5px 12px;border-radius:8px;font-size:10px;font-weight:700;font-family:'Barlow',sans-serif;cursor:pointer;transition:all 0.15s;}
+  .btn-approve:hover{background:#15803d;color:#fff;}
+  .btn-reject{background:#fff1f2;color:#be123c;border:1px solid #fecdd3;padding:5px 12px;border-radius:8px;font-size:10px;font-weight:700;font-family:'Barlow',sans-serif;cursor:pointer;transition:all 0.15s;}
+  .btn-reject:hover{background:#be123c;color:#fff;}
+  .mpro-card{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px 18px;cursor:pointer;transition:all 0.15s;display:flex;flex-direction:column;gap:10px;}
+  .mpro-card:hover{border-color:var(--ink);box-shadow:0 4px 16px -4px rgba(13,13,12,0.1);}
+  .mpro-card.selected{border-color:var(--ink);background:var(--ink);color:#fff;}
+  #toastContainer{position:fixed;bottom:20px;right:20px;z-index:999;display:flex;flex-direction:column;gap:8px;pointer-events:none;}
+  .toast{pointer-events:auto;display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:12px;font-size:12.5px;font-weight:600;font-family:'Barlow',sans-serif;box-shadow:0 8px 24px -4px rgba(13,13,12,0.25);animation:slideUp 0.25s cubic-bezier(0.16,1,0.3,1);}
+  .toast-success{background:var(--ink);color:#fff;}
+  .toast-error{background:#ef4444;color:#fff;}
+  #loadingOverlay{position:fixed;inset:0;background:var(--bg);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;}
+  .sync-dot{width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block;}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+  .pulse{animation:pulse 2.2s ease infinite;}
+  @keyframes slideUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{animation:spin 1s linear infinite;}
+  [contenteditable=true]:empty:before{content:attr(data-placeholder);color:var(--ink-4);font-style:italic;pointer-events:none;}
+  .ck-insight-slot{background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 12px 12px;padding:8px 14px 6px;margin-bottom:8px;min-height:68px;}
+  /* V7: Gmail body containment + typography normalization */
+  .gmail-body-sandbox{font-family:'Barlow',Arial,Helvetica,sans-serif !important;font-size:13px !important;line-height:1.65 !important;color:var(--ink-2) !important;overflow-x:auto;overflow-y:visible;overflow-wrap:break-word;word-break:break-word;max-width:100%;min-width:0;}
+  .gmail-body-sandbox *{font-family:inherit !important;font-size:inherit !important;line-height:inherit !important;max-width:100% !important;box-sizing:border-box !important;}
+  .gmail-body-sandbox b,.gmail-body-sandbox strong{font-weight:700 !important;}
+  .gmail-body-sandbox i,.gmail-body-sandbox em{font-style:italic !important;}
+  .gmail-body-sandbox u{text-decoration:underline !important;}
+  .gmail-body-sandbox h1,.gmail-body-sandbox h2,.gmail-body-sandbox h3,.gmail-body-sandbox h4,.gmail-body-sandbox h5,.gmail-body-sandbox h6{font-family:inherit !important;font-size:inherit !important;font-weight:700 !important;margin:6px 0 4px;line-height:1.4 !important;}
+  .gmail-body-sandbox p{margin:0 0 4px;}
+  .gmail-body-sandbox a{color:#1d4ed8 !important;text-decoration:underline;}
+  .gmail-body-sandbox table{table-layout:fixed !important;width:100% !important;max-width:100% !important;border-collapse:collapse;margin:6px 0;}
+  .gmail-body-sandbox td,.gmail-body-sandbox th{word-break:break-word;overflow-wrap:break-word;padding:4px 8px;font-size:inherit !important;vertical-align:top;}
+  .gmail-body-sandbox img{max-width:100% !important;height:auto !important;}
+  .gmail-body-sandbox pre,.gmail-body-sandbox code{white-space:pre-wrap;overflow-x:auto;font-family:'Courier New',monospace !important;font-size:12px !important;background:var(--bg);padding:2px 4px;border-radius:3px;}
+  .gmail-body-sandbox blockquote{border-left:2px solid var(--border);margin:6px 0;padding:2px 12px;color:var(--ink-3) !important;}
+  .gmail-body-sandbox ul,.gmail-body-sandbox ol{padding-left:20px;margin:4px 0;}
+  .gmail-body-sandbox li{margin-bottom:2px;}
+  .gmail-body-sandbox hr{border:none;border-top:1px solid var(--border);margin:8px 0;}
+  /* Email template card grid */
+  .email-tpl-card{display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:8px;cursor:pointer;background:var(--surface);border:1px solid var(--border);transition:all 0.15s;min-width:0;max-width:140px;}
+  .email-tpl-card:hover{border-color:var(--ink-3);background:var(--surface);}
+  .email-tpl-card.active{background:var(--ink);border-color:var(--ink);color:#fff;}
+  .email-tpl-card.active i{color:#fff !important;}
+  .email-tpl-card.active span{color:#fff !important;}
+  /* V8: Email sub-tab bar — prominent primary selector */
+  .email-subtab-bar{background:var(--surface);border:none;border-radius:0;padding:0 12px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;border-bottom:1px solid var(--border);}
+  .email-subtab-bar .drawer-tab{padding:10px 14px;font-size:12.5px;font-weight:700;letter-spacing:0.02em;}
+  .email-subtab-bar .drawer-tab.active{color:var(--ink);border-bottom:3px solid var(--ink);}
 
-   Boot contract:
-     NX_SNAPSHOT.boot(team, onData)
-        onData(data, meta)  — may be called 1–2 times:
-          1st call: from IDB (source: 'idb')     OR from remote (source: 'remote')
-                    OR with null data (source: 'error') — caller must fall back.
-          2nd call: from remote after IDB hydrate (source: 'remote-refresh')
-                    — only if the server snapshot is newer than the IDB copy.
+  /* ── Drawer V2: Panel animations ── */
+  .drawer-panel{opacity:0;transform:translateY(6px);transition:opacity 0.22s ease,transform 0.22s ease;}
+  .drawer-panel.panel-enter{opacity:1;transform:translateY(0);}
+  .kpi-card-v2{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;box-shadow:0 1px 3px rgba(13,13,12,0.04);transition:box-shadow 0.2s ease,transform 0.2s ease;}
+  .kpi-card-v2:hover{box-shadow:0 4px 14px rgba(13,13,12,0.08);transform:translateY(-1px);}
+  .snapshot-module{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:0 1px 3px rgba(13,13,12,0.03);}
+  .module-label{font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);}
+  .contact-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px 16px;transition:box-shadow 0.15s,border-color 0.15s;margin-bottom:8px;}
+  .contact-card:hover{box-shadow:0 2px 8px rgba(13,13,12,0.06);border-color:var(--border-2);}
+  .contact-avatar{width:36px;height:36px;border-radius:50%;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0;}
+  .tl-container{position:relative;padding-left:0;}
+  .tl-line{position:absolute;left:19px;top:0;bottom:0;width:2px;background:linear-gradient(to bottom,var(--border),var(--border) 80%,transparent);border-radius:1px;}
+  .tl-entry{position:relative;padding-left:48px;margin-bottom:4px;}
+  .tl-dot{position:absolute;left:11px;top:12px;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;z-index:1;border:2px solid var(--bg);}
+  .tl-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px;transition:box-shadow 0.15s,border-color 0.15s;}
+  .tl-card:hover{box-shadow:0 2px 8px rgba(13,13,12,0.05);border-color:var(--border-2);}
+  .tl-badge{font-size:8px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;padding:2px 8px;border-radius:99px;}
+  .thread-item{padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.12s,border-left-color 0.15s;border-left:3px solid transparent;}
+  .thread-item:hover{background:var(--bg);}
+  .thread-item.active{background:var(--bg);border-left-color:var(--ink);}
+  .compose-container{flex:1;max-width:960px;margin:0 auto;background:var(--surface);border-radius:18px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px -12px rgba(13,13,12,0.35);}
+  .compose-field{flex:1;border:none;background:transparent;outline:none;font-family:'Barlow',sans-serif;font-size:13px;color:var(--ink);padding:4px 0;border-bottom:1px solid var(--border);transition:border-color 0.15s;}
+  .compose-field:focus{border-bottom-color:var(--ink);}
+  .compose-editor{min-height:120px;max-height:260px;overflow-y:auto;padding:12px 22px;font-family:Arial,sans-serif;font-size:13px;line-height:1.6;color:var(--ink);outline:none;border-top:1px solid var(--border);}
+  .compose-editor:empty::before{content:attr(data-placeholder);color:var(--ink-4);pointer-events:none;}
+  .drawer-new-email-btn{background:var(--ink) !important;color:#fff !important;border-color:var(--ink) !important;}
+  .drawer-new-email-btn:hover{opacity:0.85;}
+  .drawer-ribbon{background:var(--bg);padding:8px 22px;display:flex;gap:32px;flex-shrink:0;border-bottom:1px solid var(--border);}
+  .ribbon-label{font-size:8px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:2px;}
 
-   Feature flag:
-     NX_SNAPSHOT.isEnabled(email, team)  — true only when:
-       • team is in ENABLED_TEAMS
-       • session has not already stuck-fallen-back to live
-       • if ALLOWLIST is populated, email is in it (optional rollout gate)
-═══════════════════════════════════════════════════════════════════════════ */
-
-var NX_SNAPSHOT = {
-
-  // ── Rollout config ───────────────────────────────────────────────────────
-  // ALLOWLIST is an OPTIONAL rollout gate.
-  //   • Empty array (default) = any user whose team is in ENABLED_TEAMS is
-  //     allowed. GAS auth + Permissions sheet already gate who can reach the
-  //     app at all, so this check is only useful as an extra restriction.
-  //   • Populated = restrict the snapshot path to just those emails (useful
-  //     during a new hub rollout, then empty again once stable).
-  // Entries must be lowercase.
-  ALLOWLIST: [],
-
-  // Teams with a server-side snapshot configured.
-  // V3.8: extended from Carlos-only to all AM teams. Each entry requires a
-  // SNAPSHOT_FILE_IDS row in NX_Config + a time trigger in AM's Code.gs.
-  // A team here without those two prerequisites will fail soft (session
-  // falls back to live fetch) — verify all three are in place before adding.
-  ENABLED_TEAMS: ['Carlos', 'Daniel', 'Tanya', 'Meghan'],
-
-  // ── IndexedDB config ─────────────────────────────────────────────────────
-  DB_NAME: 'nexus_am',
-  DB_VERSION: 1,
-  STORE_SNAPSHOTS: 'snapshots',
-  STORE_PATCHES:   'pending_patches',   // Phase 5 — plumbing only, not yet used
-
-  // ── Freshness thresholds (ms) ────────────────────────────────────────────
-  STALE_AMBER_MS:    5 * 60 * 1000,   // green <5m, amber 5–15m
-  STALE_RED_MS:     15 * 60 * 1000,   // red >15m
-  STALE_FALLBACK_MS: 30 * 60 * 1000,  // >30m → session auto-falls back to live
-
-  // ── Internal state ───────────────────────────────────────────────────────
-  _db: null,
-  _currentTeam: '',
-  _lastGeneratedAt: null,
-  _fellBackToLive: false,
-  _pillTickHandle: null,
-  _refreshInFlight: false,
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // Public API
-  // ══════════════════════════════════════════════════════════════════════════
-
-  /** Feature-flag check. Safe to call with empty values.
-   *  V3.2 — ALLOWLIST is optional: empty means allow anyone on an enabled team.
-   */
-  isEnabled: function(email, team) {
-    if (this._fellBackToLive) return false;
-    if (!email || !team) return false;
-    if (this.ENABLED_TEAMS.indexOf(team) === -1) return false;
-    // When populated, ALLOWLIST further restricts to specific emails.
-    if (this.ALLOWLIST.length &&
-        this.ALLOWLIST.indexOf(String(email).toLowerCase()) === -1) return false;
-    return true;
-  },
-
-  /**
-   * Boot entry. Hydrates from IDB immediately (if present), then background-
-   * refreshes from remote. Calls onData up to twice.
-   *
-   * If IDB is empty and remote fails, calls onData(null, {source:'error', error})
-   * exactly once — caller must fall back to live getUnifiedPartnerData.
-   */
-  boot: function(team, onData) {
-    var self = this;
-    self._currentTeam = team;
-    self._fellBackToLive = false;
-
-    self._readLocal(team, function(err, local) {
-      var hadLocal = false;
-      if (!err && local && local.data && local.generatedAt) {
-        // Check stale-fallback threshold before hydrating
-        var ageMs = Date.now() - new Date(local.generatedAt).getTime();
-        if (ageMs > self.STALE_FALLBACK_MS) {
-          console.warn('[snapshot] local is stale (' + Math.round(ageMs/60000) + 'min), skipping hydrate');
-        } else {
-          hadLocal = true;
-          self._lastGeneratedAt = local.generatedAt;
-          onData(local.data, { source: 'idb', generatedAt: local.generatedAt, ageMs: ageMs });
-          self._startPillTicker();
-        }
-      }
-
-      // Always try remote
-      self._fetchRemote(function(fetchErr, fresh) {
-        if (fetchErr) {
-          if (!hadLocal) {
-            onData(null, { source: 'error', error: (fetchErr && fetchErr.message) || String(fetchErr) });
-          } else {
-            console.warn('[snapshot] remote fetch failed, continuing on local:', fetchErr);
-            self._updatePill();  // reflect that we couldn't confirm freshness
-          }
-          return;
-        }
-
-        // Remote ok — check stale-fallback again (trigger could be dead)
-        var remoteAge = Date.now() - new Date(fresh.generatedAt).getTime();
-        if (remoteAge > self.STALE_FALLBACK_MS) {
-          console.warn('[snapshot] remote is stale (' + Math.round(remoteAge/60000) + 'min), falling back to live');
-          self._fellBackToLive = true;
-          if (!hadLocal) {
-            onData(null, { source: 'error', error: 'Snapshot stale by ' + Math.round(remoteAge/60000) + ' min' });
-          }
-          self._updatePill();
-          return;
-        }
-
-        self._lastGeneratedAt = fresh.generatedAt;
-        self._writeLocal(team, fresh.data, fresh.generatedAt);
-
-        if (!hadLocal) {
-          // First render, came from remote
-          onData(fresh.data, { source: 'remote', generatedAt: fresh.generatedAt });
-          self._startPillTicker();
-        } else if (!local || !local.generatedAt ||
-                   new Date(fresh.generatedAt) > new Date(local.generatedAt)) {
-          // Remote is newer than IDB — re-render with fresh data
-          onData(fresh.data, { source: 'remote-refresh', generatedAt: fresh.generatedAt });
-        }
-        self._updatePill();
-      });
-    });
-  },
-
-  /**
-   * Manual refresh handler (pill "refresh now" button).
-   * Re-reads the snapshot file and re-hydrates. Does NOT force a server-side
-   * regeneration — that only happens on the 5-min trigger.
-   */
-  manualRefresh: function(onRefreshed) {
-    var self = this;
-    onRefreshed = onRefreshed || function(){};
-    if (self._refreshInFlight) return;
-    self._refreshInFlight = true;
-    self._setPillRefreshing(true);
-
-    self._fetchRemote(function(err, fresh) {
-      self._refreshInFlight = false;
-      self._setPillRefreshing(false);
-      if (err) {
-        onRefreshed(err, null);
-        self._toast('Refresh failed: ' + ((err && err.message) || err), 'error');
-        return;
-      }
-      self._lastGeneratedAt = fresh.generatedAt;
-      self._writeLocal(self._currentTeam, fresh.data, fresh.generatedAt);
-      onRefreshed(null, fresh);
-      self._updatePill();
-    });
-  },
-
-  /**
-   * Optimistic local-state patch persistence (Phase 5 plumbing).
-   * Stored here so the queue survives reloads. Not wired to any writer yet.
-   */
-  queuePatch: function(patch, cb) {
-    cb = cb || function(){};
-    var self = this;
-    self._openDB(function(err, db) {
-      if (err) return cb(err);
-      try {
-        var tx = db.transaction(self.STORE_PATCHES, 'readwrite');
-        tx.objectStore(self.STORE_PATCHES).add(patch);
-        tx.oncomplete = function() { cb(null); };
-        tx.onerror    = function() { cb(tx.error); };
-      } catch (e) { cb(e); }
-    });
-  },
-  listPendingPatches: function(cb) {
-    var self = this;
-    self._openDB(function(err, db) {
-      if (err) return cb(err, []);
-      try {
-        var tx = db.transaction(self.STORE_PATCHES, 'readonly');
-        var req = tx.objectStore(self.STORE_PATCHES).getAll();
-        req.onsuccess = function() { cb(null, req.result || []); };
-        req.onerror   = function() { cb(req.error, []); };
-      } catch (e) { cb(e, []); }
-    });
-  },
-  clearPatch: function(id, cb) {
-    cb = cb || function(){};
-    var self = this;
-    self._openDB(function(err, db) {
-      if (err) return cb(err);
-      try {
-        var tx = db.transaction(self.STORE_PATCHES, 'readwrite');
-        tx.objectStore(self.STORE_PATCHES)['delete'](id);
-        tx.oncomplete = function() { cb(null); };
-        tx.onerror    = function() { cb(tx.error); };
-      } catch (e) { cb(e); }
-    });
-  },
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // IndexedDB helpers
-  // ══════════════════════════════════════════════════════════════════════════
-
-  _openDB: function(cb) {
-    var self = this;
-    if (self._db) return cb(null, self._db);
-    try {
-      var req = indexedDB.open(self.DB_NAME, self.DB_VERSION);
-      req.onupgradeneeded = function(e) {
-        var db = e.target.result;
-        if (!db.objectStoreNames.contains(self.STORE_SNAPSHOTS)) {
-          db.createObjectStore(self.STORE_SNAPSHOTS, { keyPath: 'key' });
-        }
-        if (!db.objectStoreNames.contains(self.STORE_PATCHES)) {
-          db.createObjectStore(self.STORE_PATCHES, { keyPath: 'id', autoIncrement: true });
-        }
-      };
-      req.onsuccess = function(e) { self._db = e.target.result; cb(null, self._db); };
-      req.onerror   = function()  { cb(req.error || new Error('IDB open failed'), null); };
-    } catch (e) { cb(e, null); }
-  },
-
-  _readLocal: function(team, cb) {
-    var self = this;
-    self._openDB(function(err, db) {
-      if (err) return cb(err, null);
-      try {
-        var tx = db.transaction(self.STORE_SNAPSHOTS, 'readonly');
-        var req = tx.objectStore(self.STORE_SNAPSHOTS).get('am_' + team);
-        req.onsuccess = function() { cb(null, req.result || null); };
-        req.onerror   = function() { cb(req.error, null); };
-      } catch (e) { cb(e, null); }
-    });
-  },
-
-  _writeLocal: function(team, data, generatedAt, cb) {
-    cb = cb || function(){};
-    var self = this;
-    self._openDB(function(err, db) {
-      if (err) return cb(err);
-      try {
-        var tx = db.transaction(self.STORE_SNAPSHOTS, 'readwrite');
-        tx.objectStore(self.STORE_SNAPSHOTS).put({
-          key: 'am_' + team,
-          data: data,
-          generatedAt: generatedAt,
-          storedAt: new Date().toISOString()
-        });
-        tx.oncomplete = function() { cb(null); };
-        tx.onerror    = function() { cb(tx.error); };
-      } catch (e) { cb(e); }
-    });
-  },
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // Remote fetch (Option B — via google.script.run)
-  // ══════════════════════════════════════════════════════════════════════════
-
-  _fetchRemote: function(cb) {
-    if (typeof google === 'undefined' || !google.script || !google.script.run) {
-      return cb(new Error('GAS unavailable'), null);
-    }
-    // V3.2 — prefer getSnapshotRawAM: server returns the raw JSON string;
-    // we parse on the client. Skips one object traversal on the wire.
-    // V3.8 — pass team argument so each team routes to its own snapshot file.
-    var self = this;
-    google.script.run
-      .withSuccessHandler(function(raw) {
-        if (typeof raw !== 'string' || !raw.length) {
-          return cb(new Error('Invalid snapshot payload (empty or non-string)'), null);
-        }
-        try {
-          var payload = JSON.parse(raw);
-          if (!payload || !payload.data || !payload.generatedAt) {
-            return cb(new Error('Invalid snapshot structure'), null);
-          }
-          cb(null, payload);
-        } catch (parseErr) {
-          cb(new Error('Snapshot JSON parse failed: ' + parseErr.message), null);
-        }
-      })
-      .withFailureHandler(function(e) { cb(e, null); })
-      .getSnapshotRawAM(self._currentTeam);
-  },
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // Freshness pill UI
-  // ══════════════════════════════════════════════════════════════════════════
-
-  _startPillTicker: function() {
-    var self = this;
-    if (self._pillTickHandle) clearInterval(self._pillTickHandle);
-    self._updatePill();
-    self._pillTickHandle = setInterval(function() { self._updatePill(); }, 30000);
-  },
-
-  _updatePill: function() {
-    var pill = document.getElementById('snapshotPill');
-    if (!pill) return;
-
-    // Show the pill as soon as there's anything to report (including errors)
-    pill.style.display = 'flex';
-
-    if (!this._lastGeneratedAt) {
-      pill.setAttribute('data-state', 'unknown');
-      var tEl0 = pill.querySelector('[data-pill-text]');
-      if (tEl0) tEl0.textContent = 'No snapshot';
-      return;
-    }
-
-    var ageMs = Date.now() - new Date(this._lastGeneratedAt).getTime();
-    var state = ageMs < this.STALE_AMBER_MS ? 'fresh'
-              : ageMs < this.STALE_RED_MS   ? 'amber'
-              : ageMs < this.STALE_FALLBACK_MS ? 'red'
-              : 'stale';
-    pill.setAttribute('data-state', state);
-
-    var tEl = pill.querySelector('[data-pill-text]');
-    if (tEl) tEl.textContent = 'Updated ' + this._formatAge(ageMs);
-  },
-
-  _setPillRefreshing: function(on) {
-    var pill = document.getElementById('snapshotPill');
-    if (!pill) return;
-    if (on) pill.setAttribute('data-refreshing', '1');
-    else pill.removeAttribute('data-refreshing');
-  },
-
-  _formatAge: function(ms) {
-    var s = Math.round(ms / 1000);
-    if (s < 60) return 'just now';
-    var m = Math.round(s / 60);
-    if (m < 60) return m + ' min ago';
-    var h = Math.floor(m / 60);
-    var rem = m % 60;
-    return h + 'h' + (rem ? ' ' + rem + 'm' : '') + ' ago';
-  },
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // Misc
-  // ══════════════════════════════════════════════════════════════════════════
-
-  _toast: function(msg, kind) {
-    // Piggyback on nx_core's toast if present; otherwise console fallback.
-    if (typeof showToast === 'function') { showToast(msg, kind || 'info'); return; }
-    console.log('[snapshot] ' + (kind || 'info') + ': ' + msg);
+  /* ══════════════════════════════════════════════════════════════════════
+     NEXUS v2 — cosmetic skin  (purely visual; STRICT existing palette: warm
+     off-white / white / near-black ink + the existing status-pill colors only.
+     Bolder & system-wide, but perf-minded: no backdrop blur, minimal shadows,
+     signature accents via single cheap pseudo-elements; hover only where
+     clickable. Self-contained override layer — delete this block to revert.
+     ══════════════════════════════════════════════════════════════════════ */
+  :root{
+    --bg:#f4f4f1;--surface:#ffffff;--surface-2:#fafaf8;
+    --border:#e6e6e1;--border-2:#d3d3cd;
+    --ink:#0b0b0a;--ink-2:#2c2c29;--ink-3:#84847d;--ink-4:#b7b7b0;
+    --ink-grad:linear-gradient(157deg,#1c1c1a,#0b0b0a);
+    --r-sm:10px;--r:14px;--r-lg:16px;
+    --sh-1:0 1px 2px rgba(13,13,12,.05);
+    --sh-2:0 6px 18px -8px rgba(13,13,12,.18);
+    --sh-3:0 24px 50px -16px rgba(13,13,12,.28);
+    --ease:cubic-bezier(.16,1,.3,1);
   }
-};
+  body{font-weight:300;letter-spacing:.004em;
+    background:radial-gradient(1100px 560px at 100% -12%,rgba(13,13,12,.035),transparent 58%),var(--bg);}
+  .kpi-value,.topbar-title,.nx-table td,.nx-table th{font-feature-settings:"tnum" 1;}
 
-/* Global handler for the pill's refresh button (called from nexus.html onclick). */
-function snapshotManualRefresh() {
-  NX_SNAPSHOT.manualRefresh(function(err, fresh) {
-    if (err || !fresh) return;
-    // V3.2 — prefer refreshUnifiedData (data-only; doesn't re-fire initEmailView
-    // or loadAllContacts). Falls back to handleUnifiedData for pre-4.5 builds.
-    if (typeof refreshUnifiedData === 'function') refreshUnifiedData(fresh.data);
-    else if (typeof handleUnifiedData === 'function') handleUnifiedData(fresh.data);
-  });
-}
-</script>
+  /* ── modern logo lockup (kept) ──────────────────────────────────────── */
+  .logo-wordmark{display:flex;align-items:center;gap:11px;margin:0 0 14px;padding:2px 4px 0;
+    letter-spacing:normal;font-size:inherit;text-transform:none;}
+  .logo-mark{width:34px;height:34px;border-radius:10px;background:var(--ink-grad);flex-shrink:0;
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:var(--sh-2),inset 0 1px 0 rgba(255,255,255,.16);}
+  .logo-mark svg{width:18px;height:18px;display:block;}
+  .logo-text{display:flex;flex-direction:column;line-height:1;}
+  .logo-name{font-weight:800;font-size:21px;letter-spacing:-.03em;color:var(--ink);text-transform:uppercase;}
+  .logo-sub{display:flex;align-items:center;gap:5px;font-size:8px;font-weight:700;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--ink-4);margin-top:4px;}
+  .logo-sub i{font-style:normal;color:#fff;background:var(--ink);border-radius:4px;padding:1px 4px;
+    letter-spacing:.04em;font-size:7.5px;}
+
+  /* ── SIGNATURE: ink tick on every panel header (shows up system-wide) ── */
+  .section-label::before,.module-label::before{content:"";width:7px;height:7px;border-radius:2px;
+    background:var(--ink);flex:none;}
+  .section-label{color:var(--ink-2);font-weight:700;}
+  .module-label{display:inline-flex;align-items:center;gap:7px;color:var(--ink-2);}
+
+  /* ── KPI cards: left ink accent rail + bigger numerals ──────────────── */
+  .kpi-card,.kpi-card-v2{position:relative;border-radius:var(--r-sm);box-shadow:var(--sh-1);padding-left:18px;}
+  .kpi-card::before,.kpi-card-v2::before{content:"";position:absolute;left:0;top:12px;bottom:12px;
+    width:4px;border-radius:0 3px 3px 0;background:var(--ink);}
+  .kpi-value{font-size:25px;font-weight:800;letter-spacing:-.04em;}
+  .kpi-label{color:var(--ink-3);}
+
+  /* ── surfaces: crisp & static (containers don't move) ───────────────── */
+  .section-card{border-radius:var(--r-lg);box-shadow:var(--sh-1);}
+  .snapshot-module,.filter-bar,.ck-insight-slot,.cal-day{border-radius:var(--r);box-shadow:var(--sh-1);}
+  /* clickable cards get hover feedback (cheap: shadow + border only) */
+  .contact-card,.email-card,.mpro-card,.tl-card{border-radius:var(--r);box-shadow:var(--sh-1);
+    transition:box-shadow .2s var(--ease),border-color .15s var(--ease);}
+  .contact-card:hover,.email-card:hover,.tl-card:hover{box-shadow:var(--sh-2);border-color:var(--border-2);}
+
+  /* ── sidebar / nav: bolder, crisper ─────────────────────────────────── */
+  .sidebar{background:linear-gradient(184deg,var(--surface),var(--surface-2));}
+  .nav-section-label{color:var(--ink-3);font-weight:700;}
+  .nav-item,.nav-item-ext{border-radius:11px;font-weight:500;
+    transition:background .16s var(--ease),color .16s var(--ease),transform .1s var(--ease);}
+  .nav-item:hover:not(.active),.nav-item-ext:hover{background:var(--bg);color:var(--ink);}
+  .nav-item.active{background:var(--ink);color:#fff;font-weight:600;box-shadow:var(--sh-2);}
+  .nav-item:active{transform:scale(.98);}
+  .ctx-select{border-radius:9px;font-weight:700;transition:border-color .15s,box-shadow .15s;}
+
+  /* ── topbar: solid + bold title (no blur = fast) ────────────────────── */
+  .topbar{background:var(--surface);border-bottom:1px solid var(--border);}
+  .topbar-title{font-size:15px;font-weight:800;letter-spacing:-.02em;}
+
+  /* ── tables: bold header + zebra (borders/tints, not shadows) ───────── */
+  .nx-table th{background:#ebebe7;border-bottom:2px solid var(--ink);font-weight:800;
+    padding-top:11px;padding-bottom:9px;}
+  .nx-table tbody tr:nth-child(even) td{background:var(--surface-2);}
+  .nx-table tbody tr:hover td{background:var(--bg);}
+
+  /* ── buttons / icon buttons ─────────────────────────────────────────── */
+  .btn-primary{background:var(--ink-grad);border-radius:10px;font-weight:700;box-shadow:var(--sh-1);
+    transition:transform .14s var(--ease),box-shadow .18s var(--ease),opacity .15s;}
+  .btn-primary:hover{transform:translateY(-1px);box-shadow:var(--sh-2);opacity:1;}
+  .btn-primary:active{transform:translateY(0);}
+  .btn-ghost{border-radius:10px;font-weight:600;transition:background .15s var(--ease),border-color .15s;}
+  .btn-ghost:hover{border-color:var(--border-2);}
+  .icon-btn{border-radius:10px;transition:background .16s var(--ease),color .16s var(--ease),border-color .15s;}
+
+  /* ── inputs: modern focus ring ──────────────────────────────────────── */
+  .nx-input,.nx-select,.nx-field-input{border-radius:9px;}
+  .nx-input:focus,.nx-select:focus,.nx-field-input:focus,.ctx-select:focus{
+    border-color:var(--ink);box-shadow:0 0 0 3px rgba(13,13,12,.08);}
+
+  /* ── pills / tags refined (status colors untouched) ─────────────────── */
+  .pill{font-weight:700;letter-spacing:.05em;}
+  .tag-chip{border-radius:7px;}
+
+  /* ── drawers / modals / compose: single deep shadow (one instance) ──── */
+  #detailDrawer{box-shadow:var(--sh-3);border-radius:var(--r-lg) 0 0 var(--r-lg);}
+  .modal-box{border-radius:20px;box-shadow:var(--sh-3);}
+  .compose-container{border-radius:20px;box-shadow:var(--sh-3);}
+
+  /* ── loading overlay glow ───────────────────────────────────────────── */
+  #loadingOverlay{background:radial-gradient(640px 380px at 50% 38%,rgba(255,255,255,.6),transparent 70%),var(--bg);}
+
+</style>

@@ -1,396 +1,663 @@
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   BID-ASK SUB-VIEW (V2 — adapted from the bid-ask skeleton into NEXUS)
+
+   A partner-prioritisation dashboard: weighted Priority score, alert flags,
+   and Sales / Commercial-Discount / Stock / Performance metric groups, with a
+   configurable Priority-Weights panel and per-row alert-email composers.
+
+   • Style  = NEXUS (Barlow, monochrome chrome + the EXISTING NEXUS semantic
+     pill colors for data heat). All selectors scoped under #view-bidask (chrome)
+     or .ba-ov (modals, appended to body) so nothing leaks into the rest of NEXUS.
+   • Logic  = NEXUS: data via getBidAskData(team) → { headers, rows, empty, … };
+     rows are mapped header→key and every score/alert is computed client-side,
+     exactly like the skeleton. No backend redeploy needed when the sheet schema
+     grows — unknown columns are ignored, missing ones degrade gracefully.
+
+   Data source (placeholder until populated): the per-team prefixed `Bid-Ask`
+   tab in BIDASK_SHEET_ID (Carlos `Bid-Ask`, Daniel `(Dan) Bid-Ask`,
+   Tanya `(Tan) Bid-Ask`). Expected column headers = the keys in BA_HEADER_MAP
+   below (see the steps doc). Percent columns may be stored as fractions (0.25)
+   or whole percents (25) — BA.pctNorm handles both.
+═══════════════════════════════════════════════════════════════════════════ */
+#view-bidask{font-family:'Barlow',sans-serif;}
+#view-bidask .ba-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  background:var(--surface);border-bottom:1px solid var(--border);padding:9px 14px;flex-shrink:0;}
+#view-bidask .ba-toolbar label{font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);}
+#view-bidask .ba-f-input{background:var(--bg);border:1px solid var(--border);border-radius:9px;
+  padding:5px 10px;font:600 11.5px 'Barlow',sans-serif;color:var(--ink);outline:none;width:210px;}
+#view-bidask .ba-f-input:focus{border-color:var(--ink);box-shadow:0 0 0 3px rgba(13,13,12,.08);}
+#view-bidask .ba-f-sel{background:var(--bg);border:1px solid var(--border);border-radius:9px;
+  padding:5px 9px;font:600 11px 'Barlow',sans-serif;color:var(--ink-2);outline:none;cursor:pointer;}
+#view-bidask .ba-f-sel.active-filter{background:var(--ink);color:#fff;border-color:var(--ink);}
+#view-bidask .ba-sep{width:1px;height:20px;background:var(--border);margin:0 2px;}
+#view-bidask .ba-btn{border-radius:9px;padding:5px 11px;font:700 10.5px 'Barlow',sans-serif;
+  letter-spacing:.03em;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .15s;}
+#view-bidask .ba-btn-weights{background:var(--ink);color:#fff;border:1px solid var(--ink);}
+#view-bidask .ba-btn-weights:hover{opacity:.85;}
+#view-bidask .ba-btn-clear{background:var(--surface);color:var(--ink-3);border:1px solid var(--border);}
+#view-bidask .ba-btn-clear:hover{border-color:var(--border-2);color:var(--ink);}
+#view-bidask .ba-rowcount{margin-left:auto;font-size:10px;font-weight:600;color:var(--ink-3);}
+
+/* legend */
+#view-bidask .ba-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:7px 14px;background:var(--surface-2,#fafaf8);border-bottom:1px solid var(--border);font-size:9.5px;color:var(--ink-3);}
+#view-bidask .ba-leg{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
+#view-bidask .ba-leg-dot{width:10px;height:10px;border-radius:3px;display:inline-block;}
+#view-bidask .ba-col-note{font-size:8px;color:var(--ink-4);vertical-align:super;}
+
+/* stat cards */
+#view-bidask .ba-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;padding:12px 14px 4px;flex-shrink:0;}
+#view-bidask .ba-stat{position:relative;background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:10px 14px 10px 18px;box-shadow:0 1px 2px rgba(13,13,12,.05);}
+#view-bidask .ba-stat::before{content:"";position:absolute;left:0;top:11px;bottom:11px;width:4px;border-radius:0 3px 3px 0;background:var(--ink);}
+#view-bidask .ba-stat.s-red::before{background:#be123c;}
+#view-bidask .ba-stat.s-amber::before{background:#b45309;}
+#view-bidask .ba-stat.s-violet::before{background:#7c3aed;}
+#view-bidask .ba-stat.s-green::before{background:#15803d;}
+#view-bidask .ba-stat.s-teal::before{background:var(--ink-3);}
+#view-bidask .ba-stat-num{display:block;font-size:24px;font-weight:800;letter-spacing:-.04em;line-height:1;font-variant-numeric:tabular-nums;}
+#view-bidask .ba-stat-lbl{display:block;font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-4);margin-top:4px;}
+
+/* table */
+#view-bidask .ba-table-wrap{flex:1;overflow:auto;margin:10px 14px 14px;background:var(--surface);
+  border:1px solid var(--border);border-radius:14px;box-shadow:0 1px 2px rgba(13,13,12,.05);}
+#view-bidask table.ba-table{width:100%;border-collapse:collapse;font-size:11px;font-variant-numeric:tabular-nums;}
+#view-bidask .ba-table th{position:sticky;background:#ebebe7;font-weight:800;text-align:center;
+  padding:6px 5px;white-space:nowrap;border-bottom:1px solid var(--border);}
+#view-bidask .ba-table tr.th-g th{top:0;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);
+  border-bottom-width:2px;z-index:3;}
+#view-bidask .ba-table tr.th-s th{top:25px;font-size:8.5px;letter-spacing:.03em;text-transform:uppercase;color:var(--ink-3);
+  cursor:pointer;z-index:2;border-bottom:2px solid var(--ink);}
+#view-bidask .ba-table tr.th-s th:hover{color:var(--ink);}
+#view-bidask .ba-table tr.th-s th.sort-asc::after{content:" ↑";color:var(--ink);}
+#view-bidask .ba-table tr.th-s th.sort-desc::after{content:" ↓";color:var(--ink);}
+#view-bidask .ba-table td{padding:3px 6px;text-align:center;border-bottom:1px solid var(--border);color:var(--ink-2);}
+#view-bidask .ba-table td.ta-l{text-align:left;}
+#view-bidask .ba-table td.cg{background:rgba(13,13,12,.015);}
+#view-bidask .ba-table .tx-bold{font-weight:700;color:var(--ink);}
+#view-bidask .ba-table tbody tr:hover td{background:var(--bg);}
+#view-bidask .ba-table tbody tr.row-crit td{background:#fff1f2;}
+#view-bidask .ba-table tbody tr.row-warn td{background:#fffbeb;}
+#view-bidask .ba-table tbody tr.row-noprods td{background:#f0fdf4;}
+
+/* priority chip */
+#view-bidask .ba-prio{display:inline-flex;align-items:center;justify-content:center;width:22px;height:20px;
+  border-radius:6px;font-weight:800;font-size:11px;color:#fff;}
+#view-bidask .prio-h{background:#be123c;}
+#view-bidask .prio-m{background:#b45309;}
+#view-bidask .prio-l{background:var(--ink-4);}
+
+/* alert + var badges (NEXUS semantic palette) */
+#view-bidask .ba-ab{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
+  border-radius:4px;font-size:9px;font-weight:800;margin:0 1px;}
+#view-bidask .ab-red{background:#fff1f2;color:#be123c;border:1px solid #fecdd3;}
+#view-bidask .ab-amber{background:#fffbeb;color:#b45309;border:1px solid #fde68a;}
+#view-bidask .ab-blue{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;}
+#view-bidask .ab-teal{background:var(--bg);color:var(--ink-3);border:1px solid var(--border);}
+#view-bidask .ba-vb{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:5px;font-size:10px;font-weight:700;}
+#view-bidask .var-up{background:#f0fdf4;color:#15803d;}
+#view-bidask .var-dn{background:#fff1f2;color:#be123c;}
+#view-bidask .var-warn{background:#fffbeb;color:#b45309;}
+#view-bidask .var-neu{color:var(--ink-3);}
+#view-bidask .var-top{background:var(--ink);color:#fff;}
+#view-bidask .ps-cell{display:flex;align-items:center;justify-content:center;gap:4px;}
+#view-bidask .ps-out{font-size:9px;font-weight:700;color:#b45309;}
+
+/* row action buttons */
+#view-bidask .ba-abtn{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;
+  padding:0 4px;border-radius:5px;font-size:9px;font-weight:800;cursor:pointer;border:1px solid var(--border);
+  background:var(--surface);color:var(--ink-2);transition:all .14s;}
+#view-bidask .ba-abtn:hover{background:var(--ink);color:#fff;border-color:var(--ink);}
+#view-bidask .cd-actions{display:flex;gap:3px;justify-content:center;}
+#view-bidask .ba-muted{color:var(--ink-4);font-size:9px;}
+#view-bidask .ba-empty{padding:48px 24px;text-align:center;color:var(--ink-3);}
+#view-bidask .ba-empty svg{color:var(--ink-4);margin-bottom:10px;}
+
+/* ── modals (appended to <body>, so scoped by .ba-ov not #view-bidask) ── */
+.ba-ov{position:fixed;inset:0;z-index:140;background:rgba(13,13,12,.5);
+  -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center;padding:24px;}
+.ba-ov.open{display:flex;}
+.ba-modal{background:var(--surface);border-radius:18px;width:100%;max-width:680px;max-height:86vh;
+  display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 50px -16px rgba(13,13,12,.4);font-family:'Barlow',sans-serif;}
+.ba-modal.wide{max-width:820px;}
+.ba-modal-hdr{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
+  padding:16px 20px;border-bottom:1px solid var(--border);}
+.ba-modal-title{font-size:15px;font-weight:800;letter-spacing:-.02em;color:var(--ink);}
+.ba-modal-sub{font-size:11px;color:var(--ink-3);margin-top:2px;}
+.ba-modal-x{background:var(--bg);border:1px solid var(--border);border-radius:8px;width:28px;height:28px;
+  cursor:pointer;color:var(--ink-3);font-size:15px;line-height:1;flex-shrink:0;}
+.ba-modal-x:hover{background:var(--ink);color:#fff;}
+.ba-modal-body{padding:18px 20px;overflow-y:auto;}
+.ba-modal-ftr{padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;background:var(--surface-2,#fafaf8);}
+.ba-drill{width:100%;border-collapse:collapse;font-size:11.5px;}
+.ba-drill th{text-align:left;font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-3);padding:6px 10px;border-bottom:2px solid var(--ink);}
+.ba-drill td{padding:5px 10px;border-bottom:1px solid var(--border);color:var(--ink-2);}
+.ba-drill tr.row-neg td{background:#fff1f2;}
+.ba-vb{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:5px;font-size:10px;font-weight:700;}
+.ba-vb.var-up{background:#f0fdf4;color:#15803d;}
+.ba-vb.var-dn{background:#fff1f2;color:#be123c;}
+.ba-field{margin-bottom:12px;}
+.ba-field label{display:block;font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px;}
+.ba-field input,.ba-field textarea{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:9px;
+  padding:8px 11px;font:400 12.5px 'Barlow',sans-serif;color:var(--ink);outline:none;resize:vertical;}
+.ba-field input:focus,.ba-field textarea:focus{border-color:var(--ink);box-shadow:0 0 0 3px rgba(13,13,12,.08);}
+.ba-btn-p{background:var(--ink);color:#fff;border:none;border-radius:10px;padding:8px 16px;font:700 12px 'Barlow',sans-serif;cursor:pointer;}
+.ba-btn-p:hover{opacity:.85;}
+.ba-btn-g{background:var(--surface);color:var(--ink-2);border:1px solid var(--border);border-radius:10px;padding:8px 14px;font:600 12px 'Barlow',sans-serif;cursor:pointer;}
+.ba-btn-g:hover{background:var(--bg);}
+.ba-check{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:var(--ink-2);}
+.ba-check input{accent-color:var(--ink);width:14px;height:14px;}
+/* weights panel */
+.ba-wgrp{margin-bottom:14px;}
+.ba-wgrp-hdr{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);margin-bottom:6px;}
+.ba-wgrp-dot{width:8px;height:8px;border-radius:2px;}
+.ba-wrow{display:grid;grid-template-columns:34px 1fr 120px 52px;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--border);}
+.ba-wrow.w-off{opacity:.4;}
+.ba-wlbl{font-size:12px;font-weight:700;color:var(--ink);}
+.ba-wdesc{font-size:10px;color:var(--ink-3);}
+.ba-wtrack{height:6px;background:var(--border);border-radius:99px;overflow:hidden;}
+.ba-wfill{height:100%;background:var(--ink);border-radius:99px;}
+.ba-winput{width:52px;background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:4px 6px;font:700 11px 'Barlow',sans-serif;color:var(--ink);text-align:right;outline:none;}
+.ba-wtotal{display:flex;align-items:center;justify-content:space-between;padding:10px 0 2px;font-size:12px;font-weight:800;}
+.ba-whint{font-size:10.5px;color:var(--ink-3);margin-top:8px;line-height:1.5;}
+</style>
+
 <script>
 /* ═══════════════════════════════════════════════════════════════════════════
-   ADMIN VIEW — clean rewrite
-   Tabs: Pending Contacts · System Logs · Send Log · Accounts
-   V3.0: Send Log reads from widened 14-col schema. Null-safe on status.
+   BID-ASK controller. Public entry: initBidAskView() (called by switchView).
+   Preserves the original load/refetch contract (per-team, lazy, cached).
 ═══════════════════════════════════════════════════════════════════════════ */
+var BA = (function () {
+  'use strict';
 
-var adminLoaded = false;
-var adminTab = 'pending';
-var adminAccounts = [];
-var adminLogsExpanded = false;
-var adminSendsExpanded = false;
+  // ── state ──────────────────────────────────────────────────────────────
+  var state = { loading:false, raw:null, rows:[], filtered:[], lastFetchTeam:null,
+                sortKey:null, sortDir:1, sellThruTop:null, built:false, modalsBuilt:false };
 
-function initAdminView() {
-  if (!_isManager) {
-    document.getElementById('adminGate').style.display = 'flex';
-    document.getElementById('adminContent').style.display = 'none';
-    return;
+  // ── header → canonical key map (normalise: lowercase alphanumerics) ─────
+  // Canonical sheet headers = these keys; common friendly aliases accepted.
+  var KEYS = ['name','id','arm','am','gtv_ytd','gtv_ytd_var','gtv_l7d','gtv_wow',
+    'net_sales_units','sell_thru','pct_sales','avg_cd_ty','wtd_cd','cd_var_ly',
+    'avg_uncomp','units_online','units_wow_pct','stock_offline_pct',
+    'products_last_month','orders_last_month','return_rate','perfect_orders'];
+  var ALIASES = {
+    'store':'name','storename':'name','boutique':'name','partner':'name',
+    'storeid':'id','merchantid':'id','skmerchant':'id',
+    'accountmanager':'am','accountrelationshipmanager':'arm',
+    'gtvytd':'gtv_ytd','gtvytdvar':'gtv_ytd_var','ytdvar':'gtv_ytd_var',
+    'gtvl7d':'gtv_l7d','gtvwow':'gtv_wow','wow':'gtv_wow',
+    'netsales':'net_sales_units','netsalesunits':'net_sales_units',
+    'sellthru':'sell_thru','sellthrough':'sell_thru','pctsales':'pct_sales',
+    'cdty':'avg_cd_ty','avgcdty':'avg_cd_ty','cdend':'wtd_cd','wtdcd':'wtd_cd',
+    'varly':'cd_var_ly','cdvarly':'cd_var_ly','uncomp':'avg_uncomp','avguncomp':'avg_uncomp',
+    'uncompetitiveness':'avg_uncomp','units':'units_online','unitsonline':'units_online',
+    'unitswow':'units_wow_pct','unitswowpct':'units_wow_pct',
+    'offline':'stock_offline_pct','stockoffline':'stock_offline_pct','stockofflinepct':'stock_offline_pct',
+    'products':'products_last_month','productslastmonth':'products_last_month',
+    'orders':'orders_last_month','orderslastmonth':'orders_last_month',
+    'returns':'return_rate','returnrate':'return_rate','perfect':'perfect_orders','perfectorders':'perfect_orders'
+  };
+  function norm(h){ return String(h==null?'':h).toLowerCase().replace(/[^a-z0-9]/g,''); }
+  function keyFor(h){ var n=norm(h); if(KEYS.indexOf(n)>-1) return n; return ALIASES[n]||null; }
+
+  // ── numeric helpers ────────────────────────────────────────────────────
+  var PCT_KEYS = {gtv_ytd_var:1,gtv_wow:1,sell_thru:1,pct_sales:1,units_wow_pct:1,
+                  stock_offline_pct:1,return_rate:1,perfect_orders:1};
+  // accept fractions (0.25) or whole percents (25) — store as fraction
+  function pctNorm(v){ if(v==null||v==='') return null; var n=Number(v); if(isNaN(n)) return null;
+                       return Math.abs(n)>1.5 ? n/100 : n; }
+  function num(v){ if(v==null||v==='') return null; var n=Number(v); return isNaN(n)?null:n; }
+
+  // map a backend {headers, rows} into typed record objects
+  function mapRows(d){
+    var headers=(d&&d.headers)||[], rows=(d&&d.rows)||[];
+    var colKey=headers.map(keyFor);
+    return rows.map(function(r,ri){
+      var o={};
+      for(var c=0;c<colKey.length;c++){
+        var k=colKey[c]; if(!k) continue;
+        var v=r[c];
+        if(PCT_KEYS[k]) o[k]=pctNorm(v);
+        else if(k==='name'||k==='arm'||k==='am'||k==='id') o[k]=(v==null?'':String(v));
+        else o[k]=num(v);
+      }
+      if(o.name==null) o.name='Row '+(ri+1);
+      if(!o.id) o.id=norm(o.name)||('row'+ri);
+      if(o.arm==null) o.arm=''; if(o.am==null) o.am='';
+      return o;
+    });
   }
-  document.getElementById('adminGate').style.display = 'none';
-  document.getElementById('adminContent').style.display = 'flex';
-  var teamLabel = document.getElementById('adminTeamLabel');
-  if (teamLabel) teamLabel.textContent = _userTeam || 'All';
-  if (!adminLoaded) { loadAdminData(); adminLoaded = true; }
-  switchAdminTab(adminTab);
-}
 
-function switchAdminTab(tab) {
-  adminTab = tab;
-  ['pending', 'logs', 'sends', 'accounts'].forEach(function(t) {
-    var p = document.getElementById('admin-' + t), b = document.getElementById('atab-' + t);
-    if (p) p.style.display = t === tab ? 'block' : 'none';
-    if (b) b.classList.toggle('active', t === tab);
-  });
-  if (tab === 'pending') renderAdminPending();
-  if (tab === 'accounts' && !adminAccounts.length) loadAdminAccounts();
-}
+  // ── formatters ─────────────────────────────────────────────────────────
+  function abbr(n){ n=String(n||''); if(!n) return '—'; var p=n.trim().split(/\s+/);
+                    return p.length===1?p[0]:(p[0][0]+'. '+p[p.length-1]); }
+  function fmtGTV(v){ if(v==null) return '—'; if(v>=1e6) return '$'+(v/1e6).toFixed(2)+'M';
+                      if(v>=1e3) return '$'+(v/1e3).toFixed(0)+'K'; return '$'+v; }
+  function fmtNum(v){ if(v==null) return '—'; return v.toLocaleString(); }
+  function pctTxt(v,d){ if(v==null) return '—'; return (v*100).toFixed(d==null?1:d)+'%'; }
+  function vb(v,isGood,fmt){ if(v==null) return '<span class="var-neu">—</span>';
+    var pos=v>=0, good=isGood?pos:!pos, cls=good?'var-up':'var-dn', arr=pos?'▲':'▼';
+    return '<span class="ba-vb '+cls+'">'+arr+' '+(fmt?fmt(Math.abs(v)):pctTxt(Math.abs(v)))+'</span>'; }
 
-/* ── Pending Contacts ───────────────────────────────────────────────────── */
-function renderAdminPending() {
-  var el = document.getElementById('adminPendingBody');
-  if (!el) return;
-  updatePendingBadge();
-  if (!pendingContacts || !pendingContacts.length) {
-    el.innerHTML = '<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--ink-4);font-size:11px">No pending proposals.</td></tr>';
-    return;
+  function pctileTop(arr,p){ if(!arr.length) return null; var s=arr.slice().sort(function(a,b){return a-b;});
+    var idx=(s.length-1)*p, lo=Math.floor(idx), hi=Math.ceil(idx);
+    return lo===hi?s[lo]:s[lo]+(s[hi]-s[lo])*(idx-lo); }
+  function sellThruCell(v){ if(v==null) return '<span class="var-neu">—</span>';
+    var t=pctTxt(v); if(state.sellThruTop!=null&&v>=state.sellThruTop)
+      return '<span class="ba-vb var-top" title="Top 10% sell-through in current view">★ '+t+'</span>';
+    return t; }
+  function pctSalesCell(v){ if(v==null) return '<span class="var-neu">—</span>';
+    var out=1-v, ff=(v*100).toFixed(0)+'%';
+    var ob=out>=0.25?'<span class="ps-out" title="'+(out*100).toFixed(1)+'% sold outside Farfetch">⚠ '+(out*100).toFixed(0)+'%</span>':'';
+    return '<div class="ps-cell"><span>'+ff+'</span>'+ob+'</div>'; }
+
+  // ── priority weights (identical model to the skeleton) ──────────────────
+  var WEIGHT_DEFS=[
+    {key:'wow',      cat:'Sales',       color:'#15803d', label:'GTV WoW Decline',         desc:'Rises as WoW decline deepens (0 → −50%)',        def:25, cap:[0,.5],  src:function(r){return Math.max(0,-(r.gtv_wow==null?0:r.gtv_wow));}},
+    {key:'ytd_var',  cat:'Sales',       color:'#15803d', label:'GTV YTD Variance Decline', desc:'Rises as YTD variance turns negative (0 → −50%)', def:15, cap:[0,.5],  src:function(r){return Math.max(0,-(r.gtv_ytd_var==null?0:r.gtv_ytd_var));}},
+    {key:'sellthru', cat:'Sales',       color:'#15803d', label:'Low Sell-Through',         desc:'Rises below 60% sell-through rate',               def:5,  cap:[0,.6],  src:function(r){return Math.max(0,.60-(r.sell_thru==null?.60:r.sell_thru));}},
+    {key:'uncomp',   cat:'Commercial',  color:'#7c3aed', label:'AVG Uncompetitiveness',    desc:'Rises with uncompetitiveness index (0 → 30)',     def:15, cap:[0,30],  src:function(r){return r.avg_uncomp==null?0:r.avg_uncomp;}},
+    {key:'cd',       cat:'Commercial',  color:'#7c3aed', label:'CD Negative Variance LY',  desc:'Rises as commercial discount drops vs LY',        def:5,  cap:[0,20],  src:function(r){return Math.max(0,-(r.cd_var_ly==null?0:r.cd_var_ly));}},
+    {key:'offline',  cat:'Stock',       color:'#b45309', label:'Stock Offline %',          desc:'Rises with % of stock offline (0 → 50%)',         def:10, cap:[0,.5],  src:function(r){return r.stock_offline_pct==null?0:r.stock_offline_pct;}},
+    {key:'units_wow',cat:'Stock',       color:'#b45309', label:'Units Online WoW Decline', desc:'Rises as units online decline WoW',               def:5,  cap:[0,.3],  src:function(r){return Math.max(0,-(r.units_wow_pct==null?0:r.units_wow_pct));}},
+    {key:'noprods',  cat:'Stock',       color:'#b45309', label:'No Products Last Month',   desc:'Binary: 0 products created = full factor weight', def:5,  cap:[0,1],   src:function(r){return r.products_last_month===0?1:0;}},
+    {key:'ret',      cat:'Performance', color:'#1d4ed8', label:'Return Rate',              desc:'Rises with return rate (0 → 30%)',                def:10, cap:[0,.30], src:function(r){return r.return_rate==null?0:r.return_rate;}},
+    {key:'perfect',  cat:'Performance', color:'#1d4ed8', label:'Low Perfect Orders',       desc:'Rises as perfect orders fall below 95%',          def:5,  cap:[0,.20], src:function(r){return Math.max(0,.95-(r.perfect_orders==null?.95:r.perfect_orders));}}
+  ];
+  var weights={}; WEIGHT_DEFS.forEach(function(d){ weights[d.key]=d.def; });
+
+  function calcPriority(r){
+    var raw=0, tot=0, k; for(k in weights) tot+=weights[k]; if(!tot) tot=100;
+    WEIGHT_DEFS.forEach(function(d){
+      var lo=d.cap[0], hi=d.cap[1], v=d.src(r);
+      var n=hi===lo?0:Math.max(0,Math.min(1,(v-lo)/(hi-lo)));
+      raw+=n*(weights[d.key]/tot);
+    });
+    return Math.max(1,Math.min(10,Math.round(raw*10)));
   }
-  el.innerHTML = pendingContacts.map(function(c) {
-    var change = String(c.proposed_change || '');
-    var changeLabel = change === 'create'
-      ? '<span style="color:#1d4ed8;font-weight:700">New</span>'
-      : change === 'delete'
-        ? '<span style="color:#be123c;font-weight:700">Delete</span>'
-        : '<span style="color:#b45309;font-weight:700">Edit</span>';
-    return '<tr>'
-      + '<td style="font-weight:500">' + esc(c.merchant_name) + '</td>'
-      + '<td>' + esc(c.contact_name) + '</td>'
-      + '<td style="color:var(--ink-3)">' + esc(c.contact_email) + '</td>'
-      + '<td>' + esc(c.contact_role || '—') + '</td>'
-      + '<td>' + changeLabel + '</td>'
-      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(c.proposed_by || '') + '</td>'
-      + '<td><div style="display:flex;gap:6px">'
-        + '<button class="btn-approve" onclick="doApprove(' + c.rowIndex + ')">Approve</button>'
-        + '<button class="btn-reject" onclick="doReject(' + c.rowIndex + ')">Reject</button>'
-      + '</div></td>'
+  function getAlerts(r){
+    var a=[], s=r.stock_offline_pct||0, w=r.gtv_wow||0, ret=r.return_rate||0;
+    if(s>0.30) a.push({c:'ab-red',l:'O',t:'Stock Offline > 30%'});
+    else if(s>0.15) a.push({c:'ab-amber',l:'O',t:'Stock Offline > 15%'});
+    if(w<-0.25) a.push({c:'ab-red',l:'G',t:'GTV WoW decline > 25%'});
+    else if(w<-0.10) a.push({c:'ab-amber',l:'G',t:'GTV WoW decline > 10%'});
+    if(ret>0.30) a.push({c:'ab-red',l:'R',t:'Return rate > 30%'});
+    else if(ret>0.20) a.push({c:'ab-amber',l:'R',t:'Return rate > 20%'});
+    if((r.avg_uncomp||0)>20) a.push({c:'ab-amber',l:'U',t:'Uncompetitiveness > 20'});
+    if(r.products_last_month===0) a.push({c:'ab-blue',l:'P',t:'0 new products last month'});
+    if((r.sell_thru==null?1:r.sell_thru)<0.15) a.push({c:'ab-teal',l:'T',t:'Sell-through < 15%'});
+    return a;
+  }
+  function rowClass(r){
+    var s=r.stock_offline_pct||0, w=r.gtv_wow||0, ret=r.return_rate||0;
+    if(s>0.30||w<-0.25||ret>0.30) return 'row-crit';
+    if(s>0.15||w<-0.10||ret>0.20||(r.avg_uncomp||0)>20) return 'row-warn';
+    if(r.products_last_month===0) return 'row-noprods';
+    return '';
+  }
+  function isPerfRed(r){ return (r.return_rate||0)>0.30 || (r.perfect_orders==null?1:r.perfect_orders)<0.85; }
+  function findRow(id){ for(var i=0;i<state.rows.length;i++) if(state.rows[i].id===id) return state.rows[i]; return null; }
+
+  // ── build a table row ───────────────────────────────────────────────────
+  function buildRow(r){
+    var pr=calcPriority(r), prCls=pr>=8?'prio-h':pr>=4?'prio-m':'prio-l'; // buckets match the Priority filter (high 8-10 / mid 4-7 / low 1-3)
+    var alts=getAlerts(r);
+    var altHtml=alts.length?alts.map(function(a){return '<span class="ba-ab '+a.c+'" title="'+esc(a.t)+'">'+a.l+'</span>';}).join('')
+                            :'<span class="ba-muted">—</span>';
+    var rc=rowClass(r);
+    var uwow=r.units_wow_pct!=null?vb(r.units_wow_pct,true):'—';
+    var gtvAct=(r.gtv_wow||0)<-0.05?' <button class="ba-abtn" onclick="BA.openGTV(\''+esc(r.id)+'\')" title="GTV Recovery Plan">↑</button>':'';
+    var uncompCell=r.avg_uncomp!=null?('<span class="ba-vb '+(r.avg_uncomp>20?'var-dn':r.avg_uncomp>10?'var-warn':'var-neu')+'">'+r.avg_uncomp.toFixed(1)+'</span>'):'—';
+    function heat(v,hi,mid,suf){ if(v==null) return '—'; var cls=v>hi?'var-dn':v>mid?'var-warn':'var-neu';
+      return '<span class="ba-vb '+cls+'">'+(v*100).toFixed(1)+(suf||'%')+'</span>'; }
+    var perfCell=r.perfect_orders!=null?('<span class="ba-vb '+(r.perfect_orders>=0.95?'var-up':r.perfect_orders>=0.85?'var-warn':'var-dn')+'">'+(r.perfect_orders*100).toFixed(1)+'%</span>'):'—';
+
+    return '<tr class="'+rc+'" data-id="'+esc(r.id)+'">'
+      + '<td title="Priority '+pr+'/10"><span class="ba-prio '+prCls+'">'+pr+'</span></td>'
+      + '<td>'+altHtml+'</td>'
+      + '<td class="ta-l tx-bold" title="'+esc(r.name)+'">'+esc(r.name.length>14?r.name.slice(0,13)+'…':r.name)+'</td>'
+      + '<td title="'+esc(r.arm)+'">'+esc(abbr(r.arm))+'</td>'
+      + '<td title="'+esc(r.am)+'">'+esc(abbr(r.am))+'</td>'
+      + '<td class="cg tx-bold">'+fmtGTV(r.gtv_ytd)+'</td>'
+      + '<td>'+vb(r.gtv_ytd_var,true)+'</td>'
+      + '<td>'+fmtGTV(r.gtv_l7d)+gtvAct+'</td>'
+      + '<td>'+vb(r.gtv_wow,true)+'</td>'
+      + '<td>'+fmtNum(r.net_sales_units)+'</td>'
+      + '<td>'+sellThruCell(r.sell_thru)+'</td>'
+      + '<td>'+pctSalesCell(r.pct_sales)+'</td>'
+      + '<td class="cg">'+(r.avg_cd_ty!=null?r.avg_cd_ty.toFixed(1)+'%':'—')+'</td>'
+      + '<td>'+(r.wtd_cd!=null?r.wtd_cd.toFixed(1)+'%':'—')+'</td>'
+      + '<td>'+(r.cd_var_ly!=null?vb(r.cd_var_ly,false,function(x){return x.toFixed(1)+'pp';}):'—')+'</td>'
+      + '<td>'+uncompCell+'</td>'
+      + '<td><div class="cd-actions"><button class="ba-abtn" onclick="BA.openCDEmail(\''+esc(r.id)+'\')" title="Send commercial-discount alert">✉</button></div></td>'
+      + '<td class="cg tx-bold">'+fmtNum(r.units_online)+'</td>'
+      + '<td>'+uwow+'</td>'
+      + '<td>'+heat(r.stock_offline_pct,0.30,0.15)+'</td>'
+      + '<td>'+(r.products_last_month!=null?r.products_last_month:'—')+'</td>'
+      + '<td><button class="ba-abtn" onclick="BA.openStock(\''+esc(r.id)+'\')" title="Request stock on hand">✉</button></td>'
+      + '<td class="cg">'+fmtNum(r.orders_last_month)+'</td>'
+      + '<td>'+heat(r.return_rate,0.30,0.20)+'</td>'
+      + '<td>'+perfCell+'</td>'
+      + '<td>'+(isPerfRed(r)?'<button class="ba-abtn" onclick="BA.openPerf(\''+esc(r.id)+'\')" title="Send performance alert">✉</button>':'<span class="ba-muted">—</span>')+'</td>'
       + '</tr>';
-  }).join('');
-}
+  }
 
-function doApprove(row) {
-  google.script.run
-    .withSuccessHandler(function() { showToast('Approved', 'success'); loadAllContacts(); })
-    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
-    .approveContact(row, _userTeam);
-}
-
-function doReject(row) {
-  google.script.run
-    .withSuccessHandler(function() { showToast('Rejected', 'success'); loadAllContacts(); })
-    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
-    .rejectContact(row, _userTeam);
-}
-
-function refreshAdminPendingFull() {
-  showToast('Reloading contacts…', 'success');
-  google.script.run
-    .withSuccessHandler(function(rows) {
-      rows = rows || [];
-      var cockpitNames = {};
-      P.forEach(function(p) { cockpitNames[(p.company || '').toLowerCase()] = true; });
-      allContacts = rows.filter(function(c) {
-        return c.status === 'active' && cockpitNames[(c.merchant_name || '').toLowerCase()];
-      });
-      pendingContacts = rows.filter(function(c) {
-        return c.status === 'pending' && cockpitNames[(c.merchant_name || '').toLowerCase()];
-      });
-      updatePendingBadge();
-      renderAdminPending();
-      showToast('Refreshed — ' + pendingContacts.length + ' pending', 'success');
-    })
-    .withFailureHandler(function(e) { showToast('Error: ' + (e.message || e), 'error'); })
-    .getAllContacts(_userTeam);
-}
-
-/* ── System Logs + Send Log + Accounts ──────────────────────────────────── */
-function loadAdminData() {
-  google.script.run
-    .withSuccessHandler(function(summary) {
-      document.getElementById('adminKpis').innerHTML =
-        kpiHtml('Total Ops', summary.total, 'last 7 days')
-        + kpiHtml('Success', summary.success, '<span style="color:#16a34a">' + (summary.total ? Math.round(summary.success / summary.total * 100) : 0) + '%</span>')
-        + kpiHtml('Errors', summary.error, '<span style="color:#dc2626">' + (summary.total ? Math.round(summary.error / summary.total * 100) : 0) + '%</span>')
-        + kpiHtml('Warnings', summary.warning, '')
-        + kpiHtml('Avg Duration', summary.avgDurationMs + 'ms', '');
-    })
-    .getLogSummary(7, _userTeam);
-  loadAdminLogs();
-}
-
-function loadAdminLogs(loadAll) {
-  var filter = document.getElementById('adminLogFilter').value;
-  var limit = loadAll ? 10000 : 200;
-  var expandBtn = document.getElementById('adminLogsExpandBtn');
-  if (loadAll && expandBtn) {
-    expandBtn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Loading all logs…';
-    expandBtn.disabled = true;
+  // ── filters / sort / render ──────────────────────────────────────────────
+  function val(id){ var el=document.getElementById(id); return el?el.value:''; }
+  function applyFilters(){
+    var q=val('baSearch').toLowerCase(), arm=val('baARM'), am=val('baAM'), al=val('baAlert'), pr=val('baPrio');
+    ['baARM','baAM','baAlert','baPrio'].forEach(function(id){var el=document.getElementById(id);if(el)el.classList.toggle('active-filter',el.value!=='');});
+    state.filtered=state.rows.filter(function(r){
+      if(q && r.name.toLowerCase().indexOf(q)<0 && r.am.toLowerCase().indexOf(q)<0 && r.arm.toLowerCase().indexOf(q)<0) return false;
+      if(arm && r.arm!==arm) return false;
+      if(am && r.am!==am) return false;
+      if(al){ var rc=rowClass(r);
+        if(al==='crit'&&rc!=='row-crit') return false;
+        if(al==='warn'&&rc!=='row-warn') return false;
+        if(al==='noprods'&&rc!=='row-noprods') return false; }
+      if(pr){ var p=calcPriority(r);
+        if(pr==='high'&&p<8) return false;
+        if(pr==='mid'&&(p<4||p>7)) return false;
+        if(pr==='low'&&p>3) return false; }
+      return true;
+    });
+    renderTable();
+  }
+  function clearFilters(){ ['baSearch','baARM','baAM','baAlert','baPrio'].forEach(function(id){var el=document.getElementById(id);if(el){el.value='';el.classList.remove('active-filter');}}); applyFilters(); }
+  function sortVal(r,k){ if(k==='priority') return calcPriority(r); if(k==='_alert') return getAlerts(r).length;
+    var v=r[k]; if(v==null) return state.sortDir===1?-Infinity:Infinity; return typeof v==='string'?v.toLowerCase():v; }
+  function sortBy(k,th){
+    if(state.sortKey===k) state.sortDir*=-1; else { state.sortKey=k; state.sortDir=1; }
+    var host=document.getElementById('view-bidask');
+    host.querySelectorAll('tr.th-s th').forEach(function(t){t.classList.remove('sort-asc','sort-desc');});
+    if(th) th.classList.add(state.sortDir===1?'sort-asc':'sort-desc');
+    renderTable();
+  }
+  function renderTable(){
+    var data=state.filtered.slice();
+    if(state.sortKey){ var k=state.sortKey, dir=state.sortDir;
+      data.sort(function(a,b){var av=sortVal(a,k),bv=sortVal(b,k);return av<bv?-dir:av>bv?dir:0;}); }
+    else data.sort(function(a,b){return calcPriority(b)-calcPriority(a);});
+    var st=data.map(function(r){return r.sell_thru;}).filter(function(v){return v!=null;});
+    state.sellThruTop=st.length?pctileTop(st,0.9):null;
+    var tb=document.getElementById('baBody');
+    if(!tb) return;
+    if(!data.length){
+      tb.innerHTML='<tr><td colspan="26"><div class="ba-empty">'
+        + '<i data-lucide="search-x" style="width:30px;height:30px"></i>'
+        + '<div style="font-size:13px;font-weight:600;color:var(--ink-2)">No partners match the current filters.</div>'
+        + '<div style="margin-top:10px"><button class="ba-btn ba-btn-clear" onclick="BA.clearFilters()">✕ Clear filters</button></div>'
+        + '</div></td></tr>';
+    } else {
+      tb.innerHTML=data.map(buildRow).join('');
+    }
+    var rc=document.getElementById('baRowCount'); if(rc) rc.textContent=data.length+' / '+state.rows.length+' partners';
+    updateStats(data);
     refreshIcons();
   }
-  google.script.run
-    .withSuccessHandler(function(logs) {
-      if (!logs || !logs.length) {
-        document.getElementById('adminLogBody').innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No log entries.</td></tr>';
-        if (expandBtn) expandBtn.style.display = 'none';
-        return;
-      }
-      document.getElementById('adminLogBody').innerHTML = logs.map(function(l) {
-        var ts = l.timestamp ? new Date(l.timestamp).toLocaleString() : '';
-        var s = String(l.status || '');
-        var sc = s === 'error' ? 'color:#be123c;background:#fff1f2'
-          : s === 'warning' ? 'color:#b45309;background:#fffbeb'
-          : s === 'success' ? 'color:#15803d;background:#f0fdf4'
-          : 'color:var(--ink-3)';
-        return '<tr>'
-          + '<td style="font-size:11px;color:var(--ink-3);white-space:nowrap">' + esc(ts) + '</td>'
-          + '<td style="font-weight:600;font-size:11px">' + esc(l.functionName) + '</td>'
-          + '<td><span style="' + sc + ';padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">' + esc(s) + '</span></td>'
-          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(l.triggeredBy) + '</td>'
-          + '<td style="text-align:right;font-size:11px">' + (l.durationMs != null ? l.durationMs + 'ms' : '—') + '</td>'
-          + '<td style="font-size:10px;color:var(--ink-3);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.details) + '">' + esc(l.details) + '</td>'
-          + '</tr>';
-      }).join('');
-      if (expandBtn) {
-        if (loadAll || logs.length < limit) {
-          adminLogsExpanded = true;
-          expandBtn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px"></i> Showing all ' + logs.length + ' entries';
-          expandBtn.disabled = true;
-          expandBtn.style.opacity = '0.6';
-        } else {
-          expandBtn.innerHTML = '<i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Showing ' + logs.length + ' — Load all entries';
-          expandBtn.disabled = false;
-          expandBtn.style.opacity = '1';
-        }
-        expandBtn.style.display = 'inline-flex';
-        refreshIcons();
-      }
-    })
-    .getRecentLogs(limit, filter || null, _userTeam);
-}
+  function updateStats(data){
+    var crit=0,warn=0,hi=0,ok=0,cd=0;
+    data.forEach(function(r){ var rc=rowClass(r);
+      if(rc==='row-crit')crit++; else if(rc==='row-warn')warn++;
+      if(calcPriority(r)>=8)hi++; if(!rc)ok++;
+      if((r.avg_cd_ty!=null)||(r.cd_var_ly!=null))cd++; });
+    set('baStAll',data.length);set('baStCrit',crit);set('baStWarn',warn);
+    set('baStHi',hi);set('baStOk',ok);set('baStCd',cd);
+  }
+  function set(id,v){ var el=document.getElementById(id); if(el) el.textContent=v; }
 
-function expandAdminLogs() { loadAdminLogs(true); }
+  function populateFilters(){
+    var arms=uniq(state.rows.map(function(r){return r.arm;})), ams=uniq(state.rows.map(function(r){return r.am;}));
+    fill('baARM',arms); fill('baAM',ams);
+  }
+  function uniq(a){ var s={},o=[]; a.forEach(function(x){if(x&&!s[x]){s[x]=1;o.push(x);}}); return o.sort(); }
+  function fill(id,arr){ var sel=document.getElementById(id); if(!sel) return;
+    arr.forEach(function(v){var o=document.createElement('option');o.value=v;o.textContent=abbr(v);sel.appendChild(o);}); }
 
-/* ── Send Log (V3.0 schema — 14 cols, null-safe status) ─────────────────── */
-function loadAdminSends(loadAll) {
-  var limit = loadAll ? 10000 : 100;
-  var expandBtn = document.getElementById('adminSendsExpandBtn');
-  if (loadAll && expandBtn) {
-    expandBtn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Loading all sends…';
-    expandBtn.disabled = true;
+  // ── shell HTML ───────────────────────────────────────────────────────────
+  function thG(){
+    return '<tr class="th-g">'
+      + '<th colspan="2">Priority &amp; Alerts</th><th>Store</th><th colspan="2">Account</th>'
+      + '<th colspan="7" style="border-bottom-color:#15803d">Sales</th>'
+      + '<th colspan="5" style="border-bottom-color:#7c3aed">AVG Commercial Discount</th>'
+      + '<th colspan="5" style="border-bottom-color:#b45309">Stock</th>'
+      + '<th colspan="4" style="border-bottom-color:#1d4ed8">Performance</th></tr>';
+  }
+  var COLS=[
+    ['priority','Prio'],['_alert','Alerts'],['name','Store'],['arm','ARM'],['am','AM'],
+    ['gtv_ytd','GTV YTD¹'],['gtv_ytd_var','YTD Var¹'],['gtv_l7d','GTV L7D²'],['gtv_wow','WoW²'],
+    ['net_sales_units','Net Sales³'],['sell_thru','SellThru³'],['pct_sales','% Sales³'],
+    ['avg_cd_ty','CD TY¹'],['wtd_cd','CD End⁴'],['cd_var_ly','Var LY¹'],['avg_uncomp','Uncomp⁴'],['_cdact','Actions'],
+    ['units_online','Units⁴'],['units_wow_pct','WoW²'],['stock_offline_pct','Offline⁴'],['products_last_month','Prod³'],['_stk','✉'],
+    ['orders_last_month','Orders³'],['return_rate','Returns³'],['perfect_orders','Perfect³'],['_perf','✉']
+  ];
+  function thS(){
+    return '<tr class="th-s">'+COLS.map(function(c){
+      var sortable=c[0].charAt(0)!=='_';
+      return '<th'+(sortable?' data-k="'+c[0]+'"':'')+'>'+c[1]+'</th>';
+    }).join('')+'</tr>';
+  }
+  function legend(){
+    function dot(bg,bd){return '<span class="ba-leg-dot" style="background:'+bg+';border:1px solid '+bd+'"></span>';}
+    return '<div class="ba-legend">'
+      + '<span class="ba-leg">'+dot('#fff1f2','#fecdd3')+'Critical row</span>'
+      + '<span class="ba-leg">'+dot('#fffbeb','#fde68a')+'Warning row</span>'
+      + '<span class="ba-leg">'+dot('#f0fdf4','#bbf7d0')+'No products</span>'
+      + '<span class="ba-sep"></span>'
+      + '<span class="ba-leg"><span class="ba-ab ab-red">O</span>Stock offline</span>'
+      + '<span class="ba-leg"><span class="ba-ab ab-red">G</span>GTV WoW decline</span>'
+      + '<span class="ba-leg"><span class="ba-ab ab-red">R</span>Return rate</span>'
+      + '<span class="ba-leg"><span class="ba-ab ab-amber">U</span>Uncompetitive &gt;20</span>'
+      + '<span class="ba-leg"><span class="ba-ab ab-blue">P</span>0 new products</span>'
+      + '<span class="ba-leg"><span class="ba-ab ab-teal">T</span>Sell-through &lt;15%</span>'
+      + '<span class="ba-sep"></span>'
+      + '<span class="ba-leg"><span class="ba-vb var-top">★</span>Top 10% sell-through</span>'
+      + '<span class="ba-leg"><span class="ps-out">⚠</span>≥25% sold outside Farfetch</span>'
+      + '<span class="ba-sep"></span>'
+      + '<span class="ba-leg">¹YTD · ²L7D/WoW · ³Last month · ⁴Snapshot</span>'
+      + '</div>';
+  }
+  function shell(){
+    return '<div class="ba-toolbar">'
+      + '<label>Filter</label>'
+      + '<input class="ba-f-input" id="baSearch" placeholder="Search store or AM…" oninput="BA.applyFilters()">'
+      + '<select class="ba-f-sel" id="baARM" onchange="BA.applyFilters()"><option value="">All ARMs</option></select>'
+      + '<select class="ba-f-sel" id="baAM" onchange="BA.applyFilters()"><option value="">All AMs</option></select>'
+      + '<select class="ba-f-sel" id="baAlert" onchange="BA.applyFilters()"><option value="">All Statuses</option><option value="crit">Critical</option><option value="warn">Warning</option><option value="noprods">No Products</option></select>'
+      + '<select class="ba-f-sel" id="baPrio" onchange="BA.applyFilters()"><option value="">All Priorities</option><option value="high">High (8-10)</option><option value="mid">Medium (4-7)</option><option value="low">Low (1-3)</option></select>'
+      + '<div class="ba-sep"></div>'
+      + '<button class="ba-btn ba-btn-weights" onclick="BA.openWeights()">⚙ Priority Weights</button>'
+      + '<button class="ba-btn ba-btn-clear" onclick="BA.clearFilters()">✕ Clear</button>'
+      + '<span class="ba-rowcount" id="baRowCount"></span>'
+      + '</div>'
+      + legend()
+      + '<div class="ba-stats">'
+      + '<div class="ba-stat"><span class="ba-stat-num" id="baStAll">—</span><span class="ba-stat-lbl">Partners</span></div>'
+      + '<div class="ba-stat s-red"><span class="ba-stat-num" id="baStCrit">—</span><span class="ba-stat-lbl">Critical</span></div>'
+      + '<div class="ba-stat s-amber"><span class="ba-stat-num" id="baStWarn">—</span><span class="ba-stat-lbl">Warning</span></div>'
+      + '<div class="ba-stat s-violet"><span class="ba-stat-num" id="baStHi">—</span><span class="ba-stat-lbl">Priority 8–10</span></div>'
+      + '<div class="ba-stat s-green"><span class="ba-stat-num" id="baStOk">—</span><span class="ba-stat-lbl">No Issues</span></div>'
+      + '<div class="ba-stat s-teal"><span class="ba-stat-num" id="baStCd">—</span><span class="ba-stat-lbl">CD Data</span></div>'
+      + '</div>'
+      + '<div class="ba-table-wrap"><table class="ba-table"><thead>'+thG()+thS()+'</thead><tbody id="baBody"></tbody></table></div>';
+  }
+
+  // ── modals (built once, appended to body) ────────────────────────────────
+  function buildModals(){
+    if(state.modalsBuilt) return;
+    var div=document.createElement('div');
+    div.innerHTML=''
+      + '<div class="ba-ov" id="baModalWeights"><div class="ba-modal wide"><div class="ba-modal-hdr">'
+        + '<div><div class="ba-modal-title">Priority Weights</div><div class="ba-modal-sub">Toggle factors and tune their weight — the priority score re-computes live.</div></div>'
+        + '<button class="ba-modal-x" onclick="BA.close(\'baModalWeights\')">✕</button></div>'
+        + '<div class="ba-modal-body" id="baWeightsBody"></div>'
+        + '<div class="ba-modal-ftr"><button class="ba-btn-g" onclick="BA.resetWeights()">Reset</button><button class="ba-btn-g" onclick="BA.normalizeWeights()">Normalise to 100</button><button class="ba-btn-p" onclick="BA.applyWeights()">Apply</button></div></div></div>'
+      + emailModal('baModalCD','Commercial Discount Alert')
+      + emailModal('baModalStock','Stock on Hand Request')
+      + emailModal('baModalPerf','Performance Alert')
+      + emailModal('baModalGTV','GTV Recovery Plan','<div id="baGTVChecks" style="margin-bottom:12px"></div>');
+    document.body.appendChild(div);
+    div.querySelectorAll('.ba-ov').forEach(function(ov){ ov.addEventListener('click',function(e){ if(e.target===ov) ov.classList.remove('open'); }); });
+    if(!state._esc){ state._esc=true; document.addEventListener('keydown',function(e){ if(e.key==='Escape') document.querySelectorAll('.ba-ov.open').forEach(function(o){o.classList.remove('open');}); }); }
+    state.modalsBuilt=true;
+  }
+  function emailModal(id,title,extra){
+    return '<div class="ba-ov" id="'+id+'"><div class="ba-modal"><div class="ba-modal-hdr">'
+      + '<div><div class="ba-modal-title">'+title+'</div><div class="ba-modal-sub" id="'+id+'Sub"></div></div>'
+      + '<button class="ba-modal-x" onclick="BA.close(\''+id+'\')">✕</button></div>'
+      + '<div class="ba-modal-body">'+(extra||'')
+        + '<div class="ba-field"><label>To</label><input id="'+id+'To" type="email" placeholder="partner contact email…"></div>'
+        + '<div class="ba-field"><label>Subject</label><input id="'+id+'Subj" type="text"></div>'
+        + '<div class="ba-field"><label>Body</label><textarea id="'+id+'Body" rows="9"></textarea></div></div>'
+      + '<div class="ba-modal-ftr"><button class="ba-btn-g" onclick="BA.copyDraft(\''+id+'\')">Copy draft</button><button class="ba-btn-p" onclick="BA.copyDraft(\''+id+'\')">Copy &amp; close</button></div></div></div>';
+  }
+
+  // weights UI
+  function buildWeightsUI(){
+    var body=document.getElementById('baWeightsBody'); if(!body) return;
+    var cats=uniq(WEIGHT_DEFS.map(function(d){return d.cat;}));
+    body.innerHTML=cats.map(function(cat){
+      var defs=WEIGHT_DEFS.filter(function(d){return d.cat===cat;}), color=defs[0].color;
+      return '<div class="ba-wgrp"><div class="ba-wgrp-hdr"><span class="ba-wgrp-dot" style="background:'+color+'"></span>'+cat+'</div>'
+        + defs.map(function(d){
+          return '<div class="ba-wrow" id="bawrow_'+d.key+'">'
+            + '<input type="checkbox" id="bawe_'+d.key+'" checked onchange="BA.toggleFactor(\''+d.key+'\')" style="accent-color:var(--ink);width:15px;height:15px">'
+            + '<div><div class="ba-wlbl">'+d.label+'</div><div class="ba-wdesc">'+d.desc+'</div></div>'
+            + '<div class="ba-wtrack"><div class="ba-wfill" id="bawb_'+d.key+'" style="width:'+d.def+'%"></div></div>'
+            + '<input class="ba-winput" id="bawi_'+d.key+'" type="number" min="0" max="100" value="'+d.def+'" oninput="BA.onWeight(\''+d.key+'\')"></div>';
+        }).join('')+'</div>';
+    }).join('')+'<div class="ba-wtotal"><span>Total weight</span><span id="baWTotal">100</span></div>'
+      + '<div class="ba-whint">Toggle off any factor to exclude it. Weights auto-normalise to 100 on Apply.</div>';
+    updateWTotal();
+  }
+  function eachWeight(fn){ WEIGHT_DEFS.forEach(function(d){ fn(d, document.getElementById('bawe_'+d.key), document.getElementById('bawi_'+d.key)); }); }
+  function updateWTotal(){ var t=0; eachWeight(function(d,en,inp){ if(en&&en.checked) t+=Number(inp.value)||0; });
+    var el=document.getElementById('baWTotal'); if(el){ el.textContent=t; el.style.color=Math.abs(t-100)<0.5?'#15803d':'#be123c'; } }
+  function toggleFactor(k){ var en=document.getElementById('bawe_'+k).checked;
+    document.getElementById('bawrow_'+k).classList.toggle('w-off',!en);
+    document.getElementById('bawi_'+k).disabled=!en; updateWTotal(); }
+  function onWeight(k){ var v=Number(document.getElementById('bawi_'+k).value)||0;
+    document.getElementById('bawb_'+k).style.width=Math.min(v,100)+'%'; updateWTotal(); }
+  function normalizeWeights(){ var t=0; eachWeight(function(d,en,inp){ if(en&&en.checked) t+=Number(inp.value)||0; }); if(!t) return;
+    eachWeight(function(d,en,inp){ if(en&&en.checked){ var nv=Math.round((Number(inp.value)||0)/t*100); inp.value=nv;
+      document.getElementById('bawb_'+d.key).style.width=Math.min(nv,100)+'%'; } }); updateWTotal(); }
+  function applyWeights(){ var t=0; eachWeight(function(d,en,inp){ if(en&&en.checked) t+=Number(inp.value)||0; });
+    if(Math.abs(t-100)>0.5) normalizeWeights();
+    eachWeight(function(d,en,inp){ weights[d.key]=(en&&en.checked)?(Number(inp.value)||0):0; });
+    close('baModalWeights'); renderTable(); }
+  function resetWeights(){ eachWeight(function(d,en,inp){ if(en){en.checked=true;document.getElementById('bawrow_'+d.key).classList.remove('w-off');}
+    if(inp){inp.value=d.def;inp.disabled=false;} var b=document.getElementById('bawb_'+d.key); if(b)b.style.width=d.def+'%'; weights[d.key]=d.def; });
+    updateWTotal(); renderTable(); }
+
+  // email composers
+  function openCDEmail(id){ var r=findRow(id); if(!r) return;
+    set2('baModalCDSub',esc(r.name)+' — CD End: '+(r.wtd_cd!=null?r.wtd_cd.toFixed(1)+'%':'—'));
+    setVal('baModalCDTo',''); setVal('baModalCDSubj','[Farfetch] Commercial Discount Alert — '+r.name);
+    setVal('baModalCDBody','Dear '+r.name+' team,\n\nWe have noted a decrease in the commercial discount applied to products on your store.\n\nCould you please advise on the reason for these changes?\n\nBest regards,\n'+(r.am||'Your Account Manager'));
+    open('baModalCD'); }
+  function openStock(id){ var r=findRow(id); if(!r) return;
+    set2('baModalStockSub',esc(r.name)+' — Offline: '+(r.stock_offline_pct!=null?(r.stock_offline_pct*100).toFixed(1)+'%':'—'));
+    setVal('baModalStockTo',''); setVal('baModalStockSubj','[Farfetch] Stock on Hand Request — '+r.name);
+    setVal('baModalStockBody','Dear '+r.name+' team,\n\nWe have noticed that '+(r.stock_offline_pct!=null?(r.stock_offline_pct*100).toFixed(1)+'%':'a portion')+' of your stock is currently offline on Farfetch.\n\nCould you please share your current Stock on Hand file so we can help get your full catalogue live?\n\nBest regards,\n'+(r.am||'Your Account Manager'));
+    open('baModalStock'); }
+  function openPerf(id){ var r=findRow(id); if(!r) return; var issues=[];
+    if((r.return_rate||0)>0.30) issues.push('  • Return rate: '+(r.return_rate*100).toFixed(1)+'% (threshold 30%)');
+    if((r.perfect_orders==null?1:r.perfect_orders)<0.85) issues.push('  • Perfect order rate: '+(r.perfect_orders*100).toFixed(1)+'% (threshold 85%)');
+    set2('baModalPerfSub',esc(r.name)+' — Returns: '+(r.return_rate!=null?(r.return_rate*100).toFixed(1)+'%':'—')+' · Perfect: '+(r.perfect_orders!=null?(r.perfect_orders*100).toFixed(1)+'%':'—'));
+    setVal('baModalPerfTo',''); setVal('baModalPerfSubj','[Farfetch] Performance Alert — '+r.name);
+    setVal('baModalPerfBody','Dear '+r.name+' team,\n\nWe have identified the following performance issues on your store (last complete month):\n\n'+issues.join('\n')+'\n\nCould you please review and let us know your plan to improve these metrics?\n\nBest regards,\n'+(r.am||'Your Account Manager'));
+    open('baModalPerf'); }
+  function openGTV(id){ var r=findRow(id); if(!r) return; state._gtv=id;
+    set2('baModalGTVSub',esc(r.name)+' — WoW: '+(r.gtv_wow!=null?(r.gtv_wow*100).toFixed(1)+'%':'—')+' · YTD: '+fmtGTV(r.gtv_ytd));
+    var checks=[['g1','Boost catalogue — request new products & content',true],['g2','More aggressive commercial discounts',false],
+                ['g3','Promotional event participation',false],['g4','Improve product content (images, descriptions)',false]];
+    document.getElementById('baGTVChecks').innerHTML=checks.map(function(c){
+      return '<label class="ba-check"><input type="checkbox" id="ba'+c[0]+'" '+(c[2]?'checked':'')+' onchange="BA.updateGTV()"> '+c[1]+'</label>'; }).join('');
+    setVal('baModalGTVTo',''); setVal('baModalGTVSubj','[Farfetch] GTV Recovery Plan — '+r.name);
+    updateGTV(); open('baModalGTV'); }
+  function updateGTV(){ var r=findRow(state._gtv); if(!r) return; var a=[];
+    if(chk('bag1')) a.push('- Boost catalogue: please upload new products with full content (images, descriptions, sizing).');
+    if(chk('bag2')) a.push('- Commercial discounts: please review and increase discounts to improve price competitiveness.');
+    if(chk('bag3')) a.push('- Promotional events: we would like to invite you to participate in upcoming promotional events.');
+    if(chk('bag4')) a.push('- Content improvement: please enhance product imagery and descriptions to drive conversion.');
+    setVal('baModalGTVBody','Dear '+r.name+' team,\n\nWe have observed a decline in your GTV performance (WoW: '+(r.gtv_wow!=null?(r.gtv_wow*100).toFixed(1)+'%':'—')+', YTD: '+fmtGTV(r.gtv_ytd)+').\n\nTo support recovery, we recommend:\n\n'+a.join('\n')+'\n\nPlease let us know if you need any assistance.\n\nBest regards,\n'+(r.am||'Your Account Manager')); }
+
+  function copyDraft(id){
+    var to=val(id+'To'), subj=val(id+'Subj'), body=val(id+'Body');
+    var text='To: '+to+'\nSubject: '+subj+'\n\n'+body;
+    var ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.left='-9999px';
+    document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); if(typeof toast==='function') toast('Email draft copied to clipboard'); }
+    catch(e){ if(typeof toast==='function') toast('Copy failed — select & copy manually','error'); }
+    document.body.removeChild(ta); close(id);
+  }
+
+  // small DOM helpers
+  function open(id){ var el=document.getElementById(id); if(el) el.classList.add('open'); }
+  function close(id){ var el=document.getElementById(id); if(el) el.classList.remove('open'); }
+  function set2(id,html){ var el=document.getElementById(id); if(el) el.innerHTML=html; }
+  function setVal(id,v){ var el=document.getElementById(id); if(el) el.value=v; }
+  function chk(id){ var el=document.getElementById(id); return el&&el.checked; }
+
+  // ── load / init (preserves the original per-team lazy+cached contract) ───
+  function load(){
+    state.loading=true;
+    var body=document.getElementById('baBody');
+    if(body) body.innerHTML='<tr><td colspan="26"><div class="ba-empty"><i data-lucide="loader-2" class="spin" style="width:20px;height:20px"></i><div style="margin-top:8px;font-size:12px">Loading Bid-Ask data…</div></div></td></tr>';
+    refreshIcons();
+    var useGAS=typeof google!=='undefined'&&google.script&&google.script.run;
+    if(!useGAS){ onData({headers:[],rows:[],empty:true,teamName:(typeof _userTeam!=='undefined'?_userTeam:'')}); return; }
+    google.script.run
+      .withSuccessHandler(onData)
+      .withFailureHandler(function(e){ onData({headers:[],rows:[],empty:true,error:(e&&e.message)||String(e)}); })
+      .getBidAskData(typeof _userTeam!=='undefined'?_userTeam:'');
+  }
+  function onData(d){
+    state.loading=false; state.raw=d||{headers:[],rows:[],empty:true};
+    state.lastFetchTeam=(typeof _userTeam!=='undefined')?_userTeam:'';
+    state.rows=mapRows(state.raw);
+    if(!state.rows.length){ renderEmpty(state.raw); return; }
+    populateFilters(); buildWeightsUI(); applyFilters();
+  }
+  function renderEmpty(d){
+    var tb=document.getElementById('baBody'); if(!tb) return;
+    var team=(d&&d.teamName)||(typeof _userTeam!=='undefined'?_userTeam:''), tab=(d&&d.tabName)||'', err=(d&&d.error)||'';
+    set('baRowCount','0 / 0 partners'); ['baStAll','baStCrit','baStWarn','baStHi','baStOk','baStCd'].forEach(function(i){set(i,'0');});
+    tb.innerHTML='<tr><td colspan="26"><div class="ba-empty">'
+      + '<i data-lucide="construction" style="width:34px;height:34px"></i>'
+      + '<div style="font-size:16px;font-weight:800;color:var(--ink);letter-spacing:-.01em;margin-bottom:6px">Bid-Ask data coming soon</div>'
+      + '<div style="font-size:12px;max-width:520px;margin:0 auto;line-height:1.6">The source sheet is wired'+(tab?' (looking at <b>'+esc(tab)+'</b>)':'')+', but the data tab for <b>'+esc(team)+'</b> isn\'t populated yet. Add the columns from the steps doc, then Refresh.</div>'
+      + (err?'<div style="margin-top:12px;font-size:10.5px;color:#be123c;background:#fff1f2;border:1px solid #fecdd3;padding:6px 12px;border-radius:6px;display:inline-block">'+esc(err)+'</div>':'')
+      + '<div style="margin-top:16px"><button class="ba-btn ba-btn-clear" onclick="BA.load()">↻ Check again</button></div>'
+      + '</div></td></tr>';
     refreshIcons();
   }
-  google.script.run
-    .withSuccessHandler(function(sends) {
-      if (!sends || !sends.length) {
-        document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No send records.</td></tr>';
-        if (expandBtn) expandBtn.style.display = 'none';
-        return;
-      }
-      document.getElementById('adminSendBody').innerHTML = sends.map(function(s) {
-        var ts = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
-        // Null-safe: coerce status to string before indexOf
-        var rawStatus = String(s.status || '');
-        var isSent = rawStatus.toUpperCase().indexOf('SENT') > -1 || rawStatus.toLowerCase() === 'ok';
-        var isErr  = rawStatus.toUpperCase().indexOf('ERROR') === 0;
-        var sc = isSent
-          ? 'color:#15803d;background:#f0fdf4'
-          : isErr
-            ? 'color:#be123c;background:#fff1f2'
-            : 'color:#b45309;background:#fffbeb';
-        var statusLabel = rawStatus || '—';
-        var replyPill = s.replied && String(s.replied).toLowerCase() === 'yes'
-          ? '<span style="color:#15803d;background:#f0fdf4;border:1px solid #bbf7d0;padding:1px 7px;border-radius:99px;font-size:9px;font-weight:700">Yes</span>'
-          : '<span style="color:var(--ink-4);font-size:10px">—</span>';
-        return '<tr>'
-          + '<td style="font-size:11px;color:var(--ink-3);white-space:nowrap">' + esc(ts) + '</td>'
-          + '<td style="font-weight:500">' + esc(s.store) + '</td>'
-          + '<td style="font-size:11px;color:var(--ink-3)">' + esc(s.email) + '</td>'
-          + '<td style="font-size:11px">' + esc(s.campaign) + '</td>'
-          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(s.templateKey || '—') + '</td>'
-          + '<td><span style="' + sc + ';padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase" title="' + esc(statusLabel) + '">' + esc(statusLabel.length > 24 ? statusLabel.slice(0, 24) + '…' : statusLabel) + '</span></td>'
-          + '<td style="text-align:center">' + replyPill + '</td>'
-          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(s.sentBy) + '</td>'
-          + '</tr>';
-      }).join('');
-      if (expandBtn) {
-        if (loadAll || sends.length < limit) {
-          adminSendsExpanded = true;
-          expandBtn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px"></i> Showing all ' + sends.length + ' entries';
-          expandBtn.disabled = true;
-          expandBtn.style.opacity = '0.6';
-        } else {
-          expandBtn.innerHTML = '<i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Showing ' + sends.length + ' — Load all entries';
-          expandBtn.disabled = false;
-          expandBtn.style.opacity = '1';
-        }
-        expandBtn.style.display = 'inline-flex';
-        refreshIcons();
-      }
-    })
-    .withFailureHandler(function(e) {
-      document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:#be123c">Failed to load: ' + esc(e.message || e) + '</td></tr>';
-    })
-    .getRecentSends(limit, _userTeam);
-}
 
-function expandAdminSends() { loadAdminSends(true); }
+  function init(){
+    var host=document.getElementById('view-bidask'); if(!host) return;
+    var team=(typeof _userTeam!=='undefined')?_userTeam:'';
+    if(state.built && state.lastFetchTeam===team && state.rows.length){ renderTable(); return; }  // re-enter, same team
+    host.innerHTML=shell();
+    if(!state.clickBound){  // bind once — host persists across team switches/re-renders
+      host.addEventListener('click',function(e){ var th=e.target.closest&&e.target.closest('tr.th-s th[data-k]'); if(th) sortBy(th.getAttribute('data-k'),th); });
+      state.clickBound=true;
+    }
+    buildModals(); state.built=true;
+    if(state.lastFetchTeam!==team || !state.rows.length) load();   // fetch (team changed or first time)
+    else { populateFilters(); buildWeightsUI(); applyFilters(); }
+    refreshIcons();
+  }
 
-/* ── Accounts ───────────────────────────────────────────────────────────── */
-function loadAdminAccounts() {
-  google.script.run
-    .withSuccessHandler(function(accounts) {
-      adminAccounts = accounts || [];
-      renderAdminAccounts();
-    })
-    .withFailureHandler(function(e) { showToast('Error loading accounts: ' + e.message, 'error'); })
-    .getAccountsList(_userTeam);
-}
+  // public surface
+  return { init:init, load:load, applyFilters:applyFilters, clearFilters:clearFilters,
+    openWeights:function(){ open('baModalWeights'); }, toggleFactor:toggleFactor, onWeight:onWeight,
+    normalizeWeights:normalizeWeights, applyWeights:applyWeights, resetWeights:resetWeights,
+    openCDEmail:openCDEmail, openStock:openStock, openPerf:openPerf, openGTV:openGTV, updateGTV:updateGTV,
+    copyDraft:copyDraft, close:close };
+})();
 
-function renderAdminAccounts(filter) {
-  var q = (filter || document.getElementById('acctSearch').value || '').toLowerCase();
-  var filtered = adminAccounts.filter(function(a) { return !q || a.name.toLowerCase().indexOf(q) > -1; });
-  document.getElementById('adminAcctBody').innerHTML = filtered.map(function(a) {
-    var isActive = String(a.status || '').toLowerCase() === 'active';
-    var statusHtml = isActive
-      ? '<span style="color:#15803d;background:#f0fdf4;padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">Active</span>'
-      : '<span style="color:var(--ink-4);background:var(--bg);padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">' + esc(a.status) + '</span>';
-    var nameEsc = esc(a.name).replace(/'/g, "\\'");
-    var actionBtn = isActive
-      ? '<button class="btn-reject" style="padding:3px 10px;font-size:10px" onclick="setAcctStatus(\'' + nameEsc + '\',\'Inactive\')">Deactivate</button>'
-      : '<button class="btn-approve" style="padding:3px 10px;font-size:10px" onclick="setAcctStatus(\'' + nameEsc + '\',\'Active\')">Reactivate</button>';
-    return '<tr>'
-      + '<td style="font-weight:500">' + esc(a.name) + '</td>'
-      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(a.sources) + '</td>'
-      + '<td>' + statusHtml + '</td>'
-      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(a.dateAdded) + '</td>'
-      + '<td>' + actionBtn + '</td>'
-      + '</tr>';
-  }).join('') || '<tr><td colspan="5" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No accounts found.</td></tr>';
-  var countEl = document.getElementById('acctCount');
-  if (countEl) countEl.textContent = filtered.length + ' of ' + adminAccounts.length;
-}
-
-function setAcctStatus(name, newStatus) {
-  if (!confirm((newStatus === 'Inactive' ? 'Deactivate' : 'Reactivate') + ' "' + name + '"?')) return;
-  google.script.run
-    .withSuccessHandler(function(res) {
-      if (res.success) { showToast(name + ' → ' + newStatus, 'success'); loadAdminAccounts(); }
-      else { showToast(res.error || 'Failed', 'error'); }
-    })
-    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
-    .setAccountStatus(name, newStatus, _userTeam);
-}
-
-/* ── Admin maintenance ──────────────────────────────────────────────────── */
-function adminClearCache() {
-  showToast('Clearing cache…', 'success');
-  google.script.run
-    .withSuccessHandler(function() { showToast('Cache cleared.', 'success'); })
-    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
-    .clearNexusCache();
-}
-
-function adminPurgeLogs() {
-  if (!confirm('Purge log entries older than 184 days?')) return;
-  showToast('Purging old logs…', 'success');
-  google.script.run
-    .withSuccessHandler(function() {
-      showToast('Old logs purged.', 'success');
-      adminLoaded = false;
-      adminLogsExpanded = false;
-      initAdminView();
-    })
-    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
-    .scheduledLogCleanup(_userTeam);
-}
-
-function adminRebuildSpine() {
-  if (!confirm('Rebuild Accounts Spine for ' + (_userTeam || 'current team') + '? This may take 10–20 seconds.')) return;
-  showToast('Rebuilding spine…', 'success');
-  google.script.run
-    .withSuccessHandler(function(r) { showToast('Spine rebuilt: ' + JSON.stringify(r), 'success'); loadAdminAccounts(); })
-    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
-    .buildAccountsSpineForTeam(_userTeam);
-}
+/* NEXUS entry point (called by switchView('bidask')) — name preserved. */
+function initBidAskView(){ BA.init(); }
 </script>
-
-<!-- ══ ADMIN VIEW HTML ══ -->
-<div id="view-admin" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0">
-  <div id="adminGate" style="display:none;flex:1;align-items:center;justify-content:center;flex-direction:column;gap:8px">
-    <i data-lucide="shield-off" style="width:32px;height:32px;color:var(--ink-4)"></i>
-    <div style="font-size:13px;font-weight:600;color:var(--ink-3)">Access restricted</div>
-    <div style="font-size:11px;color:var(--ink-4)">Manager account required.</div>
-  </div>
-
-  <div id="adminContent" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-    <!-- toolbar -->
-    <div class="filter-bar" style="justify-content:space-between;border-radius:0;border-left:none;border-right:none">
-      <div style="display:flex;align-items:center;gap:10px">
-        <button class="drawer-tab active" id="atab-pending" onclick="switchAdminTab('pending')" style="padding:8px 14px">Pending Contacts <span id="adminPendingBadge" style="display:none;background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px;margin-left:4px">0</span></button>
-        <button class="drawer-tab" id="atab-logs" onclick="switchAdminTab('logs')" style="padding:8px 14px">System Logs</button>
-        <button class="drawer-tab" id="atab-sends" onclick="switchAdminTab('sends');loadAdminSends()" style="padding:8px 14px">Send Log</button>
-        <button class="drawer-tab" id="atab-accounts" onclick="switchAdminTab('accounts')" style="padding:8px 14px">Accounts</button>
-        <span id="adminTeamLabel" style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:var(--bg);border:1px solid var(--border);padding:3px 10px;border-radius:6px;color:var(--ink-3);margin-left:8px"></span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminClearCache()"><i data-lucide="trash-2" style="width:12px;height:12px"></i> Clear Cache</button>
-        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminRebuildSpine()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Rebuild Spine</button>
-        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminPurgeLogs()"><i data-lucide="archive" style="width:12px;height:12px"></i> Purge Old Logs</button>
-      </div>
-    </div>
-
-    <!-- KPIs -->
-    <div style="padding:16px 24px 0"><div class="kpi-grid" id="adminKpis" style="grid-template-columns:repeat(5,1fr)"></div></div>
-
-    <!-- PENDING CONTACTS TAB -->
-    <div id="admin-pending" style="flex:1;overflow:auto;padding:0 24px 16px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-        <span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Approve or Reject Contact Proposals</span>
-        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;margin-left:auto" onclick="refreshAdminPendingFull()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>
-      </div>
-      <div class="section-card" style="padding:0;overflow:hidden">
-        <table class="nx-table"><thead><tr><th>Account</th><th>Name</th><th>Email</th><th>Role</th><th>Change</th><th>Proposed by</th><th>Actions</th></tr></thead>
-        <tbody id="adminPendingBody"><tr><td colspan="7" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
-      </div>
-    </div>
-
-    <!-- SYSTEM LOGS TAB -->
-    <div id="admin-logs" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-        <select id="adminLogFilter" class="nx-select" onchange="adminLogsExpanded=false;loadAdminLogs()"><option value="">All Statuses</option><option value="success">Success</option><option value="error">Error</option><option value="warning">Warning</option></select>
-        <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminLogsExpanded=false;loadAdminLogs()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i></button>
-      </div>
-      <div class="section-card" style="padding:0;overflow:hidden">
-        <table class="nx-table"><thead><tr><th>Timestamp</th><th>Function</th><th>Status</th><th>Triggered By</th><th style="text-align:right">Duration</th><th>Details</th></tr></thead>
-        <tbody id="adminLogBody"><tr><td colspan="6" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
-      </div>
-      <div style="text-align:center;padding:12px 0">
-        <button class="btn-ghost" id="adminLogsExpandBtn" onclick="expandAdminLogs()" style="padding:6px 16px;font-size:11px;display:none;align-items:center;gap:6px;margin:0 auto"><i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Load all entries</button>
-      </div>
-    </div>
-
-    <!-- SEND LOG TAB (V3.0 — 8 cols: Timestamp, Partner, Email, Campaign, Template, Status, Replied, Sent By) -->
-    <div id="admin-sends" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
-      <div style="margin-bottom:12px"><button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminSendsExpanded=false;loadAdminSends()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button></div>
-      <div class="section-card" style="padding:0;overflow:hidden">
-        <table class="nx-table"><thead><tr><th>Timestamp</th><th>Partner</th><th>Email</th><th>Campaign</th><th>Template</th><th>Status</th><th style="text-align:center">Replied</th><th>Sent By</th></tr></thead>
-        <tbody id="adminSendBody"><tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Click tab to load…</td></tr></tbody></table>
-      </div>
-      <div style="text-align:center;padding:12px 0">
-        <button class="btn-ghost" id="adminSendsExpandBtn" onclick="expandAdminSends()" style="padding:6px 16px;font-size:11px;display:none;align-items:center;gap:6px;margin:0 auto"><i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Load all entries</button>
-      </div>
-    </div>
-
-    <!-- ACCOUNTS TAB -->
-    <div id="admin-accounts" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-        <input class="nx-input" id="acctSearch" placeholder="Search accounts…" oninput="renderAdminAccounts()" style="width:220px">
-        <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="loadAdminAccounts()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>
-        <span style="margin-left:auto;font-size:10px;color:var(--ink-4)" id="acctCount"></span>
-      </div>
-      <div class="section-card" style="padding:0;overflow:hidden">
-        <table class="nx-table"><thead><tr><th>Account Name</th><th>Sources</th><th>Status</th><th>Date Added</th><th>Actions</th></tr></thead>
-        <tbody id="adminAcctBody"><tr><td colspan="5" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
-      </div>
-    </div>
-  </div>
-</div>
