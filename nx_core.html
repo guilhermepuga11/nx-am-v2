@@ -1,0 +1,303 @@
+<script>
+/* ═══════════════════════════════════════
+   CONTACTS VIEW — card-based groups
+═══════════════════════════════════════ */
+var _editingContactRow = null;
+var _expandedStores = {};
+
+function loadAllContacts() {
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (!useGAS) return;
+  google.script.run.withSuccessHandler(function(rows) {
+    rows = rows || [];
+    var cockpitNames = {};
+    P.forEach(function(p) { cockpitNames[(p.company || '').toLowerCase()] = true; });
+    allContacts = rows.filter(function(c) {
+      return c.status === 'active' && cockpitNames[(c.merchant_name || '').toLowerCase()];
+    });
+    pendingContacts = rows.filter(function(c) {
+      return c.status === 'pending' && cockpitNames[(c.merchant_name || '').toLowerCase()];
+    });
+    renderContactsAll();
+    updatePendingBadge();
+    if (typeof renderAdminPending === 'function') renderAdminPending();
+  }).getAllContacts();
+}
+
+function renderContactsAll() {
+  var q = (document.getElementById('cSearch').value || '').toLowerCase();
+  var role = document.getElementById('cRoleFilter').value;
+  var primaryOnly = document.getElementById('cPrimaryOnly').checked;
+  var filtered = allContacts.filter(function(c) {
+    var mq = !q || (c.merchant_name || '').toLowerCase().includes(q) || (c.contact_name || '').toLowerCase().includes(q) || (c.contact_email || '').toLowerCase().includes(q);
+    var mr = !role || c.contact_role === role;
+    var mp = !primaryOnly || c.is_primary === true || c.is_primary === 'TRUE';
+    return mq && mr && mp;
+  });
+  document.getElementById('cCount').textContent = filtered.length + ' contacts';
+
+  // Group by merchant_name
+  var groups = {};
+  var groupOrder = [];
+  filtered.forEach(function(c) {
+    var key = c.merchant_name || 'Unknown';
+    if (!groups[key]) { groups[key] = []; groupOrder.push(key); }
+    groups[key].push(c);
+  });
+  groupOrder.sort(function(a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); });
+
+  var el = document.getElementById('cGroupedList');
+  if (!el) return;
+
+  if (!groupOrder.length) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:11px">No contacts found.</div>';
+    return;
+  }
+
+  // Build include_in_crm lookup from P[] contacts
+  var crmLookup = {};
+  P.forEach(function(p) {
+    if (!p.contacts) return;
+    p.contacts.forEach(function(c) {
+      var lk = (p.company || '').toLowerCase() + '|' + (c.contact_email || '').toLowerCase();
+      crmLookup[lk] = c.include_in_crm !== false;
+    });
+  });
+
+  var html = '';
+  groupOrder.forEach(function(storeName) {
+    var contacts = groups[storeName];
+    var isExpanded = _expandedStores[storeName] === true;
+    var count = contacts.length;
+    var primaryC = contacts.find(function(c) { return c.is_primary === true || c.is_primary === 'TRUE'; });
+
+    html += '<div class="section-card" style="margin:0 0 8px;padding:0;overflow:hidden">';
+
+    // Store header
+    html += '<div onclick="toggleStoreExpand(\'' + esc(storeName).replace(/'/g, "\\'") + '\')" style="display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;transition:background 0.1s;user-select:none" onmouseenter="this.style.background=\'var(--bg)\'" onmouseleave="this.style.background=\'\'">'
+      + '<span style="font-size:10px;color:var(--ink-3);transition:transform 0.15s;display:inline-block;transform:rotate(' + (isExpanded ? '90' : '0') + 'deg)">&#x25B8;</span>'
+      + '<div style="flex:1;min-width:0">'
+      + '<div style="font-size:12.5px;font-weight:600;color:var(--ink)">' + esc(storeName) + '</div>'
+      + (primaryC ? '<div style="font-size:10px;color:var(--ink-3);margin-top:1px">' + esc(primaryC.contact_name) + ' &middot; ' + esc(primaryC.contact_email) + '</div>' : '')
+      + '</div>'
+      + '<span style="background:var(--bg);border:1px solid var(--border);padding:2px 9px;border-radius:99px;font-size:9px;font-weight:700;color:var(--ink-3)">' + count + '</span>'
+      + '</div>';
+
+    // Expanded contact cards
+    if (isExpanded) {
+      html += '<div style="padding:0 16px 14px;display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--border);padding-top:12px;background:var(--bg)">';
+      contacts.forEach(function(c) {
+        var isPrim = c.is_primary === true || c.is_primary === 'TRUE';
+        var initial = (c.contact_name || '?').charAt(0).toUpperCase();
+        var crmKey = (storeName || '').toLowerCase() + '|' + (c.contact_email || '').toLowerCase();
+        var inCrm = crmLookup.hasOwnProperty(crmKey) ? crmLookup[crmKey] : true;
+
+        if (_editingContactRow === c.rowIndex) {
+          // Edit mode
+          html += '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px 14px">'
+            + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'
+            + '<input type="text" class="nx-field-input" id="cedit-name" value="' + esc(c.contact_name) + '" placeholder="Name" style="padding:6px 10px;font-size:12px;flex:1">'
+            + '<input type="email" class="nx-field-input" id="cedit-email" value="' + esc(c.contact_email) + '" placeholder="Email" style="padding:6px 10px;font-size:12px;flex:1.2">'
+            + '</div>'
+            + '<div style="display:flex;gap:8px;align-items:center">'
+            + '<select class="nx-field-input" id="cedit-role" style="padding:6px 10px;font-size:11px;width:110px"><option' + (c.contact_role === 'Buyer' ? ' selected' : '') + '>Buyer</option><option' + (c.contact_role === 'GM' ? ' selected' : '') + '>GM</option><option' + (c.contact_role === 'Finance' ? ' selected' : '') + '>Finance</option><option' + (c.contact_role === 'Operations' ? ' selected' : '') + '>Operations</option><option' + (c.contact_role === 'Other' ? ' selected' : '') + '>Other</option></select>'
+            + '<label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:10px;font-weight:500;color:var(--ink-2)"><input type="checkbox" id="cedit-primary"' + (isPrim ? ' checked' : '') + ' style="accent-color:var(--ink)"> Primary</label>'
+            + '<div style="margin-left:auto;display:flex;gap:6px">'
+            + '<button class="btn-primary" style="padding:5px 12px;font-size:11px" onclick="submitEditContact(' + c.rowIndex + ',\'' + esc(c.merchant_name).replace(/'/g, "\\'") + '\')">Save</button>'
+            + '<button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="cancelEditContact()">Cancel</button>'
+            + '</div></div></div>';
+        } else {
+          // Display mode
+          var crmBadgeStyle = inCrm
+            ? 'background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0'
+            : 'background:var(--bg);color:var(--ink-4);border:1px solid var(--border);text-decoration:line-through';
+
+          html += '<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;transition:border-color 0.15s" onmouseenter="this.style.borderColor=\'var(--ink-3)\'" onmouseleave="this.style.borderColor=\'var(--border)\'">'
+            + '<div style="width:32px;height:32px;border-radius:50%;background:' + (isPrim ? 'var(--ink)' : 'var(--border)') + ';color:' + (isPrim ? '#fff' : 'var(--ink-3)') + ';display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">' + initial + '</div>'
+            + '<div style="flex:1;min-width:0">'
+            + '<div style="display:flex;align-items:center;gap:6px">'
+            + '<span style="font-size:12.5px;font-weight:600;color:var(--ink)">' + esc(c.contact_name) + '</span>'
+            + (isPrim ? '<span style="font-size:8px;font-weight:700;background:var(--ink);color:#fff;padding:1px 6px;border-radius:4px;letter-spacing:0.06em">PRIMARY</span>' : '')
+            + '</div>'
+            + '<div style="font-size:11px;color:var(--ink-3);margin-top:1px">' + esc(c.contact_email) + '</div>'
+            + '</div>'
+            // Role pill
+            + '<span style="font-size:9px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4);background:var(--bg);border:1px solid var(--border);padding:2px 8px;border-radius:5px;flex-shrink:0">' + esc(c.contact_role || 'No role') + '</span>'
+            // CRM toggle badge
+            + '<span onclick="event.stopPropagation();toggleCRMFromContacts(\'' + esc(c.contact_email).replace(/'/g, "\\'") + '\',\'' + esc(storeName).replace(/'/g, "\\'") + '\',' + !inCrm + ')" style="cursor:pointer;font-size:8px;font-weight:700;letter-spacing:0.06em;padding:2px 7px;border-radius:5px;flex-shrink:0;' + crmBadgeStyle + '" title="' + (inCrm ? 'Included in CRM email scanning — click to exclude' : 'Excluded from CRM scanning — click to include') + '">CRM</span>'
+            // Actions
+            + '<div style="display:flex;gap:4px;flex-shrink:0" onclick="event.stopPropagation()">'
+            + '<button class="icon-btn" style="width:26px;height:26px" onclick="startEditContact(' + c.rowIndex + ')" title="Edit"><i data-lucide="pencil" style="width:11px;height:11px"></i></button>'
+            + '<button class="icon-btn" style="width:26px;height:26px;color:#be123c" onclick="proposeDelete(' + c.rowIndex + ',\'' + esc(c.contact_name).replace(/'/g, "\\'") + '\')" title="Delete"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>'
+            + '</div>'
+            + '</div>';
+        }
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  });
+
+  el.innerHTML = html;
+  refreshIcons();
+}
+
+function toggleCRMFromContacts(email, merchant, newValue) {
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (!useGAS) { showToast('Not available in demo', 'error'); return; }
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (res && res.success) {
+        // Update local P[] data so re-render shows new state
+        P.forEach(function(p) {
+          if ((p.company || '').toLowerCase() !== merchant.toLowerCase()) return;
+          if (!p.contacts) return;
+          p.contacts.forEach(function(c) {
+            if ((c.contact_email || '').toLowerCase() === email.toLowerCase()) {
+              c.include_in_crm = newValue;
+            }
+          });
+        });
+        renderContactsAll();
+        showToast(email + ' CRM scanning ' + (newValue ? 'enabled' : 'disabled'), 'success');
+      } else {
+        showToast(res.error || 'Failed', 'error');
+      }
+    })
+    .withFailureHandler(function(e) { showToast('Error: ' + (e.message || e), 'error'); })
+    .toggleContactCRM(email, merchant, newValue);
+}
+
+function toggleStoreExpand(storeName) {
+  _expandedStores[storeName] = !_expandedStores[storeName];
+  renderContactsAll();
+}
+
+function expandAllStores() {
+  allContacts.forEach(function(c) { _expandedStores[c.merchant_name || 'Unknown'] = true; });
+  renderContactsAll();
+}
+
+function collapseAllStores() {
+  _expandedStores = {};
+  renderContactsAll();
+}
+
+function startEditContact(rowIndex) {
+  _editingContactRow = rowIndex;
+  var c = allContacts.find(function(ct) { return ct.rowIndex === rowIndex; });
+  if (c) _expandedStores[c.merchant_name || 'Unknown'] = true;
+  renderContactsAll();
+}
+
+function cancelEditContact() {
+  _editingContactRow = null;
+  renderContactsAll();
+}
+
+function submitEditContact(rowIndex, merchant) {
+  var name = document.getElementById('cedit-name').value.trim();
+  var email = document.getElementById('cedit-email').value.trim();
+  var role = document.getElementById('cedit-role').value;
+  var isPrimary = document.getElementById('cedit-primary').checked;
+  if (!name || !email) { showToast('Name and email required', 'error'); return; }
+  var payload = { sk_merchant: '', merchant_name: merchant, contact_name: name, contact_email: email, contact_role: role, is_primary: isPrimary, rowIndex: rowIndex };
+
+  // V3.2 Phase 5 — instant edit-row dismissal + toast.
+  // Skipping post-success loadAllContacts() for the same reason as proposeContact:
+  // edits queue for admin approval; live list won't reflect them until then.
+  _editingContactRow = null;
+  if (typeof renderContacts === 'function') renderContacts();   // collapse the inline editor
+  showToast('Edit proposed — awaiting admin approval', 'success');
+
+  google.script.run
+    .withSuccessHandler(function() { /* already toasted */ })
+    .withFailureHandler(function(e) {
+      // Re-open the inline editor on the same row so user can retry
+      _editingContactRow = rowIndex;
+      if (typeof renderContacts === 'function') renderContacts();
+      var el = document.getElementById('cedit-name');
+      if (el && typeof flashField_ === 'function') flashField_(el);
+      showToast('Edit failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
+    })
+    .proposeEditContact(payload);
+}
+
+/* ═══════════════════════════════════════
+   PROPOSE DELETE CONTACT
+═══════════════════════════════════════ */
+function proposeDelete(rowIndex, contactName) {
+  if (!confirm('Propose deletion of "' + contactName + '"?\nThis will require admin approval.')) return;
+
+  // V3.2 Phase 5 — instant toast (delete proposal queues for approval; no
+  // visible row change in the live list until admin approves).
+  showToast('Delete proposed — awaiting admin approval', 'success');
+
+  google.script.run
+    .withSuccessHandler(function() { /* already toasted */ })
+    .withFailureHandler(function(e) {
+      showToast('Delete failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
+    })
+    .proposeDeleteContact(rowIndex);
+}
+
+/* ═══════════════════════════════════════
+   PROPOSE MODAL (global)
+═══════════════════════════════════════ */
+function openProposeModal() {
+  var sel = document.getElementById('pmAccount'); sel.innerHTML = '<option value="">Select…</option>';
+  P.forEach(function(d) { sel.add(new Option(d.company, d.company)); });
+  document.getElementById('pmName').value = '';
+  document.getElementById('pmEmail').value = '';
+  document.getElementById('pmRole').value = 'Buyer';
+  document.getElementById('pmPrimary').checked = false;
+  document.getElementById('proposeModal').style.display = 'flex';
+  refreshIcons();
+}
+function closeProposeModal() { document.getElementById('proposeModal').style.display = 'none'; }
+
+function submitProposeModal() {
+  var merchant = document.getElementById('pmAccount').value;
+  var name = document.getElementById('pmName').value.trim();
+  var email = document.getElementById('pmEmail').value.trim();
+  if (!merchant || !name || !email) { showToast('Account, name, and email required', 'error'); return; }
+  var payload = { sk_merchant: '', merchant_name: merchant, contact_name: name, contact_email: email, contact_role: document.getElementById('pmRole').value, is_primary: document.getElementById('pmPrimary').checked };
+
+  // V3.2 Phase 5 (flow #5) — INSTANT MODAL CLOSE + toast.
+  // Proposals enter a pending-approval queue (not the live contact list), so
+  // there's no contact row to optimistically inject. The optimistic win is
+  // skipping the round-trip wait before the user can keep working.
+  // Skipping post-success loadAllContacts() — the proposal isn't visible in
+  // the live list anyway; snapshot refresh reconciles when admin approves.
+  closeProposeModal();
+  showToast('Contact proposed — pending approval', 'success');
+
+  google.script.run
+    .withSuccessHandler(function() { /* already toasted */ })
+    .withFailureHandler(function(e) {
+      _reopenProposeModal_(payload);
+      showToast('Propose failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
+    })
+    .proposeContact(payload);
+}
+
+/* V3.2 Phase 5 — re-open propose modal with values preserved + flash on failure */
+function _reopenProposeModal_(payload) {
+  var modal = document.getElementById('proposeModal');
+  if (!modal) return;
+  // Re-populate dropdown (openProposeModal builds it; safe to re-call structure)
+  var sel = document.getElementById('pmAccount');
+  if (sel && sel.options.length <= 1 && typeof P !== 'undefined') {
+    sel.innerHTML = '<option value="">Select…</option>';
+    P.forEach(function(d) { sel.add(new Option(d.company, d.company)); });
+  }
+  if (sel) sel.value = payload.merchant_name || '';
+  document.getElementById('pmName').value     = payload.contact_name  || '';
+  document.getElementById('pmEmail').value    = payload.contact_email || '';
+  document.getElementById('pmRole').value     = payload.contact_role  || 'Buyer';
+  document.getElementById('pmPrimary').checked = !!payload.is_primary;
+  modal.style.display = 'flex';
+  if (typeof refreshIcons === 'function') refreshIcons();
+  if (typeof flashField_ === 'function') flashField_(document.getElementById('pmName'));
+}
+</script>

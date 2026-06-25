@@ -1,0 +1,1532 @@
+<script>
+/* ═══════════════════════════════════════
+   DRAWER — PHASE 5 OPTIMISTIC STATE (flow #1: timeline notes)
+   _pendingNotes: in-memory, keyed by company.
+     Entry shape: { tempId, note_text, timestamp, author, _pending, _confirmed }
+   Not persisted to IDB — notes aren't in snapshots, so the authoritative
+   refresh path is the next drawer-open's getPartnerNotes fetch.
+═══════════════════════════════════════ */
+var _pendingNotes = {};
+
+function flashField_(el) {
+  if (!el) return;
+  var origShadow = el.style.boxShadow;
+  var origTrans  = el.style.transition;
+  el.style.transition = 'box-shadow 0.25s ease';
+  el.style.boxShadow  = '0 0 0 2px rgba(218, 86, 86, 0.55)';
+  setTimeout(function() {
+    el.style.boxShadow = '0 0 0 2px rgba(218, 86, 86, 0)';
+    setTimeout(function() {
+      el.style.boxShadow = origShadow;
+      el.style.transition = origTrans;
+    }, 280);
+  }, 1100);
+}
+
+// V3.9 — Huddle mention badge in the drawer's snapshot tab. Shows "N huddle
+// mentions" when this partner is referenced in the team's huddle log.
+// Click → switch to timeline tab and scroll to first huddle entry.
+function _drawerRenderHuddleBadge_(huddles) {
+  var el = document.getElementById('drawerHuddleBadge');
+  if (!el) return;
+  if (huddles == null) {
+    // Loading state: hide badge until fetch completes
+    el.style.display = 'none';
+    return;
+  }
+  if (!huddles.length) {
+    el.style.display = 'none';
+    return;
+  }
+  var n = huddles.length;
+  el.innerHTML = '<button onclick="_drawerJumpToHuddles_()" style="display:inline-flex;align-items:center;gap:5px;background:#fef3c7;color:#92400e;border:1px solid #fde68a;padding:2px 8px;border-radius:99px;font-size:9.5px;font-weight:700;letter-spacing:0.04em;cursor:pointer" title="View in timeline">'
+    + '<i data-lucide="users-round" style="width:10px;height:10px"></i>'
+    + n + ' HUDDLE MENTION' + (n === 1 ? '' : 'S')
+  + '</button>';
+  el.style.display = 'inline-block';
+  refreshIcons();
+}
+
+function _drawerJumpToHuddles_() {
+  switchDrawerTab('timeline');
+  // Wait one frame so the timeline panel is mounted
+  setTimeout(function() {
+    var first = document.querySelector('#timelineList .tl-huddle-anchor');
+    if (first && first.scrollIntoView) first.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 200);
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — OPEN / CLOSE
+═══════════════════════════════════════ */
+function openDeal(row) { var d = P.find(function(p) { return p.row == row; }); if (d) openDrawer(d); }
+function openDealByStore(store) { var d = P.find(function(p) { return p.company.toLowerCase() === store.toLowerCase(); }); if (d) openDrawer(d); }
+
+// V3.8 — Email fallback. CRM email is the primary source but commonly blank
+// even when valid pool/contact emails exist. Walk the chain: CRM → primary
+// contact → first non-empty contact → 'No email' label.
+function _drawerResolveEmail_(deal) {
+  if (!deal) return 'No email';
+  var raw = (deal.email || '').toString().trim();
+  if (raw) return raw;
+  var contacts = (deal.contacts || []).filter(function(c) { return c && c.contact_email; });
+  if (!contacts.length) return 'No email';
+  var primary = contacts.find(function(c) {
+    var p = c.is_primary;
+    return p === true || p === 'TRUE' || p === 'true' || p === 1 || p === '1';
+  });
+  var pick = primary || contacts[0];
+  return (pick && pick.contact_email) ? pick.contact_email : 'No email';
+}
+
+function openDrawer(deal) {
+  currentDeal = deal;
+  document.getElementById('detailName').textContent = deal.company || '—';
+  // V3.8 — Email fallback chain. CRM 'email' field is sometimes empty even
+  // when the partner has perfectly good contacts in the pool — fall through
+  // to the primary contact, then any contact, before showing "No email".
+  document.getElementById('detailEmail').textContent = _drawerResolveEmail_(deal);
+  document.getElementById('detailCountry').textContent = deal.country || 'Global';
+  // V3.10 — Language chip next to country. Default EN renders muted (since
+  // most partners default to EN); explicit other languages get a dark chip.
+  var langChip = document.getElementById('detailLangChip');
+  if (langChip) {
+    var raw = deal.language;
+    var explicit = raw && String(raw).trim();
+    var lang = (typeof normalizeLanguage_ === 'function') ? normalizeLanguage_(raw) : 'EN';
+    if (explicit) {
+      var label = (typeof NX_LANGUAGE_LABELS !== 'undefined' && NX_LANGUAGE_LABELS[lang]) || lang;
+      langChip.textContent = lang;
+      langChip.title = label;
+      langChip.style.display = 'inline-flex';
+    } else {
+      langChip.style.display = 'none';
+    }
+  }
+  document.getElementById('editRow').value = deal.row;
+  var _stageSelect = document.getElementById('editStage');
+  var _stageVal = (deal.stage && deal.stage !== '') ? deal.stage : 'Active - Stable';
+  if (!Array.from(_stageSelect.options).some(function(o){ return o.value === _stageVal; })) {
+    var _opt = document.createElement('option'); _opt.value = _stageVal; _opt.textContent = _stageVal; _stageSelect.appendChild(_opt);
+  }
+  _stageSelect.value = _stageVal;
+  var modelEl = document.getElementById('editModel');
+  if (modelEl) modelEl.textContent = (deal.model && deal.model !== '') ? deal.model : '3P';
+  var modelBadge = document.getElementById('detailModelBadge');
+  if (modelBadge) modelBadge.textContent = (deal.model && deal.model !== '') ? deal.model : '3P';
+  document.getElementById('editAction').value = deal.nextAction || 'None';
+  document.getElementById('editDate').value = deal.actionDate || '';
+  document.getElementById('editNotes').value = deal.notes || '';
+  document.getElementById('saveStatus').style.display = 'none';
+  currentTags = deal.tags ? deal.tags.split(',').map(function(t) { return t.trim(); }).filter(Boolean) : [];
+  renderTags(); updateRibbon(); parseEmailCtx(deal.latestEmail || '{}');
+  // Notes & Timeline: render immediately from email+calendar data, then async-add notes
+  var ovNotes = document.getElementById('drawerRecentNotes');
+  if (ovNotes) {
+    // Instant render with what we already have (no GAS call needed)
+    var quickEntries = buildTimelineEntries_(deal, [], []).slice(0, 5);
+    if (quickEntries.length) {
+      ovNotes.innerHTML = quickEntries.map(renderSnapshotEntry_).join('');
+    } else {
+      ovNotes.innerHTML = '<span style="color:var(--ink-4);font-size:11px;font-style:italic">No activity yet</span>';
+    }
+    // Then async-load notes AND huddle log in parallel, merge results.
+    // V3.9 — huddle entries blend into the same timeline as notes.
+    var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+    if (useGAS && deal.company) {
+      var pending = { notes: null, huddles: null };
+      var commit = function() {
+        if (pending.notes === null || pending.huddles === null) return;  // still waiting
+        if (!ovNotes || !currentDeal || currentDeal.company !== deal.company) return;
+        var entries = buildTimelineEntries_(deal, pending.notes || [], pending.huddles || []).slice(0, 5);
+        if (entries.length) ovNotes.innerHTML = entries.map(renderSnapshotEntry_).join('');
+      };
+      google.script.run.withSuccessHandler(function(notes) { pending.notes = notes || []; commit(); })
+        .withFailureHandler(function() { pending.notes = []; commit(); }).getPartnerNotes(deal.company);
+      google.script.run.withSuccessHandler(function(hd) { pending.huddles = hd || []; commit(); _drawerRenderHuddleBadge_(hd); })
+        .withFailureHandler(function() { pending.huddles = []; _drawerRenderHuddleBadge_([]); }).getHuddleLogForPartner(_userTeam, deal.company, 10);
+    }
+  }
+  // V3.9 — Reset huddle badge to loading state until async fetch returns.
+  _drawerRenderHuddleBadge_(null);
+  renderOvFeed(); switchDrawerTab('snapshot');
+  document.getElementById('detailOverlay').style.display = 'block';
+  document.getElementById('detailDrawer').classList.add('open');
+  refreshIcons();
+}
+
+function closeDetail() { document.getElementById('detailOverlay').style.display = 'none'; document.getElementById('detailDrawer').classList.remove('open'); currentDeal = null; }
+
+function updateRibbon() {
+  document.getElementById('ribbonStage').textContent = document.getElementById('editStage').value || '—';
+  var modelEl = document.getElementById('editModel');
+  var ribbonModel = document.getElementById('ribbonModel');
+  if (ribbonModel) ribbonModel.textContent = (modelEl ? modelEl.textContent : '') || '—';
+  var date = document.getElementById('editDate').value, action = document.getElementById('editAction').value;
+  if (action && action !== 'None' && date) { var pts = date.split('-').map(Number); document.getElementById('ribbonDate').textContent = action + ' · ' + new Date(pts[0], pts[1]-1, pts[2]).toLocaleDateString('default', { month: 'short', day: 'numeric' }); }
+  else { document.getElementById('ribbonDate').textContent = action && action !== 'None' ? action : 'None scheduled'; }
+  // V3.8 — Account Manager ribbon. Read directly from currentDeal (informational,
+  // no editor input element, so not part of the edit* chain).
+  var ribbonAm = document.getElementById('ribbonAm');
+  if (ribbonAm) ribbonAm.textContent = (currentDeal && currentDeal.account_manager) ? currentDeal.account_manager : '—';
+  document.getElementById('ribbonYtd').textContent = currentDeal ? fGtv(currentDeal.cy_ytd || 0) : '—';
+}
+
+function switchDrawerTab(tab) {
+  ['snapshot','performance','contacts','timeline','correspondence'].forEach(function(t) {
+    var p = document.getElementById('drawer-' + t), b = document.getElementById('dtab-' + t);
+    if (p) { p.style.display = 'none'; p.classList.remove('panel-enter'); }
+    if (b) b.classList.remove('active');
+  });
+  var panel = document.getElementById('drawer-' + tab);
+  if (panel) {
+    panel.style.display = (tab === 'snapshot' || tab === 'correspondence') ? 'flex' : 'block';
+    requestAnimationFrame(function() { panel.classList.add('panel-enter'); });
+  }
+  var btn = document.getElementById('dtab-' + tab); if (btn) btn.classList.add('active');
+  if (tab === 'snapshot' && currentDeal) renderOvFeed();
+  if (tab === 'performance' && currentDeal) renderDrawerPerf(currentDeal);
+  if (tab === 'contacts' && currentDeal) renderDrawerContacts(currentDeal);
+  if (tab === 'timeline' && currentDeal) renderTimelineList();
+  if (tab === 'correspondence') renderCorrFeed();
+  refreshIcons();
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — EMAIL CTX
+═══════════════════════════════════════ */
+function parseEmailCtx(raw) {
+  currentEmailCtx = { sent: [], received: [] };
+  if (!raw || raw === '{}' || raw === '[]') return;
+  try { var p = JSON.parse(raw); if (Array.isArray(p)) { currentEmailCtx.received = p; } else { currentEmailCtx.sent = p.sent || []; currentEmailCtx.received = p.received || []; } } catch(e) {}
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — SNAPSHOT (Partner Snapshot)
+═══════════════════════════════════════ */
+function renderOvFeed() {
+  if (!currentDeal) return;
+  var d = currentDeal;
+  var html = '';
+
+  // ── Compact KPI row in single bubble + tags ──
+  function miniStat(label, value, sub, isLast) {
+    return '<div style="flex:1;min-width:0;padding:0 10px;' + (isLast ? '' : 'border-right:1px solid var(--border);') + '">'
+      + '<div style="font-size:7px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:1px">' + label + '</div>'
+      + '<div style="font-size:15px;font-weight:700;letter-spacing:-0.02em;line-height:1.1">' + value + '</div>'
+      + '<div style="font-size:8px;color:var(--ink-3);margin-top:1px">' + sub + '</div></div>';
+  }
+  html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 0;display:flex;align-items:center;margin-bottom:10px">'
+    + miniStat('YTD GTV', fGtv(d.cy_ytd), fPctStr(d.ytd_pct, true) + ' vs PY', false)
+    + miniStat('7D GTV', fGtv(d.cy_7d), fPctStr(d.d7_pct, true) + ' vs PY', false)
+    + miniStat('Units Online', (d.cy_units_on || 0).toLocaleString(), fPctStr(d.units_pct, true) + ' vs PY', false)
+    + miniStat('FP Share', d.fp_share ? Math.round(d.fp_share * 100) + '%' : '\u2014', d.cy_fp ? fGtv(d.cy_fp) + ' full price' : 'no data', true)
+    + '</div>';
+  if (d.insight_tags && d.insight_tags.length) {
+    html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">';
+    d.insight_tags.forEach(function(t) {
+      var c = autoColors[t] || '#f1f5f9;color:#64748b';
+      html += '<span style="background:' + c + ';padding:2px 7px;border-radius:4px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap">' + esc(t) + '</span>';
+    });
+    html += '</div>';
+  }
+
+  // ── Stock + KPI side by side ──
+  var vals = d.stock_trend || [];
+  var hasStock = vals.length > 1;
+  var hasKpi = false;
+  var kRows = [];
+  if (d.kpi) { kRows = kpiPartners().filter(function(r) { return r.store === d.company; }); hasKpi = kRows.length > 0; }
+  if (hasStock || hasKpi) {
+    html += '<div style="display:grid;grid-template-columns:' + (hasStock && hasKpi ? '1fr 1fr' : '1fr') + ';gap:6px;margin-bottom:10px">';
+    if (hasStock) {
+      var maxV = Math.max.apply(null, vals) || 1;
+      var today = vals[0], d15ago = vals[vals.length - 1] || 0;
+      var stockDelta = today - d15ago;
+      var stockPct = d15ago > 0 ? (today - d15ago) / d15ago : 0;
+      var stockColor = stockDelta >= 0 ? '#16a34a' : '#dc2626';
+      html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:5px 8px;display:flex;flex-direction:column">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;margin-bottom:2px">'
+        + '<span style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Stock \u2014 15 Day</span>'
+        + '<span style="font-size:13px;font-weight:600;color:' + stockColor + '">' + (stockDelta >= 0 ? '+' : '') + stockDelta.toLocaleString() + ' (' + (stockPct >= 0 ? '+' : '') + Math.round(stockPct * 100) + '%)</span>'
+        + '</div>'
+        + '<div style="display:flex;align-items:baseline;justify-content:flex-end;flex-shrink:0;margin-bottom:1px">'
+        + '<span style="font-size:15px;color:var(--ink-4)">' + d15ago.toLocaleString() + '</span>'
+        + '<span style="font-size:15px;color:var(--ink-4);margin:0 3px">\u2013</span>'
+        + '<span style="font-size:15px;font-weight:600;color:var(--ink)">' + today.toLocaleString() + '</span></div>';
+      var stockVals = vals.filter(function(v) { return v > 0; });
+      if (!stockVals.length) stockVals = vals;
+      var stockMax = Math.max.apply(null, stockVals) || 1;
+      html += '<div style="display:flex;align-items:flex-end;gap:3px;flex:1;min-height:16px;padding-bottom:1px">';
+      stockVals.slice().reverse().forEach(function(v, i, arr) {
+        var h = Math.max(12, Math.round((v / stockMax) * 100));
+        var grow = i === 0 || v >= (arr[i - 1] || 0);
+        html += '<div style="flex:1;height:' + h + '%;border-radius:1px 1px 0 0;background:' + (grow ? '#16a34a' : '#dc2626') + ';max-width:5px"></div>';
+      });
+      html += '</div></div>';
+    }
+    if (hasKpi) {
+      var kr = kRows[0];
+      var perfVal = kr.perfect_now;
+      var perfColor = perfVal >= 90 ? '#16a34a' : perfVal >= 85 ? '#d97706' : '#dc2626';
+      function kpiStat(label, val, isPerf, isLast) {
+        var mc = isPerf ? (val >= 90 ? '#16a34a' : val >= 85 ? '#d97706' : '#dc2626') : (val > 5 ? '#dc2626' : val > 2 ? '#d97706' : '#16a34a');
+        return '<div style="flex:1;text-align:center;padding:0 4px;' + (isLast ? '' : 'border-right:1px solid var(--border);') + '">'
+          + '<div style="font-size:6px;font-weight:600;color:var(--ink-4);text-transform:uppercase;letter-spacing:0.04em">' + label + '</div>'
+          + '<div style="font-size:' + (isPerf ? '14' : '11') + 'px;font-weight:700;color:' + mc + ';line-height:1.2;letter-spacing:-0.02em">' + val.toFixed(1) + '%</div></div>';
+      }
+      html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:5px 2px;display:flex;flex-direction:column">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;padding:0 6px;flex-shrink:0">'
+        + '<span style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">KPI</span>'
+        + (kr.currentMonthLabel ? '<span style="font-size:8px;color:var(--ink-4)">' + esc(kr.currentMonthLabel) + '</span>' : '') + '</div>'
+        + '<div style="display:flex;align-items:center;flex:1">'
+        + kpiStat('Perfect', kr.perfect_now, true, false)
+        + kpiStat('No Stock', kr.ns_now, false, false)
+        + kpiStat('SOS >2D', kr.sos_now, false, false)
+        + kpiStat('Wrong Item', kr.wi_now, false, true)
+        + '</div>';
+      if (kr.penalty_now > 0) {
+        html += '<div style="display:flex;justify-content:space-between;margin-top:1px;padding:1px 6px 0;border-top:1px solid var(--border);flex-shrink:0">'
+          + '<span style="font-size:7px;font-weight:600;color:var(--ink-3)">Penalty</span>'
+          + '<span style="font-size:8px;font-weight:700;color:#dc2626">$' + Math.round(kr.penalty_now).toLocaleString() + '</span></div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  // ── Recent Emails ──
+  var allEmails = [];
+  currentEmailCtx.received.forEach(function(e) { allEmails.push(Object.assign({}, e, { dir: 'in' })); });
+  currentEmailCtx.sent.forEach(function(e) { allEmails.push(Object.assign({}, e, { dir: 'out' })); });
+  allEmails.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0); });
+  window._ovFeed = allEmails;
+  if (allEmails.length) {
+    html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">'
+      + '<div style="padding:6px 10px;border-bottom:1px solid var(--border)"><span style="font-size:7px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Recent Emails</span></div>';
+    html += allEmails.slice(0, 5).map(function(em, i) {
+      var isIn = em.dir === 'in';
+      var badge = isIn
+        ? '<span style="background:#dcfce7;color:#16a34a;width:14px;height:14px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:7px;font-weight:700;flex-shrink:0">\u2199</span>'
+        : '<span style="background:#dbeafe;color:#1d4ed8;width:14px;height:14px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:7px;font-weight:700;flex-shrink:0">\u2197</span>';
+      var snippet = em.snippet ? (em.snippet.length > 40 ? em.snippet.substring(0, 40) + '\u2026' : em.snippet) : '';
+      return '<div onclick="openOvEmail(' + i + ')" style="display:flex;align-items:center;gap:6px;padding:5px 10px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.1s" onmouseenter="this.style.background=\'var(--bg)\'" onmouseleave="this.style.background=\'\'">'
+        + badge + '<div style="flex:1;min-width:0"><div style="font-size:10px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(em.subject || 'No Subject') + '</div>'
+        + (snippet ? '<div style="font-size:8px;color:var(--ink-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-style:italic">' + esc(snippet) + '</div>' : '')
+        + '</div><span style="font-size:8px;color:var(--ink-4);flex-shrink:0">' + esc(em.date || '') + '</span></div>';
+    }).join('');
+    html += '</div>';
+  } else {
+    html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center;font-size:10px;color:var(--ink-4)">No recent email activity</div>';
+  }
+  document.getElementById('ovFeed').innerHTML = html;
+}
+
+function openOvEmail(i) {
+  var em = window._ovFeed[i]; if (!em) return;
+  document.getElementById('ovEmailMeta').textContent = (em.dir === 'in' ? '↙ Received' : '↗ Sent') + (em.date ? ' · ' + em.date : '');
+  document.getElementById('ovEmailSubject').textContent = em.subject || 'No Subject';
+  document.getElementById('ovEmailBody').textContent = em.body || em.snippet || '';
+  document.getElementById('ovEmailPane').style.display = 'block'; refreshIcons();
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — PERFORMANCE
+═══════════════════════════════════════ */
+function renderDrawerPerf(d) {
+  document.getElementById('dpKpis').innerHTML =
+    kpiHtml('YTD GTV', fGtv(d.cy_ytd), fPctStr(d.ytd_pct, true) + ' vs PY') +
+    kpiHtml('4W GTV', fGtv(d.cy_4w), fPctStr(d.w4_pct, true) + ' vs PY') +
+    kpiHtml('Units', d.cy_units_tot.toLocaleString(), fPctStr(d.units_pct, true) + ' vs PY') +
+    kpiHtml('FP%', d.fp_share ? Math.round(d.fp_share * 100) + '%' : '—', 'full-price share');
+  document.getElementById('dpTags').innerHTML = d.insight_tags.map(function(t) {
+    var c = autoColors[t] || '#f1f5f9;color:#64748b';
+    return '<span style="background:' + c + ';padding:3px 10px;border-radius:6px;font-size:10px;font-weight:700;text-transform:uppercase">' + t + '</span>';
+  }).join('');
+  document.getElementById('dpMetrics').innerHTML = [
+    { label: 'YTD', cy: d.cy_ytd, py: d.py_ytd }, { label: '4 Week', cy: d.cy_4w, py: d.py_4w },
+    { label: '7 Day', cy: d.cy_7d, py: d.py_7d }, { label: 'Full Price', cy: d.cy_fp, py: d.py_fp }
+  ].map(function(m) {
+    var pct = fPct(m.cy, m.py);
+    return '<tr><td style="font-weight:600">' + m.label + '</td><td style="text-align:right;font-weight:600">' + fGtv(m.cy) + '</td><td style="text-align:right">' + fPctStr(pct, true) + '</td><td style="text-align:right;color:var(--ink-3)">' + fGtv(m.py) + '</td></tr>';
+  }).join('');
+
+  // V3.7 — Stock compacted to a single-row inline sparkline. Was a ~120px card
+  // with bars + Today + 15D Change; the breakdown section below now carries
+  // the analytical weight, so stock is a glanceable trendline + numbers.
+  renderDrawerStockLine_(d);
+
+  // V3.3 → V3.7 — Breakdown mix donuts (sales + SOH, shared color scale,
+  // dim-switchable between Season / Brand / Family).
+  renderDrawerBreakdownMix(d);
+}
+
+// V3.8 — Stock card rebuilt as a vertical section-card so it sits side-by-side
+// with the metrics table at equal height (both stretch in the parent grid).
+// Was a horizontal one-row strip in V3.7 — fine when stacked, too short when
+// side-by-side with a 4-row table. Layout: title row · sparkline (fills) ·
+// today + 15D delta row.
+function renderDrawerStockLine_(d) {
+  var el = document.getElementById('dpStockLine');
+  if (!el) return;
+  var vals = d.stock_trend || [];
+  if (!vals.length) {
+    el.innerHTML = '<div class="section-card" style="margin:0;padding:14px;display:flex;flex-direction:column;flex:1">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+        + '<span class="section-label" style="margin:0">Stock · 15D</span>'
+      + '</div>'
+      + '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--ink-4);font-size:11px">No stock data</div>'
+      + '</div>';
+    return;
+  }
+  var today = vals[0] || 0;
+  var oldest = vals[vals.length - 1] || 0;
+  var delta = today - oldest;
+  var deltaPct = oldest > 0 ? (delta / oldest) * 100 : 0;
+  var deltaColor = delta >= 0 ? '#16a34a' : '#dc2626';
+  var deltaSign = delta >= 0 ? '+' : '';
+  // Larger sparkline now that the card is full-width-of-column. Path stays
+  // viewBox-based so it scales to whatever width the column resolves to.
+  var W = 280, H = 80, padX = 4, padY = 6;
+  var asc = vals.slice().reverse();  // oldest-first
+  var maxV = Math.max.apply(null, asc) || 1;
+  var minV = Math.min.apply(null, asc);
+  var span = Math.max(1, maxV - minV);
+  var pts = asc.map(function(v, i) {
+    var x = padX + (i / Math.max(1, asc.length - 1)) * (W - padX * 2);
+    var y = H - padY - ((v - minV) / span) * (H - padY * 2);
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  });
+  var pathD = 'M ' + pts.join(' L ');
+  var lineColor = delta >= 0 ? '#16a34a' : '#dc2626';
+  var areaD = pathD + ' L ' + (W - padX) + ',' + (H - padY) + ' L ' + padX + ',' + (H - padY) + ' Z';
+  var lastPt = pts[pts.length - 1].split(',');
+  var svg = '<svg width="100%" height="100%" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" style="display:block">'
+    + '<path d="' + areaD + '" fill="' + lineColor + '" fill-opacity="0.10"/>'
+    + '<path d="' + pathD + '" fill="none" stroke="' + lineColor + '" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>'
+    + '<circle cx="' + lastPt[0] + '" cy="' + lastPt[1] + '" r="2.4" fill="' + lineColor + '"/>'
+    + '</svg>';
+
+  el.innerHTML = '<div class="section-card" style="margin:0;padding:14px;display:flex;flex-direction:column;flex:1">'
+    + '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
+      + '<div>'
+        + '<div class="section-label" style="margin:0">Stock · 15D</div>'
+        + '<div style="font-size:9px;color:var(--ink-4);margin-top:2px">Online &amp; available units</div>'
+      + '</div>'
+      + '<div style="text-align:right">'
+        + '<div style="font-size:18px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums;letter-spacing:-0.02em;line-height:1">' + today.toLocaleString() + '</div>'
+        + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">today</div>'
+      + '</div>'
+    + '</div>'
+    + '<div style="flex:1;min-height:60px;display:flex">' + svg + '</div>'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:10px">'
+      + '<span style="color:var(--ink-4);font-variant-numeric:tabular-nums">' + oldest.toLocaleString() + ' · 15d ago</span>'
+      + '<span style="color:' + deltaColor + ';font-weight:700;font-variant-numeric:tabular-nums">' + deltaSign + delta.toLocaleString() + ' (' + deltaSign + deltaPct.toFixed(1) + '%)</span>'
+    + '</div>'
+    + '</div>';
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — BREAKDOWN MIX DONUTS (V3.3 → V3.7)
+   Two donuts: sales (scope-filtered) and SOH (current snapshot), sharing one
+   color scale — the eye composes the gap ("selling lots of X but no X stock
+   left"). Switchable between Season / Brand / Family via tabs above the donuts.
+
+   V3.4 carry-overs:
+     • Slices sorted PER-PARTNER by value DESC so biggest contributor leads.
+     • Sales donut has a month-pill row. Picking a month rebuilds the donut
+       from that month's units across values of the active dim.
+     • "+X% YoY" badge in subtitle when a picked month's same-month-prior-year
+       exists in this partner's history.
+     • SOH donut is a current snapshot — no month picker.
+   V3.7:
+     • Dim selector (Season / Brand / Family) drives both donuts simultaneously.
+     • Color helper falls back to hash-HSL for the brand dim (too many values
+       for a fixed palette). Season + family use the palette by sort index.
+═══════════════════════════════════════ */
+// Drawer-local scope state. Independent from cockpit's ckActiveDim per design.
+var _dpActiveDim = 'season';   // V3.7 — 'season' | 'brand' | 'family'
+var _dpSalesScope = 'all';     // 'all' = lifetime lens (default); else 'YYYY-MM'
+var _dpValuePick = 'all';      // V3.7.1 — 'all' (default) or specific value for drill card
+var _dpCachedPartner = null;
+
+// Pull active-dim subtree. Legacy SEASONS fallback if BREAKDOWNS not populated
+// (i.e. running against a pre-V3.7 payload — defensive only).
+function _dpBreakdown_() {
+  if (typeof BREAKDOWNS !== 'undefined' && BREAKDOWNS[_dpActiveDim]) {
+    var b = BREAKDOWNS[_dpActiveDim];
+    return { allValues: b.allValues || [], byStore: b.byStore || {}, soh: b.soh || { byStore: {} } };
+  }
+  var S = (typeof SEASONS !== 'undefined' && SEASONS) ? SEASONS : null;
+  if (!S) return { allValues: [], byStore: {}, soh: { byStore: {} } };
+  return { allValues: S.allSeasons || [], byStore: S.byStore || {}, soh: S.soh || { byStore: {} } };
+}
+
+function _dpDimLabel_() {
+  return _dpActiveDim === 'brand' ? 'Brand' : _dpActiveDim === 'family' ? 'Family' : 'Season';
+}
+
+function setDpDim_(dim) {
+  if (['season','brand','family'].indexOf(dim) < 0) return;
+  _dpActiveDim = dim;
+  _dpValuePick = 'all';  // V3.7.1 — value names don't carry across dims
+  // _dpSalesScope is dim-agnostic (months are shared across dims for a given
+  // partner) — but if the picked month happens to have no data under the new
+  // dim breakdown, renderDrawerBreakdownMix falls back to 'all' internally.
+  if (_dpCachedPartner) renderDrawerBreakdownMix(_dpCachedPartner);
+}
+
+function renderDrawerBreakdownMix(d) {
+  _dpCachedPartner = d;
+  var el = document.getElementById('dpSeasonMix'); if (!el) return;
+  var B = _dpBreakdown_();
+  var values = B.allValues;
+  if (!values || !values.length) { el.innerHTML = _dpDimTabsHtml_() + '<div class="section-card" style="margin:8px 0 0;padding:18px;text-align:center;font-size:11px;color:var(--ink-4)">No breakdown data available.</div>'; return; }
+  var key = (d.company || '').trim().toLowerCase();
+  var salesByStore = B.byStore[key] || {};
+  var sohByStore   = (B.soh && B.soh.byStore && B.soh.byStore[key]) || {};
+
+  // Collect this partner's sales-activity months (union across values of the
+  // active dim). Same set used for picker pills + YoY availability detection.
+  var monthSet = {};
+  values.forEach(function(name) {
+    var sb = salesByStore[name];
+    if (sb && sb.months) sb.months.forEach(function(m) { monthSet[m.m] = true; });
+  });
+  var months = Object.keys(monthSet).sort(function(a, b) { return b.localeCompare(a); });  // DESC
+
+  // If previously-picked month not in this partner's history under this dim → fall back.
+  if (_dpSalesScope !== 'all' && !monthSet[_dpSalesScope]) _dpSalesScope = 'all';
+
+  // V3.7.1 — Build per-partner value list DESC by lifetime units (for dropdown).
+  // Only values this partner has ACTUAL data for (sales or SOH). Feeds both the
+  // donut legends (which auto-sort anyway) and the new value-drill dropdown.
+  var partnerValues = values.map(function(name) {
+    var sb = salesByStore[name];
+    var so = sohByStore[name];
+    var salesU = (sb && sb.units_total) || 0;
+    var salesG = (sb && sb.gtv_total) || 0;
+    var soOnline = (so && so.online) || 0;
+    return { name: name, salesU: salesU, salesG: salesG, soOnline: soOnline };
+  }).filter(function(x) { return x.salesU > 0 || x.soOnline > 0; });
+  partnerValues.sort(function(a, b) { return (b.salesU + b.soOnline) - (a.salesU + a.soOnline); });
+
+  // V3.7.1 — if the current _dpValuePick isn't in this partner's values, reset to 'all'
+  if (_dpValuePick !== 'all' && !partnerValues.some(function(x) { return x.name === _dpValuePick; })) {
+    _dpValuePick = 'all';
+  }
+
+  // Build slice arrays. Sales are scope-filtered; SOH is always current snapshot.
+  var salesSlices = [];
+  var sohSlices = [];
+  values.forEach(function(name) {
+    var sb = salesByStore[name];
+    if (sb) {
+      var salesVal = 0;
+      if (_dpSalesScope === 'all') {
+        salesVal = sb.units_total || 0;
+      } else {
+        (sb.months || []).forEach(function(m) { if (m.m === _dpSalesScope) salesVal += m.u; });
+      }
+      if (salesVal > 0) salesSlices.push({ name: name, value: salesVal });
+    }
+    var so = sohByStore[name];
+    if (so && so.online > 0) sohSlices.push({ name: name, value: so.online });
+  });
+
+  // Per-partner DESC sort → biggest contributor leads legend + donut.
+  salesSlices.sort(function(a, b) { return b.value - a.value; });
+  sohSlices.sort(function(a, b) { return b.value - a.value; });
+
+  // Empty-state (lifetime sales empty AND SOH empty) → tabs stay visible so
+  // user can flip dims and see if data exists under another breakdown.
+  if (!salesSlices.length && !sohSlices.length && _dpSalesScope === 'all') {
+    el.innerHTML = _dpDimTabsHtml_() + '<div class="section-card" style="margin:8px 0 0;padding:18px;text-align:center;font-size:11px;color:var(--ink-4)">No ' + _dpDimLabel_().toLowerCase() + ' data for this partner.</div>';
+    return;
+  }
+
+  var salesTotal = salesSlices.reduce(function(s, x) { return s + x.value; }, 0);
+  var sohTotal   = sohSlices.reduce(function(s, x) { return s + x.value; }, 0);
+
+  // YoY — only meaningful when a specific month is selected AND the prior-year
+  // same-month exists in this partner's history under this dim.
+  var yoyHtml = '';
+  if (_dpSalesScope !== 'all') {
+    var yoyKey = yoyMonthKey_(_dpSalesScope);
+    if (yoyKey && monthSet[yoyKey]) {
+      var yoyTotal = 0;
+      values.forEach(function(name) {
+        var sb = salesByStore[name];
+        if (sb && sb.months) sb.months.forEach(function(m) { if (m.m === yoyKey) yoyTotal += m.u; });
+      });
+      if (yoyTotal > 0) {
+        var pct = Math.round(((salesTotal - yoyTotal) / yoyTotal) * 100);
+        var sign = pct >= 0 ? '+' : '';
+        var color = pct >= 0 ? '#16a34a' : '#dc2626';
+        yoyHtml = ' · <span style="font-weight:700;color:' + color + '">' + sign + pct + '% YoY</span> <span style="color:var(--ink-4)">vs ' + fmtMonthLabel_(yoyKey) + '</span>';
+      }
+    }
+  }
+
+  var salesSub = _dpSalesScope === 'all'
+    ? 'Units sold since Jan 25'
+    : 'Units sold · ' + fmtMonthLabel_(_dpSalesScope) + yoyHtml;
+
+  var dimLabel = _dpDimLabel_();
+  el.innerHTML = _dpDimTabsHtml_()
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">'
+      + salesDonutCardWithPicker_(salesSlices, salesTotal, salesSub, months, dimLabel)
+      + donutCard_('Stock Mix · by ' + dimLabel, 'Units online &amp; available', sohSlices, sohTotal, 'units')
+    + '</div>'
+    + _dpValuePickerHtml_(partnerValues, dimLabel)
+    + _dpValueDrillHtml_(salesByStore, sohByStore, dimLabel);
+  refreshIcons();
+}
+
+// V3.7.1 — Value dropdown + "Showing" label. Below the donuts, above the drill card.
+function _dpValuePickerHtml_(partnerValues, dimLabel) {
+  if (!partnerValues.length) return '';
+  var opts = '<option value="all"' + (_dpValuePick === 'all' ? ' selected' : '') + '>All ' + dimLabel.toLowerCase() + 's</option>';
+  opts += partnerValues.map(function(v) {
+    var sel = v.name === _dpValuePick ? ' selected' : '';
+    var tag = v.salesU > 0
+      ? (fGtv(v.salesG) + ' · ' + fCompactNum_(v.salesU) + 'u')
+      : (fCompactNum_(v.soOnline) + ' online');
+    return '<option value="' + esc(v.name) + '"' + sel + '>' + esc(v.name) + ' — ' + tag + '</option>';
+  }).join('');
+  return '<div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+    + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Drill ' + dimLabel + '</span>'
+    + '<select id="dpValuePick" onchange="setDpValuePick_(this.value)" class="nx-select" style="flex:1;min-width:220px">' + opts + '</select>'
+    + '</div>';
+}
+
+// V3.7.1 — Drill card. Renders only when _dpValuePick !== 'all'.
+// Shows: lifetime units, GTV, ASP; current SOH online + total + fill%; a
+// monthly sparkline of units for that value; YoY month-over-month if available.
+function _dpValueDrillHtml_(salesByStore, sohByStore, dimLabel) {
+  if (_dpValuePick === 'all') return '';
+  var name = _dpValuePick;
+  var sb = salesByStore[name];
+  var so = sohByStore[name];
+  var hasSales = sb && sb.units_total > 0;
+  var hasSoh = so && ((so.online || 0) + (so.total || 0) > 0);
+  if (!hasSales && !hasSoh) {
+    return '<div class="section-card" style="margin-top:8px;padding:18px;text-align:center;font-size:11px;color:var(--ink-4)">No data for ' + esc(name) + '.</div>';
+  }
+  var c = seasonColor_(name);
+
+  // KPI row: units, GTV, ASP, SOH online
+  var units = hasSales ? sb.units_total : 0;
+  var gtv   = hasSales ? sb.gtv_total : 0;
+  var asp   = hasSales ? sb.asp_avg : 0;
+  var online = hasSoh ? (so.online || 0) : 0;
+  var totalSoh = hasSoh ? (so.total || 0) : 0;
+  var fill = totalSoh > 0 ? Math.round((online / totalSoh) * 100) + '%' : '—';
+
+  var kpis = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px">'
+    + _dpDrillKpi_('Units', units.toLocaleString(), 'sold since Jan 25')
+    + _dpDrillKpi_('GTV', fGtv(gtv), 'lifetime')
+    + _dpDrillKpi_('ASP', asp > 0 ? '$' + asp.toLocaleString() : '—', 'units-weighted')
+    + _dpDrillKpi_('SOH Online', online.toLocaleString(), fill + ' of ' + totalSoh.toLocaleString())
+    + '</div>';
+
+  // Monthly trend — bar sparkline over sb.months if available
+  var trend = '';
+  if (hasSales && sb.months && sb.months.length) {
+    var asc = sb.months.slice().reverse();  // oldest-first
+    var maxU = asc.reduce(function(m, x) { return x.u > m ? x.u : m; }, 0) || 1;
+    trend = '<div style="display:flex;align-items:flex-end;gap:3px;height:44px;padding:0 2px">'
+      + asc.map(function(row) {
+          var h = Math.max(6, Math.round((row.u / maxU) * 100));
+          return '<div title="' + row.m + ': ' + row.u.toLocaleString() + ' units · $' + row.p + ' ASP" '
+            + 'style="flex:1;height:' + h + '%;min-width:6px;background:' + c.fg + ';border-radius:2px 2px 0 0"></div>';
+        }).join('')
+      + '</div>'
+      + '<div style="display:flex;justify-content:space-between;margin-top:4px;padding:0 2px">'
+        + '<span style="font-size:9px;color:var(--ink-4);font-weight:600">' + fmtMonthLabel_(asc[0].m) + '</span>'
+        + (asc.length > 2 ? '<span style="font-size:9px;color:var(--ink-4);font-weight:600">' + fmtMonthLabel_(asc[Math.floor(asc.length/2)].m) + '</span>' : '')
+        + '<span style="font-size:9px;color:var(--ink-4);font-weight:600">' + fmtMonthLabel_(asc[asc.length-1].m) + '</span>'
+      + '</div>';
+  } else {
+    trend = '<div style="padding:12px 0;text-align:center;font-size:10px;color:var(--ink-4)">No monthly trend available.</div>';
+  }
+
+  return '<div class="section-card" style="margin-top:8px;padding:12px 14px;border-left:3px solid ' + c.fg + '">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+      + '<span style="width:8px;height:8px;border-radius:2px;background:' + c.fg + ';flex-shrink:0"></span>'
+      + '<span class="section-label" style="margin:0">' + dimLabel + ' · ' + esc(name) + '</span>'
+      + '<span style="flex:1"></span>'
+      + '<button onclick="setDpValuePick_(\'all\')" style="background:none;border:1px solid var(--border);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:10px;color:var(--ink-3);font-family:inherit">Clear</button>'
+    + '</div>'
+    + kpis
+    + '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:6px">Monthly Units</div>'
+    + trend
+    + '</div>';
+}
+
+function _dpDrillKpi_(label, value, sub) {
+  return '<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px">'
+    + '<div style="font-size:8.5px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:2px">' + label + '</div>'
+    + '<div style="font-size:14px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums">' + value + '</div>'
+    + '<div style="font-size:9px;color:var(--ink-4);margin-top:1px">' + sub + '</div>'
+    + '</div>';
+}
+
+function setDpValuePick_(name) {
+  _dpValuePick = name || 'all';
+  if (_dpCachedPartner) renderDrawerBreakdownMix(_dpCachedPartner);
+}
+
+// V3.7 — Renders the segmented dim selector above the donuts.
+function _dpDimTabsHtml_() {
+  var dims = [{k:'season', l:'Season'}, {k:'brand', l:'Brand'}, {k:'family', l:'Family'}];
+  return '<div style="display:flex;align-items:center;gap:6px;margin-top:4px">'
+    + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Breakdown</span>'
+    + '<div style="display:flex;gap:0;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:2px">'
+    + dims.map(function(x) {
+        var active = x.k === _dpActiveDim;
+        return '<button onclick="setDpDim_(\'' + x.k + '\')" class="filter-tag-btn' + (active ? ' active' : '') + '" style="font-size:10px;padding:3px 10px;border-radius:5px">' + x.l + '</button>';
+      }).join('')
+    + '</div></div>';
+}
+
+// Legacy alias — no external callers currently, retained for safety during rollout.
+function renderDrawerSeasonMix(d) { return renderDrawerBreakdownMix(d); }
+
+// Scope setter — re-renders the mix with the same partner.
+function setDpSalesScope_(scope) {
+  _dpSalesScope = scope;
+  if (_dpCachedPartner) renderDrawerBreakdownMix(_dpCachedPartner);
+}
+
+// "2026-04" → "2025-04". Returns null for malformed keys.
+function yoyMonthKey_(mk) {
+  var m = mk && mk.match ? mk.match(/^(\d{4})-(\d{2})$/) : null;
+  if (!m) return null;
+  return (parseInt(m[1], 10) - 1) + '-' + m[2];
+}
+
+// "2026-04" → "Apr 26". Compact label for pills + YoY text.
+function fmtMonthLabel_(mk) {
+  var m = mk && mk.match ? mk.match(/^(\d{4})-(\d{2})$/) : null;
+  if (!m) return mk || '';
+  var mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(m[2], 10) - 1];
+  return mo + ' ' + m[1].slice(2);
+}
+
+// V3.8 — Sales card with month-pill picker. Vertical column chart replaces
+// the pie/donut. Top-N bars + 'Other' bucket (Other absorbs everything past
+// the top, sorted DESC by value, Other always pinned last).
+// 'months' is for the picker; dimLabel for the title.
+function salesDonutCardWithPicker_(slices, total, sub, months, dimLabel) {
+  var label = dimLabel || 'Season';
+  var html = '<div class="section-card" style="margin:0;padding:12px 14px">'
+    + '<div class="section-label" style="margin-bottom:2px">Sales Mix · by ' + label + '</div>'
+    + '<div style="font-size:9px;color:var(--ink-4);margin-bottom:8px">' + sub + '</div>';
+
+  // Month pills: "All" + up to 6 most-recent months this partner sold in.
+  var pills = [{ key: 'all', label: 'All' }];
+  months.slice(0, 6).forEach(function(mk) { pills.push({ key: mk, label: fmtMonthLabel_(mk) }); });
+
+  html += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:10px">'
+    + pills.map(function(p) {
+        var active = p.key === _dpSalesScope;
+        return '<button onclick="setDpSalesScope_(\'' + p.key + '\')" '
+          + 'style="padding:3px 8px;font-size:9px;font-weight:700;border-radius:4px;border:1px solid ' + (active ? 'var(--ink)' : 'var(--border)') + ';background:' + (active ? 'var(--ink)' : 'var(--surface)') + ';color:' + (active ? '#fff' : 'var(--ink-3)') + ';cursor:pointer;transition:all 0.15s">' + p.label + '</button>';
+      }).join('')
+    + '</div>';
+
+  if (!slices.length || total === 0) {
+    html += '<div style="text-align:center;padding:20px 0;font-size:11px;color:var(--ink-4)">No sales in this period</div></div>';
+    return html;
+  }
+
+  html += barChartBlock_(slices, total, 'units', label) + '</div>';
+  return html;
+}
+
+// V3.8 — Plain card (no picker) — used for Stock / SOH side.
+function donutCard_(title, sub, slices, total, unitLabel) {
+  var html = '<div class="section-card" style="margin:0;padding:12px 14px">'
+    + '<div class="section-label" style="margin-bottom:2px">' + title + '</div>'
+    + '<div style="font-size:9px;color:var(--ink-4);margin-bottom:10px">' + sub + '</div>';
+  if (!slices.length || total === 0) {
+    html += '<div style="text-align:center;padding:20px 0;font-size:11px;color:var(--ink-4)">No data</div></div>';
+    return html;
+  }
+  html += barChartBlock_(slices, total, unitLabel, '') + '</div>';
+  return html;
+}
+
+// V3.8 — Bar block: top-N collapsed-Other bars + tooltip + value-on-bar +
+// trimmed x-axis labels. Slice array assumed already DESC-sorted by value
+// (callers do this). MAX_BARS picked so labels stay readable in the
+// drawer's narrow column at typical viewport widths.
+function barChartBlock_(slices, total, unitLabel, dimLabelForA11y) {
+  var MAX_BARS = 8;  // top-N before everything else collapses into 'Other'
+  var top, otherVal = 0;
+  if (slices.length > MAX_BARS) {
+    top = slices.slice(0, MAX_BARS - 1);
+    var rest = slices.slice(MAX_BARS - 1);
+    rest.forEach(function(s) {
+      // If 'Other' is already in the slice list, fold it; else create one
+      otherVal += s.value;
+    });
+    top.push({ name: 'Other', value: otherVal, _synthetic: true });
+  } else {
+    top = slices.slice();
+  }
+
+  // Pin any literal 'Other' (sales BQ bucket) to last for visual consistency
+  // with the rest of the breakdown UI.
+  top.sort(function(a, b) {
+    if (a.name === 'Other' && b.name !== 'Other') return 1;
+    if (b.name === 'Other' && a.name !== 'Other') return -1;
+    return b.value - a.value;
+  });
+
+  return barChartSvg_(top, total, unitLabel);
+}
+
+// V3.8 — Hand-rolled vertical-column SVG. Single ink color (no per-slice
+// palette) — colour was meaningful when slices were a wedge of a circle,
+// but with bars we have axis labels + value labels and don't need it.
+// 'Other' bars get neutral gray to signal "the rest, mixed".
+function barChartSvg_(bars, total, unitLabel) {
+  if (!bars || !bars.length) return '<div style="padding:14px 0;text-align:center;font-size:11px;color:var(--ink-4)">No data</div>';
+  var W = 320, H = 180;
+  var padTop = 22, padBot = 46, padLeft = 6, padRight = 6;
+  var plotW = W - padLeft - padRight;
+  var plotH = H - padTop - padBot;
+  var n = bars.length;
+  var gap = 6;
+  var barW = (plotW - gap * (n - 1)) / n;
+  if (barW < 14) barW = 14;
+  var maxV = bars.reduce(function(m, b) { return b.value > m ? b.value : m; }, 0) || 1;
+
+  // Generate bars
+  var items = bars.map(function(b, i) {
+    var h = Math.max(2, Math.round((b.value / maxV) * plotH));
+    var x = padLeft + i * (barW + gap);
+    var y = padTop + (plotH - h);
+    var pct = total > 0 ? Math.round((b.value / total) * 100) : 0;
+    var fill = b.name === 'Other' ? '#9ca3af' : 'var(--ink)';
+    var labelTop = b.value >= 1000 ? Math.round(b.value / 100) / 10 + 'k' : String(b.value);
+    var xLabel = (b.name && b.name.length > 11) ? b.name.slice(0, 10) + '…' : (b.name || '');
+    return ''
+      // Bar
+      + '<rect x="' + x + '" y="' + y + '" width="' + barW + '" height="' + h + '" fill="' + fill + '" rx="2">'
+        + '<title>' + esc(b.name || '') + ': ' + b.value.toLocaleString() + ' ' + unitLabel + ' (' + pct + '%)</title>'
+      + '</rect>'
+      // Value above bar
+      + '<text x="' + (x + barW / 2) + '" y="' + (y - 5) + '" text-anchor="middle" '
+        + 'style="font-size:9px;font-weight:700;fill:var(--ink);font-variant-numeric:tabular-nums">' + esc(labelTop) + '</text>'
+      // X-axis label below (rotated 35deg for readability)
+      + '<text x="' + (x + barW / 2) + '" y="' + (padTop + plotH + 12) + '" text-anchor="end" '
+        + 'transform="rotate(-35 ' + (x + barW / 2) + ' ' + (padTop + plotH + 12) + ')" '
+        + 'style="font-size:9px;fill:var(--ink-3);font-weight:600">' + esc(xLabel) + '</text>';
+  }).join('');
+
+  // Baseline
+  var baseline = '<line x1="' + padLeft + '" y1="' + (padTop + plotH) + '" x2="' + (W - padRight) + '" y2="' + (padTop + plotH) + '" stroke="var(--border)" stroke-width="1"/>';
+
+  // Total caption
+  var totalCap = '<text x="' + (W - padRight) + '" y="12" text-anchor="end" '
+    + 'style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;fill:var(--ink-4)">'
+    + 'Total ' + total.toLocaleString() + ' ' + unitLabel + '</text>';
+
+  return '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="display:block;max-width:100%">'
+    + totalCap + baseline + items
+    + '</svg>';
+}
+
+// Legacy donutSvg_ alias — retained so any stray caller doesn't break. Routes
+// to the new bar renderer. New code should call barChartSvg_ directly.
+function donutSvg_(slices, total, unitLabel) {
+  return barChartSvg_(slices, total, unitLabel || '');
+}
+
+// V3.7 — Drawer-local color helper. Drives both donut slices and legend swatches.
+// Routes to the cockpit's `breakdownColor_` when available (shared palette +
+// hash-based brand coloring). Falls back to a local palette over `SEASONS` if
+// the drawer renders before cockpit has loaded — same visual contract as pre-V3.7.
+function seasonColor_(name) {
+  if (name === 'Other') return { fg:'#6b7280', bg:'#f1f5f9' };
+  // Prefer cockpit's dim-aware helper so palette + hashing stay consistent.
+  if (typeof breakdownColor_ === 'function') {
+    return breakdownColor_(_dpActiveDim, name);
+  }
+  // Fallback: legacy SEASONS palette by index (pre-V3.7 / cockpit-not-loaded).
+  var S = (typeof SEASONS !== 'undefined' && SEASONS) ? SEASONS : { allSeasons: [] };
+  var PALETTE = [
+    { fg:'#1e40af', bg:'#dbeafe' }, { fg:'#0891b2', bg:'#cffafe' },
+    { fg:'#059669', bg:'#d1fae5' }, { fg:'#65a30d', bg:'#ecfccb' },
+    { fg:'#ca8a04', bg:'#fef9c3' }, { fg:'#ea580c', bg:'#ffedd5' },
+    { fg:'#dc2626', bg:'#fee2e2' }, { fg:'#be185d', bg:'#fce7f3' },
+    { fg:'#7c3aed', bg:'#f3e8ff' }, { fg:'#4f46e5', bg:'#e0e7ff' }
+  ];
+  var idx = S.allSeasons.indexOf(name);
+  if (idx < 0) return { fg: '#64748b', bg: '#f1f5f9' };
+  return PALETTE[idx % PALETTE.length];
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — CONTACTS TAB (with CRM toggle)
+═══════════════════════════════════════ */
+function renderDrawerContacts(deal) {
+  var contacts = deal.contacts || [];
+  if (!contacts.length) { document.getElementById('drawerContactsList').innerHTML = '<div style="text-align:center;padding:24px;font-size:11px;color:var(--ink-4)">No contacts found.</div>'; return; }
+  document.getElementById('drawerContactsList').innerHTML = contacts.map(function(c) {
+    var isPrim = c.is_primary === true || c.is_primary === 'TRUE';
+    var inCrm = c.include_in_crm !== false;
+    var crmBadgeStyle = inCrm
+      ? 'background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0'
+      : 'background:var(--bg);color:var(--ink-4);border:1px solid var(--border);text-decoration:line-through';
+    return '<div class="section-card" style="margin:0;padding:12px 16px"><div style="display:flex;align-items:center;justify-content:space-between"><div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600">' + esc(c.contact_name) + (isPrim ? ' <span style="font-size:9px;font-weight:700;background:var(--ink);color:#fff;padding:1px 6px;border-radius:4px">PRIMARY</span>' : '') + '</div><div style="font-size:11px;color:var(--ink-3);margin-top:2px">' + esc(c.contact_email) + ' · ' + esc(c.contact_role || 'No role') + '</div></div>'
+      + '<span onclick="toggleCRMFromDrawer(\'' + esc(c.contact_email).replace(/'/g, "\\'") + '\',' + !inCrm + ')" style="cursor:pointer;font-size:8px;font-weight:700;letter-spacing:0.06em;padding:2px 7px;border-radius:5px;flex-shrink:0;margin-right:8px;' + crmBadgeStyle + '" title="' + (inCrm ? 'Included in CRM scanning — click to exclude' : 'Excluded from CRM scanning — click to include') + '">CRM</span></div></div>';
+  }).join('');
+}
+
+function toggleCRMFromDrawer(email, newValue) {
+  if (!currentDeal) return;
+  var merchant = currentDeal.company;
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (!useGAS) { showToast('Not available in demo', 'error'); return; }
+
+  // V3.2 Phase 5 — OPTIMISTIC CRM TOGGLE
+  // Patch currentDeal + matching P[] entries immediately so the badge flips
+  // without waiting for the round-trip. Capture prevValue so we can revert.
+  var prevValue = !newValue;  // boolean inverse — caller passes the target state
+  var _patch = function(val) {
+    if (currentDeal && currentDeal.contacts) {
+      currentDeal.contacts.forEach(function(c) {
+        if ((c.contact_email || '').toLowerCase() === email.toLowerCase()) c.include_in_crm = val;
+      });
+    }
+    P.forEach(function(p) {
+      if ((p.company || '').toLowerCase() !== merchant.toLowerCase()) return;
+      if (!p.contacts) return;
+      p.contacts.forEach(function(c) {
+        if ((c.contact_email || '').toLowerCase() === email.toLowerCase()) c.include_in_crm = val;
+      });
+    });
+    if (currentDeal) renderDrawerContacts(currentDeal);
+  };
+  _patch(newValue);
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (res && res.success === false) {
+        _patch(prevValue);
+        showToast('CRM toggle failed: ' + (res.error || 'Unknown') + ' — reverted', 'error');
+        return;
+      }
+      // Already patched optimistically; just confirm.
+      showToast(email + ' CRM scanning ' + (newValue ? 'enabled' : 'disabled'), 'success');
+    })
+    .withFailureHandler(function(e) {
+      _patch(prevValue);
+      showToast('CRM toggle failed: ' + ((e && e.message) || e || 'Unknown') + ' — reverted', 'error');
+    })
+    .toggleContactCRM(email, merchant, newValue);
+}
+
+function toggleDrawerProposeForm() { var f = document.getElementById('drawerProposeForm'); if (f) f.style.display = f.style.display === 'none' ? 'block' : 'none'; }
+
+function submitDrawerPropose() {
+  if (!currentDeal) return;
+  var payload = { sk_merchant: currentDeal.row > 0 ? currentDeal.row : '', merchant_name: currentDeal.company, contact_name: document.getElementById('dpName').value.trim(), contact_email: document.getElementById('dpEmail').value.trim(), contact_role: document.getElementById('dpRole').value, is_primary: document.getElementById('dpPrimary').checked };
+  if (!payload.contact_name || !payload.contact_email) { showToast('Name and email required', 'error'); return; }
+
+  // V3.2 Phase 5 (flow #5b) — instant collapse + toast.
+  // Clear the form and hide it; on failure, restore values + reopen + flash.
+  var prevName    = document.getElementById('dpName').value;
+  var prevEmail   = document.getElementById('dpEmail').value;
+  var prevRole    = document.getElementById('dpRole').value;
+  var prevPrimary = document.getElementById('dpPrimary').checked;
+  document.getElementById('dpName').value     = '';
+  document.getElementById('dpEmail').value    = '';
+  document.getElementById('dpPrimary').checked = false;
+  toggleDrawerProposeForm();
+  showToast('Contact proposed — pending approval', 'success');
+
+  google.script.run
+    .withSuccessHandler(function() { /* already toasted */ })
+    .withFailureHandler(function(e) {
+      // Restore values and re-open form
+      document.getElementById('dpName').value      = prevName;
+      document.getElementById('dpEmail').value     = prevEmail;
+      document.getElementById('dpRole').value      = prevRole;
+      document.getElementById('dpPrimary').checked = prevPrimary;
+      var f = document.getElementById('drawerProposeForm');
+      if (f && f.style.display === 'none') toggleDrawerProposeForm();
+      var nameEl = document.getElementById('dpName');
+      if (nameEl && typeof flashField_ === 'function') flashField_(nameEl);
+      showToast('Propose failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
+    })
+    .proposeContact(payload);
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — TIMELINE (persistent notes)
+═══════════════════════════════════════ */
+/* ── Timeline helpers ──────────────────────────────────────────────── */
+function buildTimelineEntries_(deal, notes, huddles) {
+  var entries = [];
+  if (notes && notes.length) { notes.forEach(function(n) { entries.push({ type: 'note', date: n.timestamp || '', author: n.author || '', text: n.note_text || '', snippet: '' }); }); }
+  // V3.2 Phase 5 — merge in optimistic pending notes for this company.
+  // Existing dedupe below (type|text[:40]|date[:10]) lets server notes win
+  // once they land; tempId is carried through so rows can be confirmed/rolled back.
+  var _pend = (deal && deal.company && _pendingNotes[deal.company]) ? _pendingNotes[deal.company] : [];
+  _pend.forEach(function(p) {
+    entries.push({ type: 'note', date: p.timestamp || '', author: p.author || '', text: p.note_text || '', snippet: '', _tempId: p.tempId, _pending: !!p._pending });
+  });
+  // V3.9.1 — Huddle entries are per-partner mentions: each row is one
+  // partner's note from one meeting. Sort by created_ts so they interleave
+  // with other timeline events naturally. Followup-flagged mentions get a
+  // distinct snippet prefix so the drawer view can spot them.
+  if (huddles && huddles.length) {
+    huddles.forEach(function(h) {
+      var noteText = String(h.note || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+      if (noteText.length > 140) noteText = noteText.slice(0, 140) + '…';
+      var labelText = h.title || 'Huddle';
+      if (h.followup) labelText = '⚑ ' + labelText;  // flag emoji prefix
+      entries.push({
+        type: 'huddle', date: h.created_ts || h.week_start || '',
+        author: h.created_by || '', text: labelText,
+        snippet: noteText || (h._legacy ? '' : 'All good — no notes'),
+        _huddleId: h.huddle_id, _huddleWeek: h.week_start, _followup: !!h.followup
+      });
+    });
+  }
+  try {
+    var le = typeof deal.latestEmail === 'string' ? JSON.parse(deal.latestEmail) : deal.latestEmail;
+    if (le) {
+      if (le.sent && le.sent.length) { le.sent.forEach(function(s) { entries.push({ type: 'email_out', date: s.timestamp || s.date || '', author: '', text: s.subject || '(No Subject)', snippet: s.snippet || '' }); }); }
+      if (le.received && le.received.length) { le.received.forEach(function(r) { entries.push({ type: 'email_in', date: r.timestamp || r.date || '', author: '', text: r.subject || 'Email received', snippet: r.snippet || '' }); }); }
+    }
+  } catch(ex) {}
+  if (deal.recent_campaigns && deal.recent_campaigns.length) { deal.recent_campaigns.forEach(function(c) { entries.push({ type: 'email_out', date: c.timestamp || '', author: '', text: c.subject || '(No Subject)', snippet: '' }); }); }
+  var compLower = (deal.company || '').toLowerCase();
+  if (typeof calEvents !== 'undefined' && calEvents.length) { calEvents.forEach(function(e) { if ((e.title || '').toLowerCase().indexOf(compLower) > -1) { entries.push({ type: 'event', date: e.start || '', author: '', text: e.title || '', snippet: e.desc || '' }); } }); }
+  var seen = {}; entries = entries.filter(function(e) { var ds = (typeof e.date === 'number') ? String(e.date) : (e.date || ''); var k = e.type + '|' + (e.text || '').substring(0, 40) + '|' + ds.substring(0, 10); if (seen[k]) return false; seen[k] = true; return true; });
+  entries.sort(function(a, b) { var ad = typeof a.date === 'number' ? a.date : (new Date(a.date || 0).getTime()); var bd = typeof b.date === 'number' ? b.date : (new Date(b.date || 0).getTime()); return bd - ad; });
+  return entries;
+}
+function tlIcon_(type) { var m = { note: ['#e8e8e6','#4a4a48','\u270d'], email_out: ['#dcdcda','#686866','\u2197'], email_in: ['#e8e8e6','#4a4a48','\u2199'], event: ['#e0e7ff','#4338ca','\ud83d\udcc5'], huddle: ['#fef3c7','#92400e','\ud83d\udc65'] }; var c = m[type] || m.note; return '<span style="background:' + c[0] + ';color:' + c[1] + ';width:20px;height:20px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">' + c[2] + '</span>'; }
+function tlDate_(iso) { if (!iso) return ''; try { var d = new Date(iso); if (isNaN(d.getTime())) return ''; var isToday = d.toDateString() === new Date().toDateString(); return isToday ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' }) + ' \xb7 ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch(e) { return ''; } }
+function tlAuthor_(email) { if (!email) return ''; return email.split('@')[0].split('.').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' '); }
+function tlLabel_(type) { return type === 'note' ? 'Note' : type === 'email_out' ? 'Sent' : type === 'email_in' ? 'Received' : type === 'huddle' ? 'Huddle' : 'Event'; }
+function renderSnapshotEntry_(e) {
+  var ts = tlDate_(e.date);
+  var author = e.author ? tlAuthor_(e.author) : '';
+  var mainText = e.text || '';
+  if (mainText.length > 80) mainText = mainText.substring(0, 80) + '\u2026';
+  // V3.2 Phase 5 — subtle pending dim for optimistic entries not yet confirmed
+  var pendingStyle = e._pending ? 'opacity:0.55;' : '';
+  return '<div style="' + pendingStyle + 'margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:8px">'
+    + '<div style="padding-top:1px;flex-shrink:0">' + tlIcon_(e.type) + '</div>'
+    + '<div style="flex:1;min-width:0">'
+    + '<div style="display:flex;justify-content:space-between;margin-bottom:2px">'
+    + '<span style="font-size:9px;font-weight:600;color:var(--ink-3)">' + tlLabel_(e.type) + (author ? ' \xb7 ' + esc(author) : '') + '</span>'
+    + '<span style="font-size:9px;color:var(--ink-4);white-space:nowrap">' + esc(ts) + '</span></div>'
+    + '<div style="font-size:11px;color:var(--ink-2);line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(mainText) + '</div>'
+    + '</div></div>';
+}
+function renderTlEntry_(e) {
+  var ts = tlDate_(e.date), author = e.author ? tlAuthor_(e.author) : '';
+  var snip = (e.snippet && e.type !== 'note') ? '<div style="font-size:10.5px;color:var(--ink-4);line-height:1.4;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(e.snippet) + '</div>' : '';
+  // V3.2 Phase 5 — pending visual + data attr for confirm/rollback targeting
+  var dataAttr     = e._tempId  ? ' data-temp-id="' + esc(e._tempId) + '"' : '';
+  var pendingStyle = e._pending ? 'opacity:0.55;' : '';
+  var pendingBadge = e._pending ? '<span data-pending-badge style="font-size:8.5px;font-weight:600;color:var(--ink-3);background:var(--panel-2);border:1px solid var(--border);padding:1px 6px;border-radius:6px">SAVING\u2026</span>' : '';
+  // V3.9 — anchor class for huddle entries so the snapshot-tab badge can
+  // scroll to the first one on click.
+  var anchorClass = e.type === 'huddle' ? ' tl-huddle-anchor' : '';
+  return '<div' + dataAttr + ' class="tl-entry' + anchorClass + '" style="' + pendingStyle + 'background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:8px;transition:opacity 0.25s ease">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+    + tlIcon_(e.type) + '<span style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4)">' + tlLabel_(e.type) + '</span>'
+    + (author ? '<span style="font-size:9.5px;color:var(--ink-3)">' + esc(author) + '</span>' : '')
+    + pendingBadge
+    + '<span style="font-size:9px;color:var(--ink-4);margin-left:auto;white-space:nowrap">' + esc(ts) + '</span></div>'
+    + '<div style="font-size:12px;color:var(--ink-2);line-height:1.5;' + (e.type === 'note' ? 'white-space:pre-wrap' : '') + '">' + esc(e.text) + '</div>' + snip + '</div>';
+}
+
+function renderTimelineList() {
+  if (!currentDeal) return;
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  var el = document.getElementById('timelineList');
+  if (!el) return;
+  if (!useGAS) { el.innerHTML = '<div style="text-align:center;padding:24px;font-size:11px;color:var(--ink-4)">Timeline not available.</div>'; return; }
+  el.innerHTML = '<div style="text-align:center;padding:24px;font-size:11px;color:var(--ink-4)">Loading timeline\u2026</div>';
+  var deal = currentDeal;
+  // V3.9 — Parallel notes + huddle fetch, render once both back (or after a
+  // short safety window).
+  var pending = { notes: null, huddles: null };
+  var commit = function() {
+    if (pending.notes === null || pending.huddles === null) return;
+    if (!currentDeal || currentDeal.company !== deal.company) return;
+    var entries = buildTimelineEntries_(deal, pending.notes || [], pending.huddles || []);
+    if (!entries.length) { el.innerHTML = '<div style="text-align:center;padding:24px;border:1px dashed var(--border);border-radius:9px;font-size:11px;color:var(--ink-4)">No activity yet.</div>'; return; }
+    el.innerHTML = entries.map(renderTlEntry_).join('');
+  };
+  google.script.run.withSuccessHandler(function(notes) { pending.notes = notes || []; commit(); })
+    .withFailureHandler(function() { pending.notes = []; commit(); }).getPartnerNotes(deal.company);
+  google.script.run.withSuccessHandler(function(hd) { pending.huddles = hd || []; commit(); })
+    .withFailureHandler(function() { pending.huddles = []; commit(); }).getHuddleLogForPartner(_userTeam, deal.company, 30);
+}
+var renderNotesList = renderTimelineList;
+
+function addTimelineNote() {
+  var inp = document.getElementById('timelineNoteInput'); if (!inp) return;
+  var text = inp.value.trim(); if (!text || !currentDeal) return;
+  var btn = document.getElementById('btnAddTimelineNote');
+  var company = currentDeal.company;
+  var tempId  = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+
+  // V3.2 Phase 5 — OPTIMISTIC INSERT
+  // 1. Clear input, record pending entry, inject DOM at top of timeline.
+  //    No GAS round-trip needed for the user to see their note.
+  var pending = {
+    tempId: tempId,
+    note_text: text,
+    timestamp: new Date().toISOString(),
+    author: (typeof _userEmail !== 'undefined' ? _userEmail : ''),
+    _pending: true
+  };
+  if (!_pendingNotes[company]) _pendingNotes[company] = [];
+  _pendingNotes[company].push(pending);
+  inp.value = '';
+  _injectPendingNoteRow_(pending);
+
+  if (btn) { btn.disabled = true; }
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+
+  if (!useGAS) {
+    // Demo/offline — treat as confirmed (no server to fail against)
+    _confirmPendingNote_(company, tempId);
+    if (btn) { btn.disabled = false; }
+    showToast('Saved (demo mode)', 'success');
+    return;
+  }
+
+  google.script.run
+    .withSuccessHandler(function(result) {
+      if (btn) { btn.disabled = false; }
+      if (result && result.success) {
+        _confirmPendingNote_(company, tempId);
+        showToast('Note saved', 'success');
+      } else {
+        _rollbackPendingNote_(company, tempId, text, inp);
+        showToast('Failed: ' + ((result && result.error) || 'Unknown'), 'error');
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (btn) { btn.disabled = false; }
+      _rollbackPendingNote_(company, tempId, text, inp);
+      showToast('Error: ' + ((err && err.message) || err || 'Unknown'), 'error');
+    })
+    .savePartnerNote(company, text);
+}
+var addNote = addTimelineNote;
+
+/* V3.2 Phase 5 helpers — timeline note optimistic insert / confirm / rollback */
+function _injectPendingNoteRow_(p) {
+  var el = document.getElementById('timelineList'); if (!el) return;
+  var entry = {
+    type: 'note', date: p.timestamp, author: p.author,
+    text: p.note_text, snippet: '',
+    _tempId: p.tempId, _pending: true
+  };
+  var html = renderTlEntry_(entry);
+  // If the list shows the empty-state placeholder (or "Loading…"), replace it.
+  var isEmptyOrLoading = /No activity yet|Loading timeline/.test(el.innerHTML);
+  if (isEmptyOrLoading) { el.innerHTML = html; }
+  else { el.insertAdjacentHTML('afterbegin', html); }
+}
+
+function _confirmPendingNote_(company, tempId) {
+  var row = document.querySelector('[data-temp-id="' + tempId + '"]');
+  if (row) {
+    row.style.opacity = '1';
+    var badge = row.querySelector('[data-pending-badge]');
+    if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
+  }
+  var list = _pendingNotes[company] || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].tempId === tempId) { list[i]._pending = false; list[i]._confirmed = true; }
+  }
+  // Clean up after 60s — the next drawer-open's getPartnerNotes will include
+  // this note from the server, and the existing dedupe in buildTimelineEntries_
+  // (type|text[:40]|date[:10]) keeps the server copy and drops the pending one.
+  setTimeout(function() {
+    if (!_pendingNotes[company]) return;
+    _pendingNotes[company] = _pendingNotes[company].filter(function(n) { return n.tempId !== tempId; });
+  }, 60000);
+}
+
+function _rollbackPendingNote_(company, tempId, text, inp) {
+  var row = document.querySelector('[data-temp-id="' + tempId + '"]');
+  if (row && row.parentNode) row.parentNode.removeChild(row);
+  if (_pendingNotes[company]) {
+    _pendingNotes[company] = _pendingNotes[company].filter(function(n) { return n.tempId !== tempId; });
+  }
+  // Restore text so user can retry without re-typing, and flash the input
+  if (inp && !inp.value) inp.value = text;
+  flashField_(inp);
+  // Restore empty-state if the list is now empty
+  var el = document.getElementById('timelineList');
+  if (el && !el.children.length) {
+    el.innerHTML = '<div style="text-align:center;padding:24px;border:1px dashed var(--border);border-radius:9px;font-size:11px;color:var(--ink-4)">No activity yet.</div>';
+  }
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — CORRESPONDENCE (Email Feed)
+   Source: currentEmailCtx (CRM Data "Latest Email" JSON)
+   Populated by DB Contacts scanner (quickSync 10min / fullSync nightly)
+   No live Gmail calls — renders instantly from pre-loaded data
+═══════════════════════════════════════ */
+
+function getPartnerEmails() {
+  if (!currentDeal) return [];
+  var emails = {};
+  if (currentDeal.email) emails[currentDeal.email.toLowerCase()] = true;
+  if (currentDeal.contacts && currentDeal.contacts.length) {
+    currentDeal.contacts.forEach(function(c) { if (c.contact_email) emails[c.contact_email.toLowerCase()] = true; });
+  }
+  return Object.keys(emails);
+}
+
+function renderCorrFeed() {
+  var feed = document.getElementById('corrFeed');
+  var countEl = document.getElementById('corrCount');
+  if (!feed) return;
+
+  var all = [];
+  currentEmailCtx.sent.forEach(function(e) { all.push(Object.assign({}, e, { dir: 'out' })); });
+  currentEmailCtx.received.forEach(function(e) { all.push(Object.assign({}, e, { dir: 'in' })); });
+  all.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0); });
+
+  // ── Group into threads by normalized subject ──
+  var threadMap = {};
+  var threadOrder = [];
+  all.forEach(function(em) {
+    var key = normalizeSubject_(em.subject || '(No Subject)');
+    if (!threadMap[key]) { threadMap[key] = []; threadOrder.push(key); }
+    threadMap[key].push(em);
+  });
+  // Sort threads by latest message
+  threadOrder.sort(function(a, b) {
+    return (threadMap[b][0].timestamp || 0) - (threadMap[a][0].timestamp || 0);
+  });
+  if (countEl) countEl.textContent = threadOrder.length + (threadOrder.length === 1 ? ' thread' : ' threads');
+
+  if (!threadOrder.length) {
+    feed.innerHTML = '<div style="text-align:center;padding:48px 20px;color:var(--ink-4)">'
+      + '<i data-lucide="inbox" style="width:28px;height:28px;margin-bottom:10px;opacity:0.4"></i>'
+      + '<div style="font-size:12px;font-weight:600;margin-bottom:4px">No email activity yet</div>'
+      + '<div style="font-size:11px">Emails sync automatically from the CRM scanner</div></div>';
+    refreshIcons(); return;
+  }
+
+  feed.innerHTML = threadOrder.map(function(key, ti) {
+    var msgs = threadMap[key];
+    var latest = msgs[0];
+    var threadId = 'corrThread_' + ti;
+    var latestDate = corrDateStr_(latest);
+    var inCount = msgs.filter(function(m) { return m.dir === 'in'; }).length;
+    var outCount = msgs.filter(function(m) { return m.dir === 'out'; }).length;
+    var badges = '';
+    if (outCount) badges += '<span style="background:#dbeafe;color:#1d4ed8;font-size:8px;font-weight:700;padding:1px 5px;border-radius:4px">' + outCount + ' sent</span>';
+    if (inCount) badges += '<span style="background:#dcfce7;color:#16a34a;font-size:8px;font-weight:700;padding:1px 5px;border-radius:4px">' + inCount + ' received</span>';
+
+    // Thread header
+    var html = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:8px">'
+      + '<div onclick="toggleCorrThread(\'' + threadId + '\',this)" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px">'
+      + '<div style="width:22px;height:22px;border-radius:6px;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">' + msgs.length + '</div>'
+      + '<div style="flex:1;min-width:0">'
+      + '<div style="font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(latest.subject || '(No Subject)') + '</div>'
+      + '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">' + badges
+      + '<span style="font-size:9px;color:var(--ink-4);margin-left:auto;white-space:nowrap">' + esc(latestDate) + '</span></div>'
+      + '</div>'
+      + '<i data-lucide="chevron-down" class="corr-chev" style="width:13px;height:13px;color:var(--ink-4);flex-shrink:0;transition:transform 0.15s"></i>'
+      + '</div>';
+
+    // Thread messages (collapsed by default)
+    html += '<div id="' + threadId + '" style="display:none;border-top:1px solid var(--border)">';
+    msgs.forEach(function(em, mi) {
+      var isIn = em.dir === 'in';
+      var dateStr = corrDateStr_(em);
+      var dirIcon = isIn ? '\u2199' : '\u2197';
+      var dirColor = isIn ? '#16a34a' : '#1d4ed8';
+      var dirBg = isIn ? '#dcfce7' : '#dbeafe';
+      var bodyText = em.body || em.snippet || '';
+      var msgBodyId = threadId + '_msg_' + mi;
+      // Latest message expanded, older ones collapsed
+      var isLatest = mi === 0;
+      html += '<div style="border-bottom:1px solid var(--border);' + (isIn ? 'background:#fafffe' : '') + '">'
+        + '<div onclick="toggleCorrBody(\'' + msgBodyId + '\',this)" style="padding:8px 14px;display:flex;align-items:center;gap:8px;cursor:pointer">'
+        + '<span style="background:' + dirBg + ';color:' + dirColor + ';width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0">' + dirIcon + '</span>'
+        + '<span style="font-size:9px;font-weight:700;text-transform:uppercase;color:' + dirColor + '">' + (isIn ? 'Received' : 'Sent') + '</span>'
+        + '<span style="font-size:9px;color:var(--ink-4);margin-left:auto;white-space:nowrap">' + esc(dateStr) + '</span>'
+        + '<i data-lucide="chevron-down" class="corr-chev" style="width:11px;height:11px;color:var(--ink-4);flex-shrink:0;transition:transform 0.15s;' + (isLatest ? 'transform:rotate(180deg)' : '') + '"></i>'
+        + '</div>';
+      if (bodyText) {
+        html += '<div id="' + msgBodyId + '" style="' + (isLatest ? '' : 'display:none;') + 'padding:4px 14px 10px 40px;font-size:11.5px;color:var(--ink-2);line-height:1.6;white-space:pre-wrap">' + esc(bodyText) + '</div>';
+      }
+      html += '</div>';
+    });
+    // Reply button at bottom of thread
+    var replySubj = latest.subject || '';
+    if (replySubj && replySubj.substring(0, 3).toLowerCase() !== 're:') replySubj = 'Re: ' + replySubj;
+    html += '<div style="padding:6px 14px;display:flex;justify-content:flex-end">'
+      + '<button class="btn-ghost" onclick="openCorrReply(\'' + esc(replySubj).replace(/'/g, "\\'") + '\')" style="padding:4px 10px;font-size:10px"><i data-lucide="reply" style="width:11px;height:11px"></i> Reply</button>'
+      + '</div>';
+    html += '</div></div>';
+    return html;
+  }).join('');
+  refreshIcons();
+}
+
+function normalizeSubject_(subj) {
+  return (subj || '').replace(/^(re|fwd?|enc|rif):\s*/gi, '').replace(/^(re|fwd?|enc|rif):\s*/gi, '').trim().toLowerCase();
+}
+
+function corrDateStr_(em) {
+  var d = em.timestamp ? new Date(em.timestamp) : null;
+  if (d && !isNaN(d.getTime())) {
+    var isToday = d.toDateString() === new Date().toDateString();
+    return isToday
+      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' }) + ' \xb7 ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return em.date || '';
+}
+
+function toggleCorrThread(threadId, headerEl) {
+  var el = document.getElementById(threadId);
+  if (!el) return;
+  var isHidden = el.style.display === 'none';
+  el.style.display = isHidden ? '' : 'none';
+  var chev = headerEl.querySelector('.corr-chev');
+  if (chev) chev.style.transform = isHidden ? 'rotate(180deg)' : '';
+}
+
+function toggleCorrBody(bodyId, headerEl) {
+  var body = document.getElementById(bodyId);
+  if (!body) return;
+  var isHidden = body.style.display === 'none';
+  body.style.display = isHidden ? '' : 'none';
+  var chev = headerEl.querySelector('.corr-chev');
+  if (chev) chev.style.transform = isHidden ? 'rotate(180deg)' : '';
+}
+
+/* ═══════════════════════════════════════
+   COMPOSE MODAL (new email + reply from drawer)
+═══════════════════════════════════════ */
+function openCorrCompose() {
+  openCorrComposeWith_('', '');
+}
+
+function openCorrReply(replySubject) {
+  openCorrComposeWith_(replySubject, '');
+}
+
+function openCorrComposeWith_(subject, body) {
+  var titleEl = document.getElementById('composeModalTitle');
+  if (titleEl) titleEl.textContent = currentDeal ? (subject ? 'Reply \u2014 ' + currentDeal.company : 'New Email \u2014 ' + currentDeal.company) : 'Compose';
+  var toEl = document.getElementById('composeTo');
+  if (toEl) toEl.value = currentDeal ? (currentDeal.email || '') : '';
+  var subjEl = document.getElementById('composeSubject');
+  if (subjEl) subjEl.value = subject || '';
+  var editor = document.getElementById('composeEditor');
+  if (editor) editor.innerHTML = body || '';
+  // Apply send restriction
+  var dd = document.getElementById('composeSendFrom');
+  if (dd) {
+    var pOpt = dd.querySelector('option[value="personal"]');
+    var sOpt = dd.querySelector('option[value="shared"]');
+    var spOpt = dd.querySelector('option[value="shared_personal"]');
+    if (pOpt) {
+      if (!_mailConfig.proxyUrl) { pOpt.style.display = 'none'; pOpt.disabled = true; }
+      else { pOpt.style.display = ''; pOpt.disabled = false; }
+    }
+    if (sOpt) {
+      if (!_canSendShared) { sOpt.style.display = 'none'; sOpt.disabled = true; }
+      else { sOpt.style.display = ''; sOpt.disabled = false; }
+    }
+    if (spOpt) {
+      if (!_canSendShared) { spOpt.style.display = 'none'; spOpt.disabled = true; }
+      else { spOpt.style.display = ''; spOpt.disabled = false; }
+    }
+    if (spOpt && !spOpt.disabled) dd.value = 'shared_personal';
+    else if (pOpt && !pOpt.disabled) dd.value = 'personal';
+    else if (sOpt && !sOpt.disabled) dd.value = 'shared';
+  }
+} 
+
+function closeComposeModal() { document.getElementById('composeModal').style.display = 'none'; }
+
+function execFmt(cmd) {
+  var editor = document.getElementById('composeEditor');
+  if (editor) editor.focus();
+  document.execCommand(cmd, false, null);
+}
+
+function insertLink() {
+  var url = prompt('Enter URL:');
+  if (url) { var editor = document.getElementById('composeEditor'); if (editor) editor.focus(); document.execCommand('createLink', false, url); }
+}
+
+function sendComposeEmail() {
+  var toEl = document.getElementById('composeTo');
+  var subjEl = document.getElementById('composeSubject');
+  var editor = document.getElementById('composeEditor');
+  var sendFromEl = document.getElementById('composeSendFrom');
+  if (!toEl || !subjEl || !editor) return;
+  var to = toEl.value.trim();
+  var subject = subjEl.value.trim();
+  var htmlBody = editor.innerHTML.trim();
+  if (!to) { showToast('Recipient required', 'error'); return; }
+  if (!subject) { showToast('Subject required', 'error'); return; }
+  if (!htmlBody || htmlBody === '<br>') { showToast('Message cannot be empty', 'error'); return; }
+
+  var btn = document.getElementById('btnSendCompose');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:11px;height:11px"></i> Sending\u2026'; refreshIcons(); }
+  var partnerName = currentDeal ? currentDeal.company : '';
+  var sendFrom = sendFromEl ? sendFromEl.value : 'shared_personal';
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (!useGAS) { showToast('Not available in demo', 'error'); resetComposeBtn_(); return; }
+
+  var onDone = function(ok, errMsg) {
+    resetComposeBtn_();
+    if (ok) { showToast('Email sent', 'success'); closeComposeModal(); }
+    else { showToast('Failed: ' + (errMsg || 'Unknown error'), 'error'); }
+  };
+
+  if (sendFrom === 'personal' && _mailConfig.proxyUrl) {
+    var queue = [{ to: to, subject: subject, htmlBody: htmlBody, storeName: partnerName, templateName: 'Correspondence' }];
+    sendViaProxyBatch(queue)
+      .then(function() { onDone(true); })
+      .catch(function(e) { onDone(false, e.message || e); });
+  } else {
+    google.script.run
+      .withSuccessHandler(function(r) { onDone(!r || r.success !== false, r && r.error); })
+      .withFailureHandler(function(e) { onDone(false, e.message || e); })
+      .sendMail(to, subject, htmlBody, partnerName, 'Correspondence', null, null);
+  }
+}
+
+function resetComposeBtn_() {
+  var btn = document.getElementById('btnSendCompose');
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:11px;height:11px"></i> Send'; refreshIcons(); }
+}
+
+/* ═══════════════════════════════════════
+   DRAWER — TAGS (null-safe)
+═══════════════════════════════════════ */
+function renderTags() {
+  var container = document.getElementById('tagContainer');
+  if (!container) return;
+  var chips = currentTags.map(function(t) { return '<span style="display:inline-flex;align-items:center;gap:5px;background:var(--ink);color:#fff;padding:3px 9px;border-radius:7px;font-size:10px;font-weight:600"><span>' + esc(t) + '</span><button onclick="removeTag(\'' + esc(t) + '\')" style="background:none;border:none;color:rgba(255,255,255,0.5);cursor:pointer;font-size:12px;line-height:1">×</button></span>'; }).join('');
+  container.innerHTML = chips + '<input type="text" id="tagInput" placeholder="' + (currentTags.length ? '' : 'Type tag and press Enter…') + '" style="border:none;background:transparent;outline:none;font-family:\'Barlow\',sans-serif;font-size:12px;width:80px;min-width:60px;color:var(--ink)" onkeydown="handleTagInput(event)">';
+}
+function handleTagInput(e) { if (e.key === 'Enter') { var v = e.target.value.trim(); if (v && currentTags.indexOf(v) === -1) { currentTags.push(v); renderTags(); } e.target.value = ''; } }
+function removeTag(t) { currentTags = currentTags.filter(function(x) { return x !== t; }); renderTags(); }
+
+/* ═══════════════════════════════════════
+   DRAWER — SAVE & EMAIL
+═══════════════════════════════════════ */
+function saveDeal() {
+  if (!currentDeal) return;
+  var row = document.getElementById('editRow').value;
+  var modelEl = document.getElementById('editModel');
+  var payload = { row: row, store: currentDeal.company, company: currentDeal.company, stage: document.getElementById('editStage').value, nextAction: document.getElementById('editAction').value || 'None', actionDate: document.getElementById('editDate').value, notes: document.getElementById('editNotes').value, tags: currentTags.join(','), model: modelEl ? modelEl.textContent : '', partnerValue: '' };
+
+  // V3.2 Phase 5 (flow #2) — OPTIMISTIC SAVE with rollback
+  // Snapshot the partner's current state BEFORE patching so we can revert
+  // if the server call fails. Known limitation: if a snapshot refresh
+  // overwrites P[] between save-fire and server-fail, revert may briefly
+  // re-display our old values over newer server-side data from a colleague;
+  // the next snapshot cycle (5 min) reconciles.
+  var idx = P.findIndex(function(d) { return d.row == row; });
+  var prevRecord = (idx > -1) ? Object.assign({}, P[idx]) : null;
+  if (idx > -1) { P[idx] = Object.assign({}, P[idx], payload); filterPartners(); }
+
+  var ss = document.getElementById('saveStatus'); ss.style.display = 'inline'; setTimeout(function() { ss.style.display = 'none'; }, 3000);
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+
+  if (useGAS && parseInt(row) > 0) {
+    google.script.run
+      .withSuccessHandler(function() { showToast('Saved', 'success'); })
+      .withFailureHandler(function(err) {
+        // Revert: re-find by row (P[] may have been rebuilt by a snapshot refresh)
+        if (prevRecord) {
+          var curIdx = P.findIndex(function(d) { return d.row == row; });
+          if (curIdx > -1) {
+            P[curIdx] = prevRecord;
+            filterPartners();
+          }
+          // If drawer is still on this partner, revert visible fields and flash changes
+          if (currentDeal && String(currentDeal.row) === String(row)) {
+            currentDeal = prevRecord;
+            _revertDrawerFieldsTo_(prevRecord, payload);
+          }
+        }
+        showToast('Save failed: ' + ((err && err.message) || 'Unknown') + ' — reverted', 'error');
+      })
+      .updateDealFromDashboard(payload);
+  }
+  else if (parseInt(row) < 0) { showToast('No CRM record — view only', 'error'); }
+  else { showToast('Saved (demo mode)', 'success'); }
+}
+
+/* V3.2 Phase 5 — revert drawer fields to prevRecord and flash the ones
+   that differ from the attempted payload (visual confirmation of rollback). */
+function _revertDrawerFieldsTo_(prev, attempted) {
+  var pairs = [
+    ['editStage',  'stage'],
+    ['editAction', 'nextAction'],
+    ['editDate',   'actionDate'],
+    ['editNotes',  'notes']
+  ];
+  pairs.forEach(function(p) {
+    var el = document.getElementById(p[0]);
+    if (!el) return;
+    var prevVal      = prev[p[1]] || '';
+    var attemptedVal = (attempted && attempted[p[1]] != null) ? attempted[p[1]] : prevVal;
+    // Restore value
+    if (el.tagName === 'SELECT') {
+      // Make sure the option exists (drawer-open logic does the same)
+      if (!Array.from(el.options).some(function(o){ return o.value === prevVal; })) {
+        var opt = document.createElement('option'); opt.value = prevVal; opt.textContent = prevVal; el.appendChild(opt);
+      }
+    }
+    el.value = prevVal;
+    // Flash if the user actually tried to change this field
+    if (String(prevVal) !== String(attemptedVal)) flashField_(el);
+  });
+  // Tags
+  if (typeof currentTags !== 'undefined') {
+    var attemptedTags = (attempted && attempted.tags) ? attempted.tags : '';
+    var prevTagsStr   = prev.tags || '';
+    currentTags = prevTagsStr ? prevTagsStr.split(',').map(function(t){return t.trim();}).filter(Boolean) : [];
+    if (typeof renderTags === 'function') renderTags();
+    if (String(prevTagsStr) !== String(attemptedTags)) {
+      var tagWrap = document.getElementById('currentTags') || document.getElementById('tagInput');
+      if (tagWrap) flashField_(tagWrap);
+    }
+  }
+  // Model
+  var modelEl = document.getElementById('editModel');
+  if (modelEl) {
+    var prevModel      = prev.model || '';
+    var attemptedModel = (attempted && attempted.model != null) ? attempted.model : prevModel;
+    modelEl.textContent = prevModel || '3P';
+    if (String(prevModel) !== String(attemptedModel)) flashField_(modelEl);
+  }
+}
+
+function emailThisPartner(deal) { if (!deal) return; emailState.selectedRows = new Set([deal.row]); closeDetail(); switchView('email'); }
+</script>

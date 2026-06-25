@@ -1,0 +1,375 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   NX_SNAPSHOT — Frontend data layer (V3.1, Phase 4)
+   IndexedDB-backed instant hydrate + background refresh.
+   Reads only — writes still go through the existing live path until Phase 5.
+
+   Boot contract:
+     NX_SNAPSHOT.boot(team, onData)
+        onData(data, meta)  — may be called 1–2 times:
+          1st call: from IDB (source: 'idb')     OR from remote (source: 'remote')
+                    OR with null data (source: 'error') — caller must fall back.
+          2nd call: from remote after IDB hydrate (source: 'remote-refresh')
+                    — only if the server snapshot is newer than the IDB copy.
+
+   Feature flag:
+     NX_SNAPSHOT.isEnabled(email, team)  — true only when:
+       • team is in ENABLED_TEAMS
+       • session has not already stuck-fallen-back to live
+       • if ALLOWLIST is populated, email is in it (optional rollout gate)
+═══════════════════════════════════════════════════════════════════════════ */
+
+var NX_SNAPSHOT = {
+
+  // ── Rollout config ───────────────────────────────────────────────────────
+  // ALLOWLIST is an OPTIONAL rollout gate.
+  //   • Empty array (default) = any user whose team is in ENABLED_TEAMS is
+  //     allowed. GAS auth + Permissions sheet already gate who can reach the
+  //     app at all, so this check is only useful as an extra restriction.
+  //   • Populated = restrict the snapshot path to just those emails (useful
+  //     during a new hub rollout, then empty again once stable).
+  // Entries must be lowercase.
+  ALLOWLIST: [],
+
+  // Teams with a server-side snapshot configured.
+  // V3.8: extended from Carlos-only to all AM teams. Each entry requires a
+  // SNAPSHOT_FILE_IDS row in NX_Config + a time trigger in AM's Code.gs.
+  // A team here without those two prerequisites will fail soft (session
+  // falls back to live fetch) — verify all three are in place before adding.
+  ENABLED_TEAMS: ['Carlos', 'Daniel', 'Tanya', 'Meghan'],
+
+  // ── IndexedDB config ─────────────────────────────────────────────────────
+  DB_NAME: 'nexus_am',
+  DB_VERSION: 1,
+  STORE_SNAPSHOTS: 'snapshots',
+  STORE_PATCHES:   'pending_patches',   // Phase 5 — plumbing only, not yet used
+
+  // ── Freshness thresholds (ms) ────────────────────────────────────────────
+  STALE_AMBER_MS:    5 * 60 * 1000,   // green <5m, amber 5–15m
+  STALE_RED_MS:     15 * 60 * 1000,   // red >15m
+  STALE_FALLBACK_MS: 30 * 60 * 1000,  // >30m → session auto-falls back to live
+
+  // ── Internal state ───────────────────────────────────────────────────────
+  _db: null,
+  _currentTeam: '',
+  _lastGeneratedAt: null,
+  _fellBackToLive: false,
+  _pillTickHandle: null,
+  _refreshInFlight: false,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Public API
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Feature-flag check. Safe to call with empty values.
+   *  V3.2 — ALLOWLIST is optional: empty means allow anyone on an enabled team.
+   */
+  isEnabled: function(email, team) {
+    if (this._fellBackToLive) return false;
+    if (!email || !team) return false;
+    if (this.ENABLED_TEAMS.indexOf(team) === -1) return false;
+    // When populated, ALLOWLIST further restricts to specific emails.
+    if (this.ALLOWLIST.length &&
+        this.ALLOWLIST.indexOf(String(email).toLowerCase()) === -1) return false;
+    return true;
+  },
+
+  /**
+   * Boot entry. Hydrates from IDB immediately (if present), then background-
+   * refreshes from remote. Calls onData up to twice.
+   *
+   * If IDB is empty and remote fails, calls onData(null, {source:'error', error})
+   * exactly once — caller must fall back to live getUnifiedPartnerData.
+   */
+  boot: function(team, onData) {
+    var self = this;
+    self._currentTeam = team;
+    self._fellBackToLive = false;
+
+    self._readLocal(team, function(err, local) {
+      var hadLocal = false;
+      if (!err && local && local.data && local.generatedAt) {
+        // Check stale-fallback threshold before hydrating
+        var ageMs = Date.now() - new Date(local.generatedAt).getTime();
+        if (ageMs > self.STALE_FALLBACK_MS) {
+          console.warn('[snapshot] local is stale (' + Math.round(ageMs/60000) + 'min), skipping hydrate');
+        } else {
+          hadLocal = true;
+          self._lastGeneratedAt = local.generatedAt;
+          onData(local.data, { source: 'idb', generatedAt: local.generatedAt, ageMs: ageMs });
+          self._startPillTicker();
+        }
+      }
+
+      // Always try remote
+      self._fetchRemote(function(fetchErr, fresh) {
+        if (fetchErr) {
+          if (!hadLocal) {
+            onData(null, { source: 'error', error: (fetchErr && fetchErr.message) || String(fetchErr) });
+          } else {
+            console.warn('[snapshot] remote fetch failed, continuing on local:', fetchErr);
+            self._updatePill();  // reflect that we couldn't confirm freshness
+          }
+          return;
+        }
+
+        // Remote ok — check stale-fallback again (trigger could be dead)
+        var remoteAge = Date.now() - new Date(fresh.generatedAt).getTime();
+        if (remoteAge > self.STALE_FALLBACK_MS) {
+          console.warn('[snapshot] remote is stale (' + Math.round(remoteAge/60000) + 'min), falling back to live');
+          self._fellBackToLive = true;
+          if (!hadLocal) {
+            onData(null, { source: 'error', error: 'Snapshot stale by ' + Math.round(remoteAge/60000) + ' min' });
+          }
+          self._updatePill();
+          return;
+        }
+
+        self._lastGeneratedAt = fresh.generatedAt;
+        self._writeLocal(team, fresh.data, fresh.generatedAt);
+
+        if (!hadLocal) {
+          // First render, came from remote
+          onData(fresh.data, { source: 'remote', generatedAt: fresh.generatedAt });
+          self._startPillTicker();
+        } else if (!local || !local.generatedAt ||
+                   new Date(fresh.generatedAt) > new Date(local.generatedAt)) {
+          // Remote is newer than IDB — re-render with fresh data
+          onData(fresh.data, { source: 'remote-refresh', generatedAt: fresh.generatedAt });
+        }
+        self._updatePill();
+      });
+    });
+  },
+
+  /**
+   * Manual refresh handler (pill "refresh now" button).
+   * Re-reads the snapshot file and re-hydrates. Does NOT force a server-side
+   * regeneration — that only happens on the 5-min trigger.
+   */
+  manualRefresh: function(onRefreshed) {
+    var self = this;
+    onRefreshed = onRefreshed || function(){};
+    if (self._refreshInFlight) return;
+    self._refreshInFlight = true;
+    self._setPillRefreshing(true);
+
+    self._fetchRemote(function(err, fresh) {
+      self._refreshInFlight = false;
+      self._setPillRefreshing(false);
+      if (err) {
+        onRefreshed(err, null);
+        self._toast('Refresh failed: ' + ((err && err.message) || err), 'error');
+        return;
+      }
+      self._lastGeneratedAt = fresh.generatedAt;
+      self._writeLocal(self._currentTeam, fresh.data, fresh.generatedAt);
+      onRefreshed(null, fresh);
+      self._updatePill();
+    });
+  },
+
+  /**
+   * Optimistic local-state patch persistence (Phase 5 plumbing).
+   * Stored here so the queue survives reloads. Not wired to any writer yet.
+   */
+  queuePatch: function(patch, cb) {
+    cb = cb || function(){};
+    var self = this;
+    self._openDB(function(err, db) {
+      if (err) return cb(err);
+      try {
+        var tx = db.transaction(self.STORE_PATCHES, 'readwrite');
+        tx.objectStore(self.STORE_PATCHES).add(patch);
+        tx.oncomplete = function() { cb(null); };
+        tx.onerror    = function() { cb(tx.error); };
+      } catch (e) { cb(e); }
+    });
+  },
+  listPendingPatches: function(cb) {
+    var self = this;
+    self._openDB(function(err, db) {
+      if (err) return cb(err, []);
+      try {
+        var tx = db.transaction(self.STORE_PATCHES, 'readonly');
+        var req = tx.objectStore(self.STORE_PATCHES).getAll();
+        req.onsuccess = function() { cb(null, req.result || []); };
+        req.onerror   = function() { cb(req.error, []); };
+      } catch (e) { cb(e, []); }
+    });
+  },
+  clearPatch: function(id, cb) {
+    cb = cb || function(){};
+    var self = this;
+    self._openDB(function(err, db) {
+      if (err) return cb(err);
+      try {
+        var tx = db.transaction(self.STORE_PATCHES, 'readwrite');
+        tx.objectStore(self.STORE_PATCHES)['delete'](id);
+        tx.oncomplete = function() { cb(null); };
+        tx.onerror    = function() { cb(tx.error); };
+      } catch (e) { cb(e); }
+    });
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // IndexedDB helpers
+  // ══════════════════════════════════════════════════════════════════════════
+
+  _openDB: function(cb) {
+    var self = this;
+    if (self._db) return cb(null, self._db);
+    try {
+      var req = indexedDB.open(self.DB_NAME, self.DB_VERSION);
+      req.onupgradeneeded = function(e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains(self.STORE_SNAPSHOTS)) {
+          db.createObjectStore(self.STORE_SNAPSHOTS, { keyPath: 'key' });
+        }
+        if (!db.objectStoreNames.contains(self.STORE_PATCHES)) {
+          db.createObjectStore(self.STORE_PATCHES, { keyPath: 'id', autoIncrement: true });
+        }
+      };
+      req.onsuccess = function(e) { self._db = e.target.result; cb(null, self._db); };
+      req.onerror   = function()  { cb(req.error || new Error('IDB open failed'), null); };
+    } catch (e) { cb(e, null); }
+  },
+
+  _readLocal: function(team, cb) {
+    var self = this;
+    self._openDB(function(err, db) {
+      if (err) return cb(err, null);
+      try {
+        var tx = db.transaction(self.STORE_SNAPSHOTS, 'readonly');
+        var req = tx.objectStore(self.STORE_SNAPSHOTS).get('am_' + team);
+        req.onsuccess = function() { cb(null, req.result || null); };
+        req.onerror   = function() { cb(req.error, null); };
+      } catch (e) { cb(e, null); }
+    });
+  },
+
+  _writeLocal: function(team, data, generatedAt, cb) {
+    cb = cb || function(){};
+    var self = this;
+    self._openDB(function(err, db) {
+      if (err) return cb(err);
+      try {
+        var tx = db.transaction(self.STORE_SNAPSHOTS, 'readwrite');
+        tx.objectStore(self.STORE_SNAPSHOTS).put({
+          key: 'am_' + team,
+          data: data,
+          generatedAt: generatedAt,
+          storedAt: new Date().toISOString()
+        });
+        tx.oncomplete = function() { cb(null); };
+        tx.onerror    = function() { cb(tx.error); };
+      } catch (e) { cb(e); }
+    });
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Remote fetch (Option B — via google.script.run)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  _fetchRemote: function(cb) {
+    if (typeof google === 'undefined' || !google.script || !google.script.run) {
+      return cb(new Error('GAS unavailable'), null);
+    }
+    // V3.2 — prefer getSnapshotRawAM: server returns the raw JSON string;
+    // we parse on the client. Skips one object traversal on the wire.
+    // V3.8 — pass team argument so each team routes to its own snapshot file.
+    var self = this;
+    google.script.run
+      .withSuccessHandler(function(raw) {
+        if (typeof raw !== 'string' || !raw.length) {
+          return cb(new Error('Invalid snapshot payload (empty or non-string)'), null);
+        }
+        try {
+          var payload = JSON.parse(raw);
+          if (!payload || !payload.data || !payload.generatedAt) {
+            return cb(new Error('Invalid snapshot structure'), null);
+          }
+          cb(null, payload);
+        } catch (parseErr) {
+          cb(new Error('Snapshot JSON parse failed: ' + parseErr.message), null);
+        }
+      })
+      .withFailureHandler(function(e) { cb(e, null); })
+      .getSnapshotRawAM(self._currentTeam);
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Freshness pill UI
+  // ══════════════════════════════════════════════════════════════════════════
+
+  _startPillTicker: function() {
+    var self = this;
+    if (self._pillTickHandle) clearInterval(self._pillTickHandle);
+    self._updatePill();
+    self._pillTickHandle = setInterval(function() { self._updatePill(); }, 30000);
+  },
+
+  _updatePill: function() {
+    var pill = document.getElementById('snapshotPill');
+    if (!pill) return;
+
+    // Show the pill as soon as there's anything to report (including errors)
+    pill.style.display = 'flex';
+
+    if (!this._lastGeneratedAt) {
+      pill.setAttribute('data-state', 'unknown');
+      var tEl0 = pill.querySelector('[data-pill-text]');
+      if (tEl0) tEl0.textContent = 'No snapshot';
+      return;
+    }
+
+    var ageMs = Date.now() - new Date(this._lastGeneratedAt).getTime();
+    var state = ageMs < this.STALE_AMBER_MS ? 'fresh'
+              : ageMs < this.STALE_RED_MS   ? 'amber'
+              : ageMs < this.STALE_FALLBACK_MS ? 'red'
+              : 'stale';
+    pill.setAttribute('data-state', state);
+
+    var tEl = pill.querySelector('[data-pill-text]');
+    if (tEl) tEl.textContent = 'Updated ' + this._formatAge(ageMs);
+  },
+
+  _setPillRefreshing: function(on) {
+    var pill = document.getElementById('snapshotPill');
+    if (!pill) return;
+    if (on) pill.setAttribute('data-refreshing', '1');
+    else pill.removeAttribute('data-refreshing');
+  },
+
+  _formatAge: function(ms) {
+    var s = Math.round(ms / 1000);
+    if (s < 60) return 'just now';
+    var m = Math.round(s / 60);
+    if (m < 60) return m + ' min ago';
+    var h = Math.floor(m / 60);
+    var rem = m % 60;
+    return h + 'h' + (rem ? ' ' + rem + 'm' : '') + ' ago';
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Misc
+  // ══════════════════════════════════════════════════════════════════════════
+
+  _toast: function(msg, kind) {
+    // Piggyback on nx_core's toast if present; otherwise console fallback.
+    if (typeof showToast === 'function') { showToast(msg, kind || 'info'); return; }
+    console.log('[snapshot] ' + (kind || 'info') + ': ' + msg);
+  }
+};
+
+/* Global handler for the pill's refresh button (called from nexus.html onclick). */
+function snapshotManualRefresh() {
+  NX_SNAPSHOT.manualRefresh(function(err, fresh) {
+    if (err || !fresh) return;
+    // V3.2 — prefer refreshUnifiedData (data-only; doesn't re-fire initEmailView
+    // or loadAllContacts). Falls back to handleUnifiedData for pre-4.5 builds.
+    if (typeof refreshUnifiedData === 'function') refreshUnifiedData(fresh.data);
+    else if (typeof handleUnifiedData === 'function') handleUnifiedData(fresh.data);
+  });
+}
+</script>

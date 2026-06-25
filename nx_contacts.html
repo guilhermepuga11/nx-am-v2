@@ -1,0 +1,1266 @@
+<script>    
+/* ═══════════════════════════════════════    
+   COCKPIT VIEW — unified filter layout
+   V3.0: No Stock is master tag (first from left), Stock Decline rename,
+         High Growth last, ranking # column across all tables.
+   V3.7: ckActiveDim introduced — breakdown lens can be Season/Brand/Family.
+═══════════════════════════════════════ */
+
+// V3.7 — Cockpit active breakdown dim. Controls which BREAKDOWNS[dim] subtree
+// the lens toggle + picker + per-value table operate on. Declared here as a
+// global so every cockpit/drawer/overview consumer finds it defined at boot —
+// applyCkLens_ is called during initial buildCockpitView before any user
+// interaction has set it. 'season' is the default (matches pre-V3.7 behavior).
+var ckActiveDim = 'season';
+
+// V3.12 — Sales period mode. 'ytd' (default) preserves prior behavior;
+// 'month' replaces YTD GTV with the selected month's GTV (and YoY% becomes
+// vs same month previous year). Affects Sales tab only — both the aggregate
+// table and the Sales-by-X breakdown table. Stock/KPI tabs ignore this.
+// Month list is harvested from BREAKDOWNS.season.byStore (any dim works
+// since per-row contributions are symmetric across dims).
+var ckPeriodMode = 'ytd';
+var ckSalesMonthIdx = 0;
+var ckSalesAvailMonths = [];
+var _ckMonthlyByStoreCache = null;  // reset on every ckBuildSalesMonths_
+
+function ckBuildSalesMonths_() {
+  var s = (typeof BREAKDOWNS !== 'undefined' && BREAKDOWNS.season) ? BREAKDOWNS.season : seasons_();
+  var setM = {};
+  if (s && s.byStore) {
+    Object.keys(s.byStore).forEach(function(sk) {
+      var dvs = s.byStore[sk] || {};
+      Object.keys(dvs).forEach(function(dv) {
+        var arr = dvs[dv].months || [];
+        for (var i = 0; i < arr.length; i++) { if (arr[i] && arr[i].m) setM[arr[i].m] = true; }
+      });
+    });
+  }
+  ckSalesAvailMonths = Object.keys(setM).sort().reverse();
+  if (ckSalesMonthIdx >= ckSalesAvailMonths.length) ckSalesMonthIdx = Math.max(0, ckSalesAvailMonths.length - 1);
+  _ckMonthlyByStoreCache = null;
+}
+
+// Aggregate per-store monthly gtv/units across all season values.
+// Built lazily, kept until ckBuildSalesMonths_() is re-run.
+function _ckMonthlyByStore_() {
+  if (_ckMonthlyByStoreCache) return _ckMonthlyByStoreCache;
+  var s = (typeof BREAKDOWNS !== 'undefined' && BREAKDOWNS.season) ? BREAKDOWNS.season : seasons_();
+  var out = {};
+  if (s && s.byStore) {
+    Object.keys(s.byStore).forEach(function(sk) {
+      var dvs = s.byStore[sk] || {};
+      var byMonth = {};
+      Object.keys(dvs).forEach(function(dv) {
+        var arr = dvs[dv].months || [];
+        for (var i = 0; i < arr.length; i++) {
+          var r = arr[i];
+          if (!r || !r.m) continue;
+          if (!byMonth[r.m]) byMonth[r.m] = { gtv: 0, units: 0 };
+          byMonth[r.m].gtv   += r.g || 0;
+          byMonth[r.m].units += r.u || 0;
+        }
+      });
+      out[sk] = byMonth;
+    });
+  }
+  _ckMonthlyByStoreCache = out;
+  return out;
+}
+
+function ckMonthlyForStore_(storeKey, monthKey) {
+  var m = _ckMonthlyByStore_()[storeKey];
+  return (m && m[monthKey]) ? m[monthKey] : { gtv: 0, units: 0 };
+}
+
+function ckSelectedMonth_() { return ckSalesAvailMonths[ckSalesMonthIdx] || ''; }
+function ckPrevYearMonth_(mk) {
+  if (!mk || mk.length < 7) return '';
+  var p = mk.split('-');
+  return (parseInt(p[0], 10) - 1) + '-' + p[1];
+}
+function ckMonthLabel_(mk) {
+  if (!mk || mk.length < 7) return '';
+  var MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var p = mk.split('-');
+  return MN[parseInt(p[1], 10) - 1] + ' ' + p[0];
+}
+
+function setCkPeriod(mode) {
+  if (mode !== 'ytd' && mode !== 'month') return;
+  ckPeriodMode = mode;
+  if (mode === 'month') ckBuildSalesMonths_();
+  applyCkPeriodUI_();
+  buildSalesKpis();
+  if (ckTab === 'sales') {
+    if (ckSalesLens === 'season') { buildSalesSeasonKpis(); renderCkSalesSeason(); }
+    else renderCkSales();
+  }
+  refreshIcons();
+}
+
+function cycleCkSalesMonth(dir) {
+  if (!ckSalesAvailMonths.length) ckBuildSalesMonths_();
+  if (!ckSalesAvailMonths.length) { showToast('No monthly data available', 'error'); return; }
+  ckSalesMonthIdx = Math.max(0, Math.min(ckSalesAvailMonths.length - 1, ckSalesMonthIdx + dir));
+  if (ckPeriodMode !== 'month') ckPeriodMode = 'month';
+  setCkPeriod('month');
+}
+
+function applyCkPeriodUI_() {
+  var btnYtd = document.getElementById('ckPerYtd');
+  var btnMo  = document.getElementById('ckPerMonth');
+  var nav    = document.getElementById('ckPerMonthNav');
+  var lbl    = document.getElementById('ckPerMonthLabel');
+  if (btnYtd) btnYtd.classList.toggle('active', ckPeriodMode === 'ytd');
+  if (btnMo)  btnMo.classList.toggle('active', ckPeriodMode === 'month');
+  if (nav)    nav.style.display = (ckPeriodMode === 'month') ? 'inline-flex' : 'none';
+  if (lbl)    lbl.textContent = ckMonthLabel_(ckSelectedMonth_()) || '—';
+  // Toggle table-level class so CSS hides YTD-only columns in month mode
+  var t1 = document.getElementById('ckSalesTable');
+  if (t1) t1.classList.toggle('ck-period-month', ckPeriodMode === 'month');
+}
+
+// ── Sales insight definitions ───────────────────────────────────────────────
+// V3.0 ORDER (left→right):
+//   No Stock (master) · Stock Decline · Sales Risk · High Offline ·
+//   Low Discounts · Heavy Discounter · High Growth
+var INSIGHT_DEFS = [
+  { key: 'No Stock',         color: '#64748b', bg: '#f1f5f9', icon: 'package-x' },
+  { key: 'Stock Decline',    color: '#ea580c', bg: '#ffedd5', icon: 'package-minus' },
+  { key: 'Sales Risk',       color: '#dc2626', bg: '#fee2e2', icon: 'trending-down' },
+  { key: 'High Offline',     color: '#7c3aed', bg: '#f3e8ff', icon: 'wifi-off' },
+  { key: 'Low Discounts',    color: '#1d4ed8', bg: '#dbeafe', icon: 'shield-check' },
+  { key: 'Heavy Discounter', color: '#d97706', bg: '#fef3c7', icon: 'percent' },
+  { key: 'High Growth',      color: '#16a34a', bg: '#dcfce7', icon: 'trending-up' }
+];
+
+// ── Stock insight definitions (unchanged) ───────────────────────────────────
+var STOCK_INSIGHT_DEFS = [
+  { key: 'All',    color: 'var(--ink)', bg: 'var(--bg)',    icon: 'package' },
+  { key: 'Drop',   color: '#dc2626',    bg: '#fee2e2',       icon: 'trending-down' },
+  { key: 'Spike',  color: '#16a34a',    bg: '#dcfce7',       icon: 'trending-up' },
+  { key: 'Stable', color: '#64748b',    bg: '#f1f5f9',       icon: 'minus' }
+];
+
+// ── KPI insight definitions (unchanged) ─────────────────────────────────────
+var KPI_INSIGHT_DEFS = [
+  { key: 'High NS',     color: '#dc2626', bg: '#fee2e2', icon: 'package-x',     test: function(r) { return r.ns_now > 5; } },
+  { key: 'Low SOS',     color: '#ea580c', bg: '#ffedd5', icon: 'clock',         test: function(r) { return r.sos_now > 0 && r.sos_now < 90; } },
+  { key: 'High WI',     color: '#d97706', bg: '#fef3c7', icon: 'alert-triangle', test: function(r) { return r.wi_now > 5; } },
+  { key: 'Low Perfect', color: '#7c3aed', bg: '#f3e8ff', icon: 'thumbs-down',    test: function(r) { return r.perfect_now > 0 && r.perfect_now < 90; } }
+];
+
+var autoColors = {
+  'Sales Risk':       '#fee2e2;color:#dc2626',
+  'High Growth':      '#dcfce7;color:#16a34a',
+  'Stock Decline':    '#ffedd5;color:#ea580c',
+  'No Stock':         '#f1f5f9;color:#64748b',
+  'Heavy Discounter': '#fef3c7;color:#d97706',
+  'Low Discounts':    '#dbeafe;color:#1d4ed8',
+  'High Offline':     '#f3e8ff;color:#7c3aed'
+};
+
+var ckKpiSortCol = 'orders_now', ckKpiSortAsc = false;
+var ckKpiInsightFilter = null;
+
+// ── Store Group toggle (sales only) ─────────────────────────────────────────
+var ckGroupByStoreGroup = false;
+function setCkGroupMode(grouped) {
+  ckGroupByStoreGroup = grouped;
+  document.getElementById('ckViewStore').classList.toggle('active', !grouped);
+  document.getElementById('ckViewGroup').classList.toggle('active', grouped);
+  renderCkSales(); updateCkCount();
+}
+
+/* ═══════════════════════════════════════
+   SHARED INSIGHT CARD RENDERER
+═══════════════════════════════════════ */
+function insightCardHtml(def, count, isActive, onclick) {
+  return '<div onclick="' + onclick + '" style="background:' + (isActive ? def.bg : 'var(--surface)') + ';border:' + (isActive ? '2px solid ' + def.color : '1px solid var(--border)') + ';border-radius:10px;padding:7px 10px;cursor:pointer;transition:all 0.15s;user-select:none">'
+    + '<div style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:' + def.color + ';margin-bottom:2px;display:flex;align-items:center;gap:4px"><i data-lucide="' + def.icon + '" style="width:10px;height:10px"></i>' + def.key + '</div>'
+    + '<div style="font-size:18px;font-weight:700;letter-spacing:-0.03em">' + count + '</div>'
+    + '<div style="font-size:9px;color:var(--ink-3);margin-top:1px">partner' + (count !== 1 ? 's' : '') + '</div></div>';
+}
+
+/* ═══════════════════════════════════════
+   MASTER BUILD
+═══════════════════════════════════════ */
+function buildCockpitView() {
+  buildCockpitModelFilters();
+  ckBuildSalesMonths_();    // V3.12 — populate month list before any sales render
+  applyCkPeriodUI_();
+  buildAllKpis();
+  buildAllInsightCards();
+  switchCockpitTab(ckTab || 'sales');
+}
+
+function buildAllKpis() { buildSalesKpis(); buildStockKpis(); buildKpiMetrics(); }
+function buildAllInsightCards() { buildSalesInsightCards(); buildStockInsightCards(); buildKpiInsightCards(); }
+
+/* ═══════════════════════════════════════
+   TAB SWITCHING (V3.3 — lens-aware)
+═══════════════════════════════════════ */
+function switchCockpitTab(tab) {
+  ckTab = tab;
+  ['sales','stock','kpi'].forEach(function(t) {
+    var btn = document.getElementById('ctab-' + t); if (btn) btn.classList.toggle('active', t === tab);
+  });
+  // Reconcile all panel visibility through applyCkLens_ so tab + lens are always in sync
+  applyCkLens_();
+  updateCkCount();
+  refreshIcons();
+}
+
+/* ═══════════════════════════════════════
+   LENS — per-tab default vs breakdown view (V3.3 → V3.7)
+   V3.7 — "breakdown" replaces the season-specific lens; the underlying lens
+   value is still 'season'/'soh' for minimal diff. The active dim (ckActiveDim)
+   chooses which breakdown to show (season/brand/family).
+═══════════════════════════════════════ */
+// Public: user clicks one of the two Lens pills.
+function setCkLens(which) {
+  // 'default' = agg/trend; anything else = breakdown view
+  var toBreakdown = which !== 'default';
+  if (ckTab === 'sales') ckSalesLens = toBreakdown ? 'season' : 'agg';
+  else if (ckTab === 'stock') ckStockLens = toBreakdown ? 'soh' : 'trend';
+  applyCkLens_();
+  updateCkCount();
+  refreshIcons();
+}
+
+// V3.7 — User picks a different dim from the popover. Keeps breakdown lens on.
+function setCkDim(dim) {
+  if (['season','brand','family'].indexOf(dim) < 0) return;
+  ckActiveDim = dim;
+  ckSelectedSeason = null;   // reset pick — currentSeason_() will auto-resolve to first available
+  toggleCkDimMenu(false);
+  // Ensure breakdown lens is active so the switch is visible
+  if (ckTab === 'sales') ckSalesLens = 'season';
+  else if (ckTab === 'stock') ckStockLens = 'soh';
+  applyCkLens_();
+  updateCkCount();
+  refreshIcons();
+}
+
+// V3.7 — Show/hide the dim popover under the "By" button. `force` optional:
+// true=open, false=close, undefined=toggle.
+function toggleCkDimMenu(force) {
+  var menu = document.getElementById('ckDimMenu');
+  if (!menu) return;
+  var open = menu.style.display === 'block';
+  var next = (force === true) ? true : (force === false) ? false : !open;
+  menu.style.display = next ? 'block' : 'none';
+  if (next) {
+    // Reflect current dim as the highlighted option
+    ['season','brand','family'].forEach(function(d) {
+      var opt = document.getElementById('ckDimOpt_' + d);
+      if (opt) opt.classList.toggle('active', d === ckActiveDim);
+    });
+    // One-shot outside-click close
+    setTimeout(function() {
+      var h = function(e) {
+        if (menu.contains(e.target) || (e.target.closest && e.target.closest('#ckLensSeason'))) return;
+        toggleCkDimMenu(false);
+        document.removeEventListener('click', h, true);
+      };
+      document.addEventListener('click', h, true);
+    }, 0);
+  }
+}
+
+// Private: reconcile all visible panels for the active (tab, lens) combination.
+function applyCkLens_() {
+  var tab = ckTab;
+  var isSales = tab === 'sales', isStock = tab === 'stock', isKpi = tab === 'kpi';
+  var salesSeason = isSales && ckSalesLens === 'season';
+  var stockSOH = isStock && ckStockLens === 'soh';
+  var seasonView = salesSeason || stockSOH;
+  var dimLabel = _dimLabel_(ckActiveDim);
+
+  // Top KPI strips — only one visible at a time
+  document.getElementById('ckKpiGrid').style.display = (isSales && !salesSeason) ? '' : 'none';
+  document.getElementById('ckStockKpis').style.display = (isStock && !stockSOH) ? 'grid' : 'none';
+  document.getElementById('ckKpiMetrics').style.display = isKpi ? 'grid' : 'none';
+  document.getElementById('ckSalesSeasonKpis').style.display = salesSeason ? 'grid' : 'none';
+  document.getElementById('ckStockSOHKpis').style.display = stockSOH ? 'grid' : 'none';
+
+  // Insight slots
+  document.getElementById('ckInsightSection').style.display = (isSales && !salesSeason) ? '' : 'none';
+  document.getElementById('ckStockInsightSection').style.display = (isStock && !stockSOH) ? '' : 'none';
+  document.getElementById('ckKpiInsightSection').style.display = isKpi ? '' : 'none';
+  document.getElementById('ckSeasonPickerSection').style.display = seasonView ? '' : 'none';
+  var pickerLabel = document.getElementById('ckSeasonPickerLabel');
+  if (pickerLabel) pickerLabel.textContent = dimLabel + (salesSeason ? ' (Sales)' : stockSOH ? ' (Stock)' : '');
+
+  // Tables
+  document.getElementById('ck-sales').style.display = (isSales && !salesSeason) ? 'block' : 'none';
+  document.getElementById('ck-sales-season').style.display = salesSeason ? 'block' : 'none';
+  document.getElementById('ck-stock').style.display = (isStock && !stockSOH) ? 'block' : 'none';
+  document.getElementById('ck-stock-soh').style.display = stockSOH ? 'block' : 'none';
+  document.getElementById('ck-kpi').style.display = isKpi ? 'block' : 'none';
+
+  // Filter-bar chrome
+  var modelLabel = document.getElementById('ckModelLabel');
+  var modelFilters = document.getElementById('ckModelFilters');
+  // Model filter applies to Sales (agg + breakdown); hidden on stock/kpi tabs
+  if (modelLabel) modelLabel.style.display = isSales ? '' : 'none';
+  if (modelFilters) modelFilters.style.display = isSales ? 'flex' : 'none';
+  // Store-Group toggle applies only to Sales aggregate mode
+  var groupToggle = document.getElementById('ckGroupToggleWrap');
+  if (groupToggle) groupToggle.style.display = (isSales && !salesSeason) ? 'flex' : 'none';
+
+  // V3.12 — Period (YTD / Month) toggle applies to Sales tab only (both lenses).
+  var periodWrap = document.getElementById('ckPeriodToggleWrap');
+  if (periodWrap) periodWrap.style.display = isSales ? 'flex' : 'none';
+  applyCkPeriodUI_();
+
+  // Lens toggle: hide on KPI tab, show on Sales/Stock. Sync pill active state + labels.
+  var lensWrap = document.getElementById('ckLensToggleWrap');
+  if (lensWrap) lensWrap.style.display = isKpi ? 'none' : 'flex';
+  var lensDefault = document.getElementById('ckLensDefault');
+  var lensSeason = document.getElementById('ckLensSeason');
+  var lensSeasonLabel = document.getElementById('ckLensSeasonLabel');
+  if (lensDefault && lensSeason) {
+    var activeIsBreakdown = salesSeason || stockSOH;
+    lensDefault.classList.toggle('active', !activeIsBreakdown);
+    lensSeason.classList.toggle('active', activeIsBreakdown);
+    // Context-aware labels
+    if (isSales) lensDefault.textContent = 'All';
+    else if (isStock) lensDefault.textContent = '15-Day';
+    if (lensSeasonLabel) lensSeasonLabel.textContent = 'By ' + dimLabel;
+  }
+
+  // Close dim menu if hub switched away from breakdown view
+  if (!seasonView) toggleCkDimMenu(false);
+
+  // Render the now-visible content
+  if (seasonView) {
+    buildSeasonPicker();
+    if (salesSeason) { buildSalesSeasonKpis(); renderCkSalesSeason(); }
+    if (stockSOH)    { buildStockSOHKpis();    renderCkStockSOH(); }
+  } else if (isSales) renderCkSales();
+  else if (isStock) renderCkStock();
+  else if (isKpi) renderCkKpi();
+}
+
+/* ═══════════════════════════════════════
+   BREAKDOWN — accessors + picker (V3.3 → V3.7)
+═══════════════════════════════════════ */
+// V3.7 — Returns the active-dim subtree adapted to the legacy `allSeasons`
+// shape so all downstream code (picker, KPIs, table, totals) keeps working
+// without rename churn. When BREAKDOWNS is populated (post-V3.7 backend),
+// the adapter wraps the per-dim subtree; otherwise falls back to SEASONS
+// (pre-V3.7 backend / unpopulated state).
+function seasons_() {
+  if (typeof BREAKDOWNS !== 'undefined' && BREAKDOWNS[ckActiveDim]) {
+    var b = BREAKDOWNS[ckActiveDim];
+    return {
+      allSeasons: b.allValues || [],
+      byStore: b.byStore || {},
+      soh: b.soh || { byStore: {} },
+      totals: b.totals || { sales: {}, soh: {} }
+    };
+  }
+  return (typeof SEASONS !== 'undefined' && SEASONS) ? SEASONS
+    : { allSeasons: [], byStore: {}, soh: { byStore: {} }, totals: { sales: {}, soh: {} } };
+}
+
+// V3.7 — user-facing labels for the active dim
+function _dimLabel_(dim) {
+  return dim === 'brand' ? 'Brand' : dim === 'family' ? 'Family' : 'Season';
+}
+
+// Resolves current season pick. V3.4 — lens-aware: if the remembered pick has no
+// data in the active lens (e.g. user picked a Sales season then flipped to Stock
+// where that season has zero SOH), auto-fall-back to the first season that DOES
+// have data in the current lens. V3.5 — also honors the model filter: falls back
+// if the pick has zero data among the currently-filtered partners.
+function currentSeason_() {
+  var s = seasons_();
+  if (!s.allSeasons.length) return null;
+  var lt = getLensTotals_();
+  if (ckSelectedSeason && s.allSeasons.indexOf(ckSelectedSeason) > -1 && lt.totals[ckSelectedSeason] && lt.totals[ckSelectedSeason].value > 0) {
+    return ckSelectedSeason;
+  }
+  for (var i = 0; i < s.allSeasons.length; i++) {
+    var n = s.allSeasons[i];
+    if (lt.totals[n] && lt.totals[n].value > 0) return n;
+  }
+  return s.allSeasons[0];  // absolute fallback (everything is zero — picker shows empty state)
+}
+
+// V3.5 — Compute lens totals ON THE FLY from per-store data, respecting the
+// model filter. The backend S.totals.{sales,soh} are team-wide and ignore model
+// filtering, so we re-aggregate here so the picker, KPIs, and currentSeason_()
+// all react when the user flips a model chip.
+//
+// Returns: { totals: { seasonName: { value, partners } }, isStockMode, totalAll }
+// where value = units sold (sales lens) or units online (stock lens).
+function getLensTotals_() {
+  var s = seasons_();
+  var isStockMode = (ckTab === 'stock' && ckStockLens === 'soh');
+  var ps = cockpitPartners();
+  if (ckModelFilters.length) ps = ps.filter(function(d) { return ckModelFilters.indexOf(d.model) > -1; });
+  var totals = {}, totalAll = 0;
+  ps.forEach(function(d) {
+    var key = (d.company || '').trim().toLowerCase();
+    var src = isStockMode
+      ? (s.soh && s.soh.byStore && s.soh.byStore[key])
+      : (s.byStore && s.byStore[key]);
+    if (!src) return;
+    Object.keys(src).forEach(function(season) {
+      var block = src[season];
+      var val = isStockMode ? (block.online || 0) : (block.units_total || 0);
+      if (val <= 0) return;
+      if (!totals[season]) totals[season] = { value: 0, partners: 0, gtv: 0, totalStock: 0 };
+      totals[season].value += val;
+      totals[season].partners++;
+      if (!isStockMode) totals[season].gtv += block.gtv_total || 0;
+      else              totals[season].totalStock += block.total || 0;
+      totalAll += val;
+    });
+  });
+  return { totals: totals, isStockMode: isStockMode, totalAll: totalAll };
+}
+
+// Compact number formatting: 1.2k / 12.5k / 1.3M. Used by the season picker bars.
+function fCompactNum_(n) {
+  if (n == null || isNaN(n)) return '0';
+  n = Number(n);
+  if (n < 1000) return String(Math.round(n));
+  if (n < 10000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  if (n < 1000000) return Math.round(n / 1000) + 'k';
+  return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+}
+
+function setCkSeason(name) {
+  ckSelectedSeason = name;
+  buildSeasonPicker();
+  if (ckTab === 'sales' && ckSalesLens === 'season') { buildSalesSeasonKpis(); renderCkSalesSeason(); }
+  else if (ckTab === 'stock' && ckStockLens === 'soh') { buildStockSOHKpis(); renderCkStockSOH(); }
+  updateCkCount();
+  refreshIcons();
+}
+
+// V3.7.1 — chip grid replaced by native select. Populates #ckValueSelect with
+// filtered values sorted DESC by the lens metric (sales GTV or units online).
+// The "+N more" + <1% collapse behaviour is gone — the select handles arbitrary
+// scale via its native list UI, including 800+ brands.
+function buildSeasonPicker() {
+  var s = seasons_();
+  var sel = document.getElementById('ckValueSelect');
+  var metaEl = document.getElementById('ckValueMeta');
+  if (!sel) return;
+  if (!s.allSeasons.length) {
+    sel.innerHTML = '<option value="">No data available</option>';
+    if (metaEl) metaEl.textContent = '';
+    return;
+  }
+
+  var lt = getLensTotals_();
+  var isStockMode = lt.isStockMode;
+
+  // Build entries from filtered lens totals.
+  var entries = s.allSeasons.map(function(name) {
+    var t = lt.totals[name] || { value: 0, partners: 0, gtv: 0, totalStock: 0 };
+    return { name: name, value: t.value, partners: t.partners, gtv: t.gtv || 0, totalStock: t.totalStock || 0 };
+  }).filter(function(e) { return e.value > 0; });
+
+  if (!entries.length) {
+    sel.innerHTML = '<option value="">No ' + (isStockMode ? 'stock' : 'sales') + ' data for the current filter</option>';
+    if (metaEl) metaEl.textContent = '';
+    return;
+  }
+
+  entries.sort(function(a, b) { return b.value - a.value; });
+
+  // Resolve current pick AFTER entries are built (so if the stale pick no longer
+  // has data, currentSeason_() falls back correctly). Then reflect in <select>.
+  var cur = currentSeason_();
+
+  // Each option shows the value + its metric inline. DESC order = biggest first
+  // = default focus. For sales: GTV; for stock: units online + fill% context.
+  sel.innerHTML = entries.map(function(e) {
+    var label;
+    if (isStockMode) {
+      var fill = e.totalStock > 0 ? Math.round((e.value / e.totalStock) * 100) + '%' : '—';
+      label = e.name + ' — ' + fCompactNum_(e.value) + ' online · ' + fill + ' · ' + e.partners + 'p';
+    } else {
+      label = e.name + ' — ' + fGtv(e.gtv) + ' · ' + fCompactNum_(e.value) + 'u · ' + e.partners + 'p';
+    }
+    var selected = (e.name === cur) ? ' selected' : '';
+    return '<option value="' + esc(e.name) + '"' + selected + '>' + esc(label) + '</option>';
+  }).join('');
+
+  // Meta: current pick's share of the total, to give dropdown some context.
+  if (metaEl) {
+    var total = entries.reduce(function(acc, x) { return acc + x.value; }, 0);
+    var curEntry = entries.filter(function(x) { return x.name === cur; })[0];
+    if (curEntry && total > 0) {
+      var pct = Math.round((curEntry.value / total) * 100);
+      metaEl.textContent = pct + '% of ' + entries.length + ' ' + _dimLabel_(ckActiveDim).toLowerCase() + 's';
+    } else {
+      metaEl.textContent = entries.length + ' ' + _dimLabel_(ckActiveDim).toLowerCase() + 's';
+    }
+  }
+}
+
+// Deterministic value → color. Position in allSeasons drives the palette slot
+// for season & family (small stable sets, palette-indexed). Brand uses a
+// hash-based HSL because the global brand set is ~3000+ values — far more
+// than any fixed palette — so we need something stable AND distinct across
+// arbitrary strings. 'Other' (any dim) is always a muted neutral so the
+// user reads it as "the rest".
+var SEASON_PALETTE_ = [
+  { fg:'#1e40af', bg:'#dbeafe' },
+  { fg:'#0891b2', bg:'#cffafe' },
+  { fg:'#059669', bg:'#d1fae5' },
+  { fg:'#65a30d', bg:'#ecfccb' },
+  { fg:'#ca8a04', bg:'#fef9c3' },
+  { fg:'#ea580c', bg:'#ffedd5' },
+  { fg:'#dc2626', bg:'#fee2e2' },
+  { fg:'#be185d', bg:'#fce7f3' },
+  { fg:'#7c3aed', bg:'#f3e8ff' },
+  { fg:'#4f46e5', bg:'#e0e7ff' }
+];
+var _OTHER_COLOR_ = { fg:'#6b7280', bg:'#f1f5f9' };
+
+// djb2 hash → stable HSL across reloads. Tuned for readable fg / pale bg.
+function _hashToHSL_(str) {
+  var h = 5381;
+  for (var i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  var hue = ((h >>> 0) % 360);
+  return { fg: 'hsl(' + hue + ',52%,38%)', bg: 'hsl(' + hue + ',52%,93%)' };
+}
+
+function breakdownColor_(dim, value) {
+  if (value === 'Other') return _OTHER_COLOR_;
+  if (dim === 'brand') return _hashToHSL_(value || '');
+  // season + family: palette indexed by position in current allValues
+  var s = seasons_();  // resolves to active dim's subtree; palette-index stability
+  // follows from the backend's deterministic sort order (season=by maxMonth DESC,
+  // family=by GTV DESC, both with 'Other' pinned last).
+  var arr = s.allSeasons || [];
+  var idx = arr.indexOf(value);
+  if (idx < 0) return _OTHER_COLOR_;
+  return SEASON_PALETTE_[idx % SEASON_PALETTE_.length];
+}
+
+// Legacy wrapper — existing call sites (nx_drawer, nx_overview) route through
+// the active dim. Season-specific callers keep working because their data
+// paths will still read SEASONS (via seasons_()) and this resolves to 'season'
+// colors when ckActiveDim === 'season' (the default).
+function seasonColor_(name) {
+  return breakdownColor_(ckActiveDim, name);
+}
+
+/* ═══════════════════════════════════════
+   BREAKDOWN — Sales KPIs + table (V3.3 → V3.7)
+═══════════════════════════════════════ */
+function buildSalesSeasonKpis() {
+  var s = seasons_(); var cur = currentSeason_();
+  var el = document.getElementById('ckSalesSeasonKpis');
+  if (!el) return;
+  if (!cur) { el.innerHTML = ''; return; }
+  var dimLabel = _dimLabel_(ckActiveDim);
+  var ps = cockpitPartners();
+  if (ckModelFilters.length) ps = ps.filter(function(d) { return ckModelFilters.indexOf(d.model) > -1; });
+  var monthMode = (ckPeriodMode === 'month');
+  var selM = monthMode ? ckSelectedMonth_() : '';
+  var prvM = monthMode ? ckPrevYearMonth_(selM) : '';
+  var units = 0, gtv = 0, partners = 0, unitsPy = 0, gtvPy = 0;
+  ps.forEach(function(d) {
+    var key = (d.company || '').trim().toLowerCase();
+    var block = s.byStore[key]; if (!block) return;
+    var sb = block[cur]; if (!sb) return;
+    if (monthMode) {
+      var mr = null, mrPy = null;
+      for (var i = 0; i < (sb.months || []).length; i++) {
+        if (sb.months[i].m === selM) mr = sb.months[i];
+        if (sb.months[i].m === prvM) mrPy = sb.months[i];
+        if (mr && mrPy) break;
+      }
+      if (!mr) return;
+      units += mr.u || 0;
+      gtv   += mr.g || 0;
+      if (mrPy) { unitsPy += mrPy.u || 0; gtvPy += mrPy.g || 0; }
+      if ((mr.u || 0) > 0) partners++;
+    } else {
+      if (!sb.units_total) return;
+      units += sb.units_total;
+      gtv += sb.gtv_total || 0;
+      partners++;
+    }
+  });
+  var asp = units > 0 ? Math.round(gtv / units) : 0;
+  if (monthMode) {
+    var lbl = ckMonthLabel_(selM) || '—';
+    var prvLbl = ckMonthLabel_(prvM) || 'PY';
+    el.innerHTML =
+      kpiHtml(lbl + ' GTV — ' + cur, fGtv(gtv), fPctStr(fPct(gtv, gtvPy), true) + ' vs ' + prvLbl) +
+      kpiHtml(lbl + ' Units', units.toLocaleString(), fPctStr(fPct(units, unitsPy), true) + ' vs ' + prvLbl) +
+      kpiHtml('ASP', '$' + asp.toLocaleString(), 'units-weighted') +
+      kpiHtml('Partners', partners.toLocaleString(), 'with activity');
+  } else {
+    el.innerHTML =
+      kpiHtml('GTV — ' + cur, fGtv(gtv), dimLabel.toLowerCase() + ' total') +
+      kpiHtml('Units Sold', units.toLocaleString(), dimLabel.toLowerCase() + ' total') +
+      kpiHtml('ASP', '$' + asp.toLocaleString(), 'units-weighted') +
+      kpiHtml('Partners', partners.toLocaleString(), 'with activity');
+  }
+}
+
+// Collapse global season data → per-store rows scoped to the picked season.
+// V3.12 — When ckPeriodMode === 'month', units/gtv/asp reflect the selected
+// month's row from sb.months instead of season totals; partners with no
+// activity in that month are dropped.
+function getCkSeasonRows_() {
+  var s = seasons_(); var cur = currentSeason_();
+  if (!cur) return [];
+  var ps = cockpitPartners();
+  if (ckModelFilters.length) ps = ps.filter(function(d) { return ckModelFilters.indexOf(d.model) > -1; });
+  var monthMode = (ckPeriodMode === 'month');
+  var selM = monthMode ? ckSelectedMonth_() : '';
+  var rows = [];
+  ps.forEach(function(d) {
+    var key = (d.company || '').trim().toLowerCase();
+    var block = s.byStore[key]; if (!block) return;
+    var seasonBlock = block[cur]; if (!seasonBlock) return;
+    if (monthMode) {
+      var mr = null;
+      for (var i = 0; i < (seasonBlock.months || []).length; i++) {
+        if (seasonBlock.months[i].m === selM) { mr = seasonBlock.months[i]; break; }
+      }
+      if (!mr || (mr.u || 0) <= 0) return;
+      rows.push({
+        company: d.company, country: d.country, model: d.model, row: d.row,
+        units_total: mr.u || 0,
+        gtv_total: mr.g || 0,
+        asp_avg: mr.p || 0,
+        months: seasonBlock.months || []  // sparkline still spans all months
+      });
+    } else {
+      rows.push({
+        company: d.company, country: d.country, model: d.model, row: d.row,
+        units_total: seasonBlock.units_total,
+        gtv_total: seasonBlock.gtv_total,
+        asp_avg: seasonBlock.asp_avg,
+        months: seasonBlock.months || []
+      });
+    }
+  });
+  return rows;
+}
+
+function sortCkSeason(col) { if (ckSeasonSortCol === col) ckSeasonSortAsc = !ckSeasonSortAsc; else { ckSeasonSortCol = col; ckSeasonSortAsc = false; } renderCkSalesSeason(); }
+
+function renderCkSalesSeason() {
+  var rows = getCkSeasonRows_();
+  rows.sort(function(a, b) {
+    var va = a[ckSeasonSortCol], vb = b[ckSeasonSortCol];
+    if (va == null) va = 0; if (vb == null) vb = 0;
+    if (typeof va === 'string') return ckSeasonSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return ckSeasonSortAsc ? va - vb : vb - va;
+  });
+  updateCkCount();
+  var body = document.getElementById('ckSalesSeasonBody'); if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="8" style="padding:40px;text-align:center;color:var(--ink-4)">No partners with activity for this ' + _dimLabel_(ckActiveDim).toLowerCase() + '.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(function(d, i) {
+    var rank = i + 1;
+    // Monthly sparkline (oldest → newest, L→R). months come DESC from backend.
+    var asc = d.months.slice().reverse();
+    var maxU = asc.reduce(function(m, x) { return x.u > m ? x.u : m; }, 0) || 1;
+    var spark = '<div style="display:inline-flex;align-items:flex-end;gap:2px;height:22px">' + asc.map(function(x) {
+      var h = Math.max(10, Math.round((x.u / maxU) * 100));
+      return '<div title="' + x.m + ': ' + x.u.toLocaleString() + ' units · $' + x.p + ' ASP" style="width:4px;height:' + h + '%;border-radius:1px 1px 0 0;background:var(--ink-3)"></div>';
+    }).join('') + '</div>';
+    return '<tr onclick="openDealByStore(\'' + esc(d.company) + '\')" style="cursor:pointer">'
+      + '<td style="color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums">' + rank + '</td>'
+      + '<td style="font-weight:500;color:var(--ink)">' + esc(d.company) + '</td>'
+      + '<td style="font-size:11px;color:var(--ink-4)">' + esc(d.country || '') + '</td>'
+      + '<td><span style="font-size:10px;font-weight:700;letter-spacing:0.06em;color:var(--ink-3)">' + esc(d.model || '') + '</span></td>'
+      + '<td style="text-align:right;font-weight:600">' + d.units_total.toLocaleString() + '</td>'
+      + '<td style="text-align:right;font-weight:600">' + fGtv(d.gtv_total) + '</td>'
+      + '<td style="text-align:right;color:var(--ink-2)">$' + d.asp_avg.toLocaleString() + '</td>'
+      + '<td style="text-align:right">' + spark + '</td></tr>';
+  }).join('');
+  refreshIcons();
+}
+
+/* ═══════════════════════════════════════
+   SEASON — Stock SOH KPIs + table (V3.3)
+═══════════════════════════════════════ */
+function buildStockSOHKpis() {
+  var s = seasons_(); var cur = currentSeason_();
+  var el = document.getElementById('ckStockSOHKpis');
+  if (!el) return;
+  if (!cur) { el.innerHTML = ''; return; }
+  // V3.5 — compute from filtered partners so model filter reaches the KPIs.
+  // (Model filter UI is hidden on Stock, but state persists from Sales — table
+  // already honors it in getCkSOHRows_, KPIs should match.)
+  var ps = cockpitPartners();
+  if (ckModelFilters.length) ps = ps.filter(function(d) { return ckModelFilters.indexOf(d.model) > -1; });
+  var online = 0, totalStock = 0, partners = 0;
+  ps.forEach(function(d) {
+    var key = (d.company || '').trim().toLowerCase();
+    var block = s.soh && s.soh.byStore && s.soh.byStore[key]; if (!block) return;
+    var so = block[cur]; if (!so) return;
+    if ((so.online || 0) + (so.total || 0) === 0) return;
+    online += so.online || 0;
+    totalStock += so.total || 0;
+    partners++;
+  });
+  var fillPct = totalStock > 0 ? Math.round((online / totalStock) * 100) : 0;
+  el.innerHTML =
+    kpiHtml('Online — ' + cur, online.toLocaleString(), 'units available') +
+    kpiHtml('Total EoD', totalStock.toLocaleString(), 'all stock') +
+    kpiHtml('Online %', fillPct + '%', partners + (partners === 1 ? ' partner' : ' partners'));
+}
+
+function getCkSOHRows_() {
+  var s = seasons_(); var cur = currentSeason_();
+  if (!cur) return [];
+  var ps = cockpitPartners();
+  if (ckModelFilters.length) ps = ps.filter(function(d) { return ckModelFilters.indexOf(d.model) > -1; });
+  var rows = [];
+  ps.forEach(function(d) {
+    var key = (d.company || '').trim().toLowerCase();
+    var block = s.soh.byStore[key]; if (!block) return;
+    var soh = block[cur]; if (!soh) return;
+    if ((soh.online || 0) + (soh.total || 0) === 0) return;  // skip all-zero entries
+    rows.push({
+      company: d.company, country: d.country, model: d.model, row: d.row,
+      online: soh.online, total: soh.total,
+      fill_pct: soh.total > 0 ? (soh.online / soh.total) : 0
+    });
+  });
+  return rows;
+}
+
+function sortCkSOH(col) { if (ckSOHSortCol === col) ckSOHSortAsc = !ckSOHSortAsc; else { ckSOHSortCol = col; ckSOHSortAsc = false; } renderCkStockSOH(); }
+
+function renderCkStockSOH() {
+  var rows = getCkSOHRows_();
+  rows.sort(function(a, b) {
+    var va = a[ckSOHSortCol], vb = b[ckSOHSortCol];
+    if (va == null) va = 0; if (vb == null) vb = 0;
+    if (typeof va === 'string') return ckSOHSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return ckSOHSortAsc ? va - vb : vb - va;
+  });
+  updateCkCount();
+  var body = document.getElementById('ckStockSOHBody'); if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="7" style="padding:40px;text-align:center;color:var(--ink-4)">No SOH data for this ' + _dimLabel_(ckActiveDim).toLowerCase() + '.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(function(d, i) {
+    var rank = i + 1;
+    var fill = Math.round(d.fill_pct * 100);
+    var fillColor = fill >= 60 ? '#16a34a' : fill >= 30 ? '#d97706' : '#dc2626';
+    return '<tr onclick="openDealByStore(\'' + esc(d.company) + '\')" style="cursor:pointer">'
+      + '<td style="color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums">' + rank + '</td>'
+      + '<td style="font-weight:500;color:var(--ink)">' + esc(d.company) + '</td>'
+      + '<td style="font-size:11px;color:var(--ink-4)">' + esc(d.country || '') + '</td>'
+      + '<td><span style="font-size:10px;font-weight:700;letter-spacing:0.06em;color:var(--ink-3)">' + esc(d.model || '') + '</span></td>'
+      + '<td style="text-align:right;font-weight:600">' + d.online.toLocaleString() + '</td>'
+      + '<td style="text-align:right;color:var(--ink-3)">' + d.total.toLocaleString() + '</td>'
+      + '<td style="text-align:right;font-weight:700;color:' + fillColor + '">' + fill + '%</td></tr>';
+  }).join('');
+  refreshIcons();
+}
+
+/* ═══════════════════════════════════════
+   SALES KPIs + INSIGHT CARDS
+═══════════════════════════════════════ */
+function buildSalesKpis() {
+  var ck = cockpitPartners().filter(function(d) { return d.cy_units_tot > 0 || d.cy_ytd > 0; });
+  // V3.12 — Month-mode KPI strip swaps YTD/4W/7D/Units→Online for the
+  // selected month: <Mon> GTV (vs PY same month), <Mon> Units (vs PY),
+  // <Mon> ASP (units-weighted), Active Partners (with activity that month).
+  if (ckPeriodMode === 'month') {
+    var sel = ckSelectedMonth_();
+    var prv = ckPrevYearMonth_(sel);
+    var lbl = ckMonthLabel_(sel) || '—';
+    var prvLbl = ckMonthLabel_(prv) || 'PY';
+    if (!sel) {
+      document.getElementById('ckKpiGrid').innerHTML =
+        kpiHtml(lbl + ' GTV', '$0', 'no monthly data') +
+        kpiHtml(lbl + ' Units', '0', 'no monthly data') +
+        kpiHtml('ASP', '—', 'units-weighted') +
+        kpiHtml('Active Partners', '0', 'with activity');
+      return;
+    }
+    var gtv = 0, gtvPy = 0, u = 0, uPy = 0, partners = 0;
+    ck.forEach(function(d) {
+      var key = (d.company || '').trim().toLowerCase();
+      var cur = ckMonthlyForStore_(key, sel);
+      var py  = ckMonthlyForStore_(key, prv);
+      if (cur.gtv > 0 || cur.units > 0) partners++;
+      gtv += cur.gtv; u += cur.units;
+      gtvPy += py.gtv; uPy += py.units;
+    });
+    var asp = u > 0 ? Math.round(gtv / u) : 0;
+    document.getElementById('ckKpiGrid').innerHTML =
+      kpiHtml(lbl + ' GTV', fGtv(gtv), fPctStr(fPct(gtv, gtvPy), true) + ' vs ' + prvLbl) +
+      kpiHtml(lbl + ' Units', u.toLocaleString(), fPctStr(fPct(u, uPy), true) + ' vs ' + prvLbl) +
+      kpiHtml('ASP', '$' + asp.toLocaleString(), 'units-weighted') +
+      kpiHtml('Active Partners', partners.toLocaleString(), 'with activity');
+    return;
+  }
+  // Default YTD path (unchanged)
+  var ytd = 0, pyYtd = 0, w4 = 0, pyW4 = 0, d7 = 0, pyD7 = 0, u = 0, pyU = 0;
+  ck.forEach(function(d) { ytd += d.cy_ytd; pyYtd += d.py_ytd; w4 += d.cy_4w; pyW4 += d.py_4w; d7 += d.cy_7d; pyD7 += d.py_7d; u += d.cy_units_on; pyU += d.py_units_on; });
+  document.getElementById('ckKpiGrid').innerHTML =
+    kpiHtml('YTD GTV', fGtv(ytd), fPctStr(fPct(ytd, pyYtd), true) + ' vs PY') +
+    kpiHtml('4W GTV', fGtv(w4), fPctStr(fPct(w4, pyW4), true) + ' vs PY') +
+    kpiHtml('7D GTV', fGtv(d7), fPctStr(fPct(d7, pyD7), true) + ' vs PY') +
+    kpiHtml('Units Online', u.toLocaleString(), fPctStr(fPct(u, pyU), true) + ' vs PY');
+}
+function buildCockpitKpis() { buildSalesKpis(); }
+
+function buildSalesInsightCards() {
+  var counts = {}; INSIGHT_DEFS.forEach(function(t) { counts[t.key] = 0; });
+  getCkFiltered().forEach(function(d) { (d.insight_tags || []).forEach(function(tag) { if (counts[tag] !== undefined) counts[tag]++; }); });
+  document.getElementById('ckInsightCards').innerHTML = INSIGHT_DEFS.map(function(t) {
+    return insightCardHtml(t, counts[t.key], ckInsightFilter === t.key, "toggleCkInsight('" + t.key + "')");
+  }).join('');
+}
+function buildCockpitInsightCards() { buildSalesInsightCards(); }
+
+function toggleCkInsight(key) { ckInsightFilter = (ckInsightFilter === key) ? null : key; buildSalesInsightCards(); renderCkSales(); updateCkCount(); }
+
+/* ═══════════════════════════════════════
+   STOCK KPIs + INSIGHT CARDS
+═══════════════════════════════════════ */
+function buildStockKpis() {
+  var all = stockPartners();
+  var total = all.reduce(function(s, r) { return s + r.today; }, 0);
+  var pyTotal = all.reduce(function(s, r) { return s + (r.values[r.values.length - 1] || 0); }, 0);
+  document.getElementById('ckStockKpis').innerHTML =
+    kpiHtml('Total Online', total.toLocaleString(), fPctStr(fPct(total, pyTotal), true) + ' vs 15D ago') +
+    kpiHtml('Partners', all.length.toLocaleString(), 'monitored') +
+    kpiHtml('Avg Today', all.length ? Math.round(total / all.length).toLocaleString() : '0', 'units/partner') +
+    kpiHtml('15D Δ', (total - pyTotal >= 0 ? '+' : '') + (total - pyTotal).toLocaleString(), fPctStr(fPct(total, pyTotal), true));
+}
+
+function buildStockInsightCards() {
+  var all = stockPartners();
+  var counts = { All: all.length, Drop: 0, Spike: 0, Stable: 0 };
+  all.forEach(function(r) { if (counts[r.flag] !== undefined) counts[r.flag]++; });
+  document.getElementById('ckStockInsightCards').innerHTML = STOCK_INSIGHT_DEFS.map(function(t) {
+    return insightCardHtml(t, counts[t.key], ckStockFilter === t.key, "setCkStockFilter('" + t.key + "')");
+  }).join('');
+}
+
+function setCkStockFilter(f) { ckStockFilter = (ckStockFilter === f && f !== 'All') ? 'All' : f; buildStockInsightCards(); renderCkStock(); updateCkCount(); }
+
+/* ═══════════════════════════════════════
+   KPI KPIs + INSIGHT CARDS (monthly)
+═══════════════════════════════════════ */
+function buildKpiMetrics() {
+  try {
+    var rows = kpiPartners();
+    if (!rows.length) { document.getElementById('ckKpiMetrics').innerHTML = ''; return; }
+    var n = rows.length;
+    var avgNs = rows.reduce(function(s, r) { return s + r.ns_now; }, 0) / n;
+    var avgSos = rows.reduce(function(s, r) { return s + r.sos_now; }, 0) / n;
+    var avgWi = rows.reduce(function(s, r) { return s + r.wi_now; }, 0) / n;
+    var avgPerfect = rows.reduce(function(s, r) { return s + r.perfect_now; }, 0) / n;
+    var totalOrders = rows.reduce(function(s, r) { return s + r.orders_now; }, 0);
+    var totalPenalty = rows.reduce(function(s, r) { return s + r.penalty_now; }, 0);
+    var avgNsPrev = rows.reduce(function(s, r) { return s + r.ns_prev; }, 0) / n;
+    var avgSosPrev = rows.reduce(function(s, r) { return s + r.sos_prev; }, 0) / n;
+    var avgWiPrev = rows.reduce(function(s, r) { return s + r.wi_prev; }, 0) / n;
+    var avgPerfectPrev = rows.reduce(function(s, r) { return s + r.perfect_prev; }, 0) / n;
+    var totalOrdersPrev = rows.reduce(function(s, r) { return s + r.orders_prev; }, 0);
+    var totalPenaltyPrev = rows.reduce(function(s, r) { return s + r.penalty_prev; }, 0);
+
+    var MONTH_NAMES_CK = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var selYM = ckKpiAvailMonths[ckKpiMonthIdx] || '';
+    var ymParts = selYM.split('-');
+    var monthLabel = ymParts.length >= 2 ? MONTH_NAMES_CK[parseInt(ymParts[1], 10) - 1] + ' ' + ymParts[0] : 'Current';
+    var prevLabel = rows[0].prevMonthLabel || 'Previous';
+
+    function mc(label, val, prev, fmt, inv) {
+      var delta = prev > 0 ? (val - prev) / prev : 0;
+      var c = inv ? (delta <= 0 ? '#16a34a' : '#dc2626') : (delta >= 0 ? '#16a34a' : '#dc2626');
+      var sign = delta >= 0 ? '+' : '';
+      var sub = prev > 0 ? '<span style="color:' + c + ';font-weight:600">' + sign + Math.round(delta * 100) + '%</span> vs ' + prevLabel : 'vs ' + prevLabel;
+      var disp = fmt === '%' ? val.toFixed(1) + '%' : fmt === '$' ? '$' + Math.round(val).toLocaleString() : val.toLocaleString();
+      return '<div class="kpi-card"><div class="kpi-label">' + label + '</div><div class="kpi-value">' + disp + '</div><div class="kpi-sub">' + sub + '</div></div>';
+    }
+
+    var monthIndicator = document.getElementById('ckKpiMonthLabel');
+    if (monthIndicator) monthIndicator.innerHTML = '<i data-lucide="calendar" style="width:11px;height:11px"></i> <b>' + monthLabel + '</b>';
+
+    document.getElementById('ckKpiMetrics').innerHTML =
+      mc('Avg NS%', avgNs, avgNsPrev, '%', true) + mc('Avg SOS>2D%', avgSos, avgSosPrev, '%', true) +
+      mc('Avg WI%', avgWi, avgWiPrev, '%', true) + mc('Avg Perfect%', avgPerfect, avgPerfectPrev, '%', false) +
+      mc('Total Orders', totalOrders, totalOrdersPrev, '#', false) + mc('Total Penalty', totalPenalty, totalPenaltyPrev, '$', true);
+  } catch(e) { console.error('NEXUS buildKpiMetrics:', e); document.getElementById('ckKpiMetrics').innerHTML = ''; }
+}
+
+function buildKpiInsightCards() {
+  var rows = kpiPartners();
+  var counts = {}; KPI_INSIGHT_DEFS.forEach(function(t) { counts[t.key] = 0; });
+  rows.forEach(function(r) { KPI_INSIGHT_DEFS.forEach(function(t) { if (t.test(r)) counts[t.key]++; }); });
+  document.getElementById('ckKpiInsightCards').innerHTML = KPI_INSIGHT_DEFS.map(function(t) {
+    return insightCardHtml(t, counts[t.key], ckKpiInsightFilter === t.key, "toggleKpiInsight('" + t.key + "')");
+  }).join('');
+}
+
+function cycleKpiMonth(dir) {
+  ckKpiMonthIdx = Math.max(0, Math.min(ckKpiAvailMonths.length - 1, ckKpiMonthIdx + dir));
+  buildKpiMetrics();
+  buildKpiInsightCards();
+  renderCkKpi();
+}
+function toggleKpiInsight(key) { ckKpiInsightFilter = (ckKpiInsightFilter === key) ? null : key; buildKpiInsightCards(); renderCkKpi(); updateCkCount(); }
+
+/* ═══════════════════════════════════════
+   MODEL FILTERS
+═══════════════════════════════════════ */
+function buildCockpitModelFilters() {
+  var models = Array.from(new Set(cockpitPartners().map(function(d) { return d.model; }).filter(Boolean))).sort();
+  document.getElementById('ckModelFilters').innerHTML = ['<button onclick="clearCkModels()" class="filter-tag-btn' + (ckModelFilters.length === 0 ? ' active' : '') + '" style="font-size:10px;padding:4px 10px">All</button>']
+    .concat(models.map(function(m) { return '<button onclick="toggleCkModel(\'' + m + '\')" class="filter-tag-btn' + (ckModelFilters.indexOf(m) > -1 ? ' active' : '') + '" style="font-size:10px;padding:4px 10px">' + m + '</button>'; })).join('');
+}
+function toggleCkModel(m) {
+  if (ckModelFilters.indexOf(m) > -1) ckModelFilters = ckModelFilters.filter(function(x) { return x !== m; });
+  else ckModelFilters.push(m);
+  onCkModelFilterChange_();
+}
+function clearCkModels() { ckModelFilters = []; onCkModelFilterChange_(); }
+
+// V3.5 — Model filter changes propagate to the season lens too. applyCkLens_()
+// re-renders picker + season KPIs + tables when the season lens is active;
+// falls through to the normal render for the default lens.
+function onCkModelFilterChange_() {
+  buildCockpitModelFilters();
+  buildAllInsightCards();
+  applyCkLens_();
+  updateCkCount();
+}
+
+/* ═══════════════════════════════════════
+   FILTERED DATA
+   V3.0: No Stock master-tag suppression happens upstream in LIB (buildRecord_).
+   A No-Stock partner has insight_tags = ['No Stock'] only, so when a user
+   selects ANY filter other than 'No Stock', No-Stock partners drop out
+   automatically via the indexOf check below.
+═══════════════════════════════════════ */
+function getCkFiltered() {
+  return cockpitPartners().filter(function(d) {
+    if (ckModelFilters.length && ckModelFilters.indexOf(d.model) === -1) return false;
+    if (ckInsightFilter && (d.insight_tags || []).indexOf(ckInsightFilter) === -1) return false;
+    return true;
+  });
+}
+
+function getKpiFiltered() {
+  var rows = kpiPartners();
+  if (ckKpiInsightFilter) {
+    var def = KPI_INSIGHT_DEFS.find(function(d) { return d.key === ckKpiInsightFilter; });
+    if (def) rows = rows.filter(def.test);
+  }
+  return rows;
+}
+
+/* ═══════════════════════════════════════
+   COUNT + EMAIL HAND-OFF
+   V3.0: Clicking "Email filtered" while the No Stock insight is active
+   pre-selects the SOH Request template — no stock typically means a
+   technical feed issue; we want the stock file to diagnose.
+═══════════════════════════════════════ */
+function updateCkCount() {
+  var count, hasFilter, label;
+  var salesSeason = ckTab === 'sales' && ckSalesLens === 'season';
+  var stockSOH = ckTab === 'stock' && ckStockLens === 'soh';
+  if (salesSeason) {
+    var sr = getCkSeasonRows_(); count = sr.length;
+    hasFilter = count > 0;  // season view always emails the current season's partner set
+    label = count + ' records · ' + (currentSeason_() || '—');
+  } else if (stockSOH) {
+    var sh = getCkSOHRows_(); count = sh.length;
+    hasFilter = count > 0;
+    label = count + ' records · ' + (currentSeason_() || '—');
+  } else if (ckTab === 'stock') {
+    var sd = stockPartners(); var filtered = ckStockFilter === 'All' ? sd : sd.filter(function(r) { return r.flag === ckStockFilter; });
+    count = filtered.length; hasFilter = ckStockFilter !== 'All';
+    label = count + ' records' + (ckStockFilter !== 'All' ? ' · ' + ckStockFilter : '');
+  } else if (ckTab === 'kpi') {
+    var kf = getKpiFiltered(); count = kf.length; hasFilter = !!ckKpiInsightFilter;
+    label = count + ' records' + (ckKpiInsightFilter ? ' · ' + ckKpiInsightFilter : '');
+  } else {
+    var f = getCkFiltered(); count = f.length; hasFilter = !!(ckInsightFilter || ckModelFilters.length);
+    label = count + ' records' + (ckInsightFilter ? ' · ' + ckInsightFilter : '');
+  }
+  document.getElementById('ckCount').textContent = label;
+  var btn = document.getElementById('btnEmailCkFiltered');
+  if (btn) { btn.style.display = hasFilter ? 'inline-flex' : 'none'; var lbl = document.getElementById('btnEmailCkLabel'); if (lbl) lbl.textContent = 'Email ' + count + ' partner' + (count !== 1 ? 's' : ''); }
+  refreshIcons();
+}
+
+function emailCkFiltered() {
+  var stores = [], suggestedTemplate = null;
+  var salesSeason = ckTab === 'sales' && ckSalesLens === 'season';
+  var stockSOH = ckTab === 'stock' && ckStockLens === 'soh';
+  if (salesSeason) {
+    stores = getCkSeasonRows_().map(function(d) { return d.company.toLowerCase(); });
+  } else if (stockSOH) {
+    stores = getCkSOHRows_().map(function(d) { return d.company.toLowerCase(); });
+  } else if (ckTab === 'stock') {
+    var sf = ckStockFilter === 'All' ? stockPartners() : stockPartners().filter(function(r) { return r.flag === ckStockFilter; });
+    stores = sf.map(function(r) { return r.store.toLowerCase(); });
+  } else if (ckTab === 'kpi') {
+    stores = getKpiFiltered().map(function(d) { return d.store.toLowerCase(); });
+  } else {
+    stores = getCkFiltered().map(function(d) { return d.company.toLowerCase(); });
+    // Insight-aware template suggestion
+    if (ckInsightFilter === 'No Stock') suggestedTemplate = 'SOH Request';
+    else if (ckInsightFilter === 'Stock Decline') suggestedTemplate = 'Stock Decline';
+    else if (ckInsightFilter === 'Sales Risk') suggestedTemplate = 'Sales Risk';
+    else if (ckInsightFilter === 'High Growth') suggestedTemplate = 'High Growth';
+    else if (ckInsightFilter === 'Heavy Discounter') suggestedTemplate = 'Heavy Discounter';
+  }
+
+  // Hand partner set + template suggestion to the Outreach wizard.
+  var rows = [];
+  stores.forEach(function(name) {
+    var deal = P.find(function(d) { return (d.company || '').toLowerCase() === name; });
+    if (deal) rows.push(deal.row);
+  });
+  if (!rows.length) { showToast('No CRM-linked partners in this filter set', 'error'); return; }
+  if (typeof wizPresetFromFilter === 'function') {
+    wizPresetFromFilter(rows, suggestedTemplate);
+  }
+  switchView('email');
+  var seasonNote = (salesSeason || stockSOH) ? ' · ' + (currentSeason_() || '') : '';
+  showToast(rows.length + ' partner' + (rows.length === 1 ? '' : 's') + ' pre-selected' + (suggestedTemplate ? ' · ' + suggestedTemplate : '') + seasonNote, 'success');
+}
+
+/* ═══════════════════════════════════════
+   SORTING
+═══════════════════════════════════════ */
+function sortCk(col) { if (ckSortCol === col) ckSortAsc = !ckSortAsc; else { ckSortCol = col; ckSortAsc = false; } renderCkSales(); }
+function sortCkSt(col) { if (ckStockSortCol === col) ckStockSortAsc = !ckStockSortAsc; else { ckStockSortCol = col; ckStockSortAsc = false; } renderCkStock(); }
+function sortCkKpi(col) { if (ckKpiSortCol === col) ckKpiSortAsc = !ckKpiSortAsc; else { ckKpiSortCol = col; ckKpiSortAsc = false; } renderCkKpi(); }
+
+/* ═══════════════════════════════════════
+   RENDER: SALES TABLE (V3.0 — leading # column)
+═══════════════════════════════════════ */
+function renderCkSales() {
+  var rows = getCkFiltered();
+  rows.forEach(function(d) { d.offline_pct = d.cy_offline_pct || 0; });
+
+  // V3.12 — Month-mode overlay: per-store gtv/units for selected month and
+  // YoY% computed against the same month previous year. We mutate ephemeral
+  // fields (gtv_period, units_period, period_pct, units_period_pct) used by
+  // the renderer below; original cy_ytd / cy_units_tot are left untouched
+  // so sorting on them still works if user happens to sort that column.
+  var monthMode = (ckPeriodMode === 'month');
+  var selM = monthMode ? ckSelectedMonth_() : '';
+  var prvM = monthMode ? ckPrevYearMonth_(selM) : '';
+  if (monthMode) {
+    rows.forEach(function(d) {
+      var key = (d.company || '').trim().toLowerCase();
+      var cur = ckMonthlyForStore_(key, selM);
+      var py  = ckMonthlyForStore_(key, prvM);
+      d.gtv_period = cur.gtv;
+      d.units_period = cur.units;
+      d.period_pct = py.gtv > 0 ? (cur.gtv - py.gtv) / py.gtv : 0;
+      d.units_period_pct = py.units > 0 ? (cur.units - py.units) / py.units : 0;
+    });
+  }
+
+  // ── Store Group aggregation ──────────────────────────────────────────────
+  if (ckGroupByStoreGroup) {
+    var groups = {};
+    rows.forEach(function(d) {
+      var gk = (d.store_group || d.company).toLowerCase();
+      if (!groups[gk]) groups[gk] = {
+        company: d.store_group || d.company, country: '', model: '', store_group: d.store_group || d.company,
+        cy_ytd: 0, py_ytd: 0, cy_fp: 0, py_fp: 0, cy_4w: 0, py_4w: 0, cy_7d: 0, py_7d: 0,
+        cy_units_on: 0, cy_units_tot: 0, py_units_on: 0, py_units_tot: 0,
+        gtv_period: 0, units_period: 0, _gtvPeriodPy: 0, _unitsPeriodPy: 0,
+        insight_tags: [], _count: 0, _countries: {}, _models: {}, _offPctSum: 0,
+        _anyNoStock: false
+      };
+      var g = groups[gk];
+      g.cy_ytd += d.cy_ytd; g.py_ytd += d.py_ytd; g.cy_fp += d.cy_fp; g.py_fp += d.py_fp;
+      g.cy_4w += d.cy_4w; g.py_4w += d.py_4w; g.cy_7d += d.cy_7d; g.py_7d += d.py_7d;
+      g.cy_units_on += d.cy_units_on; g.cy_units_tot += d.cy_units_tot;
+      g.py_units_on += d.py_units_on; g.py_units_tot += d.py_units_tot;
+      g._offPctSum += d.offline_pct || 0;
+      if (monthMode) {
+        var key = (d.company || '').trim().toLowerCase();
+        var cur = ckMonthlyForStore_(key, selM);
+        var py  = ckMonthlyForStore_(key, prvM);
+        g.gtv_period   += cur.gtv;
+        g.units_period += cur.units;
+        g._gtvPeriodPy   += py.gtv;
+        g._unitsPeriodPy += py.units;
+      }
+      if (d.is_no_stock) g._anyNoStock = true;
+      (d.insight_tags || []).forEach(function(t) { if (g.insight_tags.indexOf(t) === -1) g.insight_tags.push(t); });
+      g._count++;
+      if (d.country) g._countries[d.country] = true;
+      if (d.model) g._models[d.model] = true;
+    });
+    rows = Object.keys(groups).map(function(gk) {
+      var g = groups[gk];
+      g.ytd_pct = g.py_ytd > 0 ? (g.cy_ytd - g.py_ytd) / g.py_ytd : 0;
+      g.w4_pct = g.py_4w > 0 ? (g.cy_4w - g.py_4w) / g.py_4w : 0;
+      g.d7_pct = g.py_7d > 0 ? (g.cy_7d - g.py_7d) / g.py_7d : 0;
+      g.fp_share = g.cy_ytd > 0 ? g.cy_fp / g.cy_ytd : 0;
+      g.units_pct = g.py_units_tot > 0 ? (g.cy_units_tot - g.py_units_tot) / g.py_units_tot : 0;
+      g.offline_pct = g._count > 0 ? g._offPctSum / g._count : 0;
+      g.country = Object.keys(g._countries).join(', ');
+      g.model = Object.keys(g._models).join(', ');
+      if (monthMode) {
+        g.period_pct = g._gtvPeriodPy > 0 ? (g.gtv_period - g._gtvPeriodPy) / g._gtvPeriodPy : 0;
+        g.units_period_pct = g._unitsPeriodPy > 0 ? (g.units_period - g._unitsPeriodPy) / g._unitsPeriodPy : 0;
+      }
+      return g;
+    });
+  }
+
+  // V3.12 — In month mode, sort defaults to gtv_period (DESC) so the table
+  // ranks by the month's GTV unless user has explicitly clicked another col.
+  var effectiveSortCol = ckSortCol;
+  if (monthMode) {
+    if (ckSortCol === 'cy_ytd') effectiveSortCol = 'gtv_period';
+    else if (ckSortCol === 'ytd_pct') effectiveSortCol = 'period_pct';
+    else if (ckSortCol === 'cy_units_tot') effectiveSortCol = 'units_period';
+    else if (ckSortCol === 'units_pct') effectiveSortCol = 'units_period_pct';
+  }
+  rows.sort(function(a, b) { var va = a[effectiveSortCol] || 0, vb = b[effectiveSortCol] || 0; if (typeof va === 'string') return ckSortAsc ? va.localeCompare(vb) : vb.localeCompare(va); return ckSortAsc ? va - vb : vb - va; });
+  updateCkCount();
+
+  // V3.12 — Update GTV / Units column headers to reflect period.
+  var hdrGtv = document.getElementById('ckHdrGtv');
+  var hdrPct = document.getElementById('ckHdrPct');
+  var hdrUnits = document.getElementById('ckHdrUnits');
+  var hdrUnitsPct = document.getElementById('ckHdrUnitsPct');
+  if (monthMode) {
+    var lbl = ckMonthLabel_(selM) || '—';
+    if (hdrGtv) hdrGtv.textContent = lbl + ' GTV';
+    if (hdrPct) hdrPct.textContent = 'YoY%';
+    if (hdrUnits) hdrUnits.textContent = lbl + ' Units';
+    if (hdrUnitsPct) hdrUnitsPct.textContent = 'Units YoY%';
+  } else {
+    if (hdrGtv) hdrGtv.textContent = 'YTD GTV';
+    if (hdrPct) hdrPct.textContent = 'YoY%';
+    if (hdrUnits) hdrUnits.textContent = 'Units';
+    if (hdrUnitsPct) hdrUnitsPct.textContent = 'Units YoY%';
+  }
+
+  document.getElementById('ckSalesBody').innerHTML = rows.map(function(d, i) {
+    var rank = i + 1;
+    var nameHtml = esc(d.company);
+    if (ckGroupByStoreGroup && d._count > 1) nameHtml += ' <span style="font-size:9px;color:var(--ink-4);font-weight:400">(' + d._count + ' stores)</span>';
+    var atHtml = (d.insight_tags || []).map(function(t) { var c = autoColors[t] || '#f1f5f9;color:#64748b'; return '<span style="background:' + c + ';padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;margin:1px">' + t + '</span>'; }).join('');
+    var offPct = d.offline_pct;
+    var offHtml = d.cy_units_tot > 0 ? '<span style="color:' + (offPct > 0.10 ? '#dc2626' : offPct > 0 ? '#b45309' : '#16a34a') + ';font-weight:600">' + Math.round(offPct * 100) + '%</span>' : '—';
+    var onclick = ckGroupByStoreGroup ? '' : 'onclick="openDealByStore(\'' + esc(d.company) + '\')"';
+    var gtvVal   = monthMode ? (d.gtv_period || 0)            : d.cy_ytd;
+    var pctVal   = monthMode ? (d.period_pct || 0)            : d.ytd_pct;
+    var unitsVal = monthMode ? (d.units_period || 0)          : d.cy_units_tot;
+    var unitsPct = monthMode ? (d.units_period_pct || 0)      : d.units_pct;
+    return '<tr ' + onclick + ' style="' + (ckGroupByStoreGroup ? '' : 'cursor:pointer') + '">'
+      + '<td style="color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums">' + rank + '</td>'
+      + '<td style="font-weight:500;color:var(--ink)">' + nameHtml + '</td>'
+      + '<td style="font-size:11px;color:var(--ink-4)">' + esc(d.country) + '</td>'
+      + '<td><span style="font-size:10px;font-weight:700;letter-spacing:0.06em;color:var(--ink-3)">' + esc(d.model) + '</span></td>'
+      + '<td style="text-align:right;font-weight:600">' + fGtv(gtvVal) + '</td>'
+      + '<td style="text-align:right;font-weight:700">' + fPctStr(pctVal, true) + '</td>'
+      + '<td class="ck-col-ytd-only" style="text-align:right;font-weight:600">' + fPctStr(d.w4_pct, true) + '</td>'
+      + '<td class="ck-col-ytd-only" style="text-align:right;font-weight:600">' + fPctStr(d.d7_pct, true) + '</td>'
+      + '<td class="ck-col-ytd-only" style="text-align:right;color:var(--ink-3)">' + (d.fp_share ? Math.round(d.fp_share * 100) + '%' : '—') + '</td>'
+      + '<td style="text-align:right;color:var(--ink-3)">' + (unitsVal || 0).toLocaleString() + '</td>'
+      + '<td style="text-align:right;font-weight:600">' + fPctStr(unitsPct, true) + '</td>'
+      + '<td class="ck-col-ytd-only" style="text-align:right">' + offHtml + '</td>'
+      + '<td>' + (atHtml || '<span style="color:var(--ink-4);font-size:11px">—</span>') + '</td>'
+      + '</tr>';
+  }).join('') || '<tr><td colspan="13" style="padding:40px;text-align:center;color:var(--ink-4)">No records matched.</td></tr>';
+  refreshIcons();
+}
+
+/* ═══════════════════════════════════════
+   RENDER: STOCK TABLE (V3.0 — leading # column)
+═══════════════════════════════════════ */
+function renderCkStock() {
+  var all = stockPartners(), rows = ckStockFilter === 'All' ? all : all.filter(function(r) { return r.flag === ckStockFilter; });
+  rows.sort(function(a, b) { var va = a[ckStockSortCol] || 0, vb = b[ckStockSortCol] || 0; if (typeof va === 'string') return ckStockSortAsc ? va.localeCompare(vb) : vb.localeCompare(va); return ckStockSortAsc ? va - vb : vb - va; });
+  document.getElementById('ckStockBody').innerHTML = rows.map(function(r, i) {
+    var rank = i + 1;
+    var max = Math.max.apply(null, r.values) || 1;
+    var spark = '<div style="display:inline-flex;align-items:flex-end;gap:1px;height:22px">' + r.values.slice().reverse().map(function(v, i2, arr) { var h = Math.max(8, Math.round((v / max) * 100)); var grow = i2 === 0 || v >= (arr[i2 - 1] || 0); return '<div style="width:3px;height:' + h + '%;border-radius:1px 1px 0 0;background:' + (grow ? '#16a34a' : '#dc2626') + '"></div>'; }).join('') + '</div>';
+    var flagHtml = r.flag === 'Spike' ? '<span style="background:#dcfce7;color:#15803d;border:1px solid #bbf7d0;padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700">Spike</span>' : r.flag === 'Drop' ? '<span style="background:#fee2e2;color:#dc2626;border:1px solid #fecdd3;padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700">Drop</span>' : '<span style="font-size:11px;color:var(--ink-4);font-weight:600">Stable</span>';
+    return '<tr onclick="openDealByStore(\'' + esc(r.store) + '\')">'
+      + '<td style="color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums">' + rank + '</td>'
+      + '<td style="font-weight:500">' + esc(r.store) + '</td>'
+      + '<td style="text-align:right;font-weight:600">' + r.today.toLocaleString() + '</td>'
+      + '<td style="text-align:right;font-weight:700;color:' + (r.diff >= 0 ? '#16a34a' : '#dc2626') + '">' + (r.diff >= 0 ? '+' : '') + r.diff.toLocaleString() + '</td>'
+      + '<td style="text-align:right;font-weight:700;color:' + (r.pct15 >= 0 ? '#16a34a' : '#dc2626') + '">' + (r.pct15 >= 0 ? '+' : '') + Math.round(r.pct15 * 100) + '%</td>'
+      + '<td style="text-align:right">' + spark + '</td>'
+      + '<td style="text-align:center">' + flagHtml + '</td>'
+      + '</tr>';
+  }).join('') || '<tr><td colspan="7" style="padding:40px;text-align:center;color:var(--ink-4)">No stock data.</td></tr>';
+  updateCkCount();
+  refreshIcons();
+}
+
+/* ═══════════════════════════════════════
+   RENDER: KPI TABLE (V3.0 — leading # column)
+═══════════════════════════════════════ */
+function renderCkKpi() {
+  var rows = getKpiFiltered();
+  if (!rows.length) {
+    document.getElementById('ckKpiBody').innerHTML = '<tr><td colspan="10" style="padding:40px;text-align:center;color:var(--ink-4)">No KPI data' + (ckKpiInsightFilter ? ' matching "' + ckKpiInsightFilter + '"' : '') + '.</td></tr>';
+    updateCkCount(); return;
+  }
+
+  rows.sort(function(a, b) {
+    var va = a[ckKpiSortCol] || 0, vb = b[ckKpiSortCol] || 0;
+    if (typeof va === 'string') return ckKpiSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return ckKpiSortAsc ? va - vb : vb - va;
+  });
+
+  document.getElementById('ckKpiBody').innerHTML = rows.map(function(r, i) {
+    var rank = i + 1;
+    var momNs = r.ns_prev > 0 ? ((r.ns_now - r.ns_prev) / r.ns_prev) : 0;
+    var mc = momNs <= 0 ? '#16a34a' : '#dc2626';
+    var mb = momNs <= 0 ? '#dcfce7' : '#fee2e2';
+    var mbd = momNs <= 0 ? '#bbf7d0' : '#fecdd3';
+    var ms = momNs >= 0 ? '+' : '';
+    var momHtml = '<span style="background:' + mb + ';color:' + mc + ';border:1px solid ' + mbd + ';padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700">' + ms + Math.round(momNs * 100) + '%</span>';
+
+    function fp(v) { return v != null ? v.toFixed(1) + '%' : '—'; }
+    function cc(v, inv) {
+      if (v == null) return 'color:var(--ink-4)';
+      if (inv) return v > 5 ? 'color:#dc2626;font-weight:700' : v > 2 ? 'color:#b45309;font-weight:600' : 'color:#16a34a;font-weight:600';
+      return 'color:var(--ink-2);font-weight:600';
+    }
+
+    return '<tr onclick="openDealByStore(\'' + esc(r.store) + '\')">'
+      + '<td style="color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums">' + rank + '</td>'
+      + '<td style="font-weight:500;color:var(--ink)">' + esc(r.store) + '</td>'
+      + '<td style="text-align:right;font-weight:600;color:var(--ink-2)">' + r.orders_now.toLocaleString() + '</td>'
+      + '<td style="text-align:right;' + cc(r.perfect_now, false) + '">' + fp(r.perfect_now) + '</td>'
+      + '<td style="text-align:right;' + cc(r.ns_now, true) + '">' + fp(r.ns_now) + '</td>'
+      + '<td style="text-align:right;' + cc(r.sos_now, true) + '">' + fp(r.sos_now) + '</td>'
+      + '<td style="text-align:right;' + cc(r.wi_now, true) + '">' + fp(r.wi_now) + '</td>'
+      + '<td style="text-align:right;color:var(--ink-3)">' + r.imperfect_now + '</td>'
+      + '<td style="text-align:right;font-weight:600;color:' + (r.penalty_now > 0 ? '#dc2626' : 'var(--ink-3)') + '">$' + r.penalty_now.toLocaleString() + '</td>'
+      + '<td style="text-align:center">' + momHtml + '</td></tr>';
+  }).join('') || '<tr><td colspan="10" style="padding:40px;text-align:center;color:var(--ink-4)">No KPI data.</td></tr>';
+
+  updateCkCount();
+  refreshIcons();
+}
+</script>

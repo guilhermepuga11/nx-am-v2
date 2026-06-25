@@ -1,0 +1,239 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   HEAD DASHBOARD (V3.9) — manager-only cross-team view
+
+   Lazy-loaded on first nav. Read-only — no writes from here. Two regions:
+     1. Combined KPI strip (top)
+     2. Per-team grid + recent huddles feed (below, two columns on wide)
+
+   Per-team rows show condensed KPIs and an "Enter team" button that pipes
+   into the existing handleTeamSwitch() — same behavior as the team picker
+   dropdown in topbar, just a different entry point.
+
+   Recent huddles feed: cross-team, last 4-8 weeks. Click jumps into team
+   then opens Huddle view at that week.
+═══════════════════════════════════════════════════════════════════════════ */
+
+var headState = {
+  loading: false,
+  data: null,                  // { teams, combined, recentHuddles }
+  weeks: 4
+};
+
+function initHeadView() {
+  var host = document.getElementById('view-head');
+  if (!host) return;
+  if (headState.data) {
+    headRenderShell_();
+    return;
+  }
+  host.innerHTML = headShellHtml_();
+  loadHeadDashboard();
+  refreshIcons();
+}
+
+function headShellHtml_() {
+  return ''
+    + '<div class="filter-bar" style="justify-content:space-between;padding:10px 14px">'
+      + '<div style="display:flex;align-items:center;gap:10px">'
+        + '<span style="font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4)">Cross-team rollup</span>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:8px">'
+        + '<button class="btn-ghost" onclick="loadHeadDashboard()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>'
+      + '</div>'
+    + '</div>'
+    + '<div id="headBody" style="flex:1;overflow-y:auto;background:var(--bg);padding:18px 24px"></div>';
+}
+
+function loadHeadDashboard() {
+  headState.loading = true;
+  headRenderBody_();
+  google.script.run
+    .withSuccessHandler(function(d) {
+      headState.loading = false;
+      headState.data = d || { teams: [], combined: {}, recentHuddles: [] };
+      headRenderBody_();
+    })
+    .withFailureHandler(function(e) {
+      headState.loading = false;
+      headState.data = { teams: [], combined: {}, recentHuddles: [], _error: (e && e.message) || String(e) };
+      headRenderBody_();
+    })
+    .getHeadDashboardData(headState.weeks);
+}
+
+function headRenderShell_() { headRenderBody_(); }
+
+function headRenderBody_() {
+  var el = document.getElementById('headBody');
+  if (!el) return;
+  if (headState.loading) {
+    el.innerHTML = '<div style="padding:60px;text-align:center;color:var(--ink-4);font-size:12px"><i data-lucide="loader-2" class="spin" style="width:14px;height:14px;vertical-align:middle"></i> Loading head dashboard…</div>';
+    refreshIcons();
+    return;
+  }
+  var d = headState.data;
+  if (!d) { el.innerHTML = ''; return; }
+  if (d._error) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:#be123c;font-size:12px">Failed to load: ' + esc(d._error) + '</div>';
+    return;
+  }
+
+  el.innerHTML = ''
+    + headCombinedStripHtml_(d.combined || {})
+    + '<div style="display:grid;grid-template-columns:1fr 380px;gap:16px;align-items:start;margin-top:16px">'
+      + '<div>' + headTeamsGridHtml_(d.teams || []) + '</div>'
+      + '<div>' + headRecentHuddlesHtml_(d.recentHuddles || []) + '</div>'
+    + '</div>';
+  refreshIcons();
+}
+
+function headCombinedStripHtml_(c) {
+  var ytd = headFGtv_(c.ytdGtv || 0);
+  var fw = headFGtv_(c.fwGtv || 0);
+  var yoyPct = (c.fwGrowthYoY || 0) * 100;
+  var yoyColor = yoyPct >= 0 ? '#16a34a' : '#dc2626';
+  var yoySign = yoyPct >= 0 ? '+' : '';
+  var rrPct = Math.round((c.replyRate90d || 0) * 100);
+  var partners = (c.partners || 0).toLocaleString();
+  var sent = (c.sent90d || 0).toLocaleString();
+  var replied = (c.replied90d || 0).toLocaleString();
+
+  var kpi = function(label, value, sub) {
+    return '<div class="section-card" style="margin:0;padding:14px 16px;flex:1;min-width:0">'
+      + '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:6px">' + label + '</div>'
+      + '<div style="font-size:22px;font-weight:700;color:var(--ink);letter-spacing:-0.02em;font-variant-numeric:tabular-nums;line-height:1.1">' + value + '</div>'
+      + (sub ? '<div style="font-size:10px;color:var(--ink-4);margin-top:4px">' + sub + '</div>' : '')
+    + '</div>';
+  };
+
+  return '<div>'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+      + '<span style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4)">Direct teams · combined</span>'
+      + '<span style="font-size:9px;color:var(--ink-4)">(translucid teams below not included)</span>'
+    + '</div>'
+    + '<div style="display:flex;gap:10px;flex-wrap:wrap">'
+      + kpi('Partners', partners, 'across direct teams')
+      + kpi('YTD GTV', ytd, '')
+      + kpi('4W GTV', fw, '<span style="color:' + yoyColor + ';font-weight:700">' + yoySign + yoyPct.toFixed(1) + '%</span> vs PY')
+      + kpi('Sent · 90d', sent, replied + ' replied · ' + rrPct + '% rate')
+    + '</div>'
+  + '</div>';
+}
+
+function headTeamsGridHtml_(teams) {
+  if (!teams.length) {
+    return '<div class="section-card" style="padding:32px;text-align:center;color:var(--ink-4);font-size:12px">No teams configured.</div>';
+  }
+  return '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px;padding-left:2px">Teams</div>'
+    + teams.map(headTeamRowHtml_).join('');
+}
+
+function headTeamRowHtml_(t) {
+  var ytdStr = headFGtv_(t.ytdGtv || 0);
+  var fwStr = headFGtv_(t.fwGtv || 0);
+  var yoyPct = t.pyFwGtv > 0 ? ((t.fwGtv - t.pyFwGtv) / t.pyFwGtv) * 100 : 0;
+  var yoyColor = yoyPct >= 0 ? '#16a34a' : '#dc2626';
+  var yoySign = yoyPct >= 0 ? '+' : '';
+  var partners = (t.partners || 0).toLocaleString();
+  var huddleBadge = t.huddlesThisWeek > 0
+    ? '<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em;margin-left:6px">' + t.huddlesThisWeek + ' THIS WK</span>'
+    : '';
+  var emptyBadge = !t.hasData
+    ? '<span style="background:var(--bg);color:var(--ink-4);border:1px solid var(--border);padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em;margin-left:6px">NO DATA</span>'
+    : '';
+  // V3.9.1 — Indirect (non-direct-ownership) teams render translucid: muted
+  // colors and a small INDIRECT pill so the head can see the data without
+  // mistaking it for their own team's responsibility.
+  var isDirect = t.direct !== false;  // default to direct if missing
+  var rowOpacity = isDirect ? '1' : '0.55';
+  var rowBg = isDirect ? '' : 'background:repeating-linear-gradient(45deg,var(--surface),var(--surface) 6px,var(--bg) 6px,var(--bg) 12px);';
+  var indirectBadge = !isDirect
+    ? '<span style="background:var(--bg);color:var(--ink-4);border:1px dashed var(--border);padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em;margin-left:6px">INDIRECT</span>'
+    : '';
+  var teamSafe = esc(t.name).replace(/'/g, "\\'");
+
+  return '<div class="section-card" style="margin:0 0 8px;padding:14px 16px;display:flex;align-items:center;gap:14px;opacity:' + rowOpacity + ';' + rowBg + '">'
+    + '<div style="flex-shrink:0;min-width:140px">'
+      + '<div style="font-size:14px;font-weight:700;color:var(--ink);letter-spacing:-0.01em">' + esc(t.label || t.name) + indirectBadge + huddleBadge + emptyBadge + '</div>'
+      + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">' + partners + ' partner' + (t.partners === 1 ? '' : 's') + (isDirect ? '' : ' · awareness only') + '</div>'
+    + '</div>'
+    + '<div style="flex:1;display:grid;grid-template-columns:repeat(4, 1fr);gap:10px">'
+      + headTeamMiniKpi_('YTD GTV', ytdStr)
+      + headTeamMiniKpi_('4W GTV', fwStr, yoyPct, yoyColor, yoySign)
+      + headTeamMiniKpi_('Sent · 90d', (t.sent90d || 0).toLocaleString())
+      + headTeamMiniKpi_('Replies', (t.replied90d || 0).toLocaleString())
+    + '</div>'
+    + '<div style="flex-shrink:0;display:flex;gap:6px">'
+      + '<button class="btn-ghost" onclick="headEnterTeam(\'' + teamSafe + '\', \'huddle\')" title="Open team huddles"><i data-lucide="users-round" style="width:12px;height:12px"></i></button>'
+      + '<button class="btn-primary" onclick="headEnterTeam(\'' + teamSafe + '\', \'overview\')" style="padding:6px 12px;font-size:11px"><i data-lucide="arrow-right" style="width:12px;height:12px"></i> Enter</button>'
+    + '</div>'
+  + '</div>';
+}
+
+function headTeamMiniKpi_(label, value, pct, pctColor, pctSign) {
+  return '<div>'
+    + '<div style="font-size:8.5px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:2px">' + label + '</div>'
+    + '<div style="font-size:13px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums">' + value + '</div>'
+    + (pct !== undefined ? '<div style="font-size:9px;color:' + pctColor + ';font-weight:700;font-variant-numeric:tabular-nums">' + pctSign + pct.toFixed(1) + '%</div>' : '')
+  + '</div>';
+}
+
+function headRecentHuddlesHtml_(huddles) {
+  if (!huddles.length) {
+    return '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px;padding-left:2px">Recent Huddles</div>'
+      + '<div class="section-card" style="padding:32px 16px;text-align:center;color:var(--ink-4);font-size:11px"><i data-lucide="users-round" style="width:24px;height:24px;opacity:0.4;display:block;margin:0 auto 8px"></i>No huddle entries yet.</div>';
+  }
+  return '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px;padding-left:2px">Recent Huddles</div>'
+    + huddles.slice(0, 12).map(function(h) {
+        var author = (h.created_by || '').split('@')[0].split('.').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ') || '—';
+        var teamSafe = esc(h.team).replace(/'/g, "\\'");
+        var refsHtml = h.partner_refs && h.partner_refs.length
+          ? '<div style="font-size:9.5px;color:var(--ink-4);margin-top:3px">' + esc(h.partner_refs.slice(0, 3).join(', ')) + (h.partner_refs.length > 3 ? ' +' + (h.partner_refs.length - 3) : '') + '</div>'
+          : '';
+        return '<div class="section-card" onclick="headEnterTeam(\'' + teamSafe + '\', \'huddle\')" style="margin:0 0 6px;padding:10px 12px;cursor:pointer">'
+          + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+            + '<span style="font-size:9px;font-weight:700;color:var(--ink-3);background:var(--bg);border:1px solid var(--border);padding:1px 6px;border-radius:99px;letter-spacing:0.04em">' + esc(h.teamLabel || h.team) + '</span>'
+            + '<span style="font-size:9px;color:var(--ink-4)">' + esc(headWeekShort_(h.week_start)) + '</span>'
+          + '</div>'
+          + '<div style="font-size:11.5px;font-weight:600;color:var(--ink);line-height:1.3">' + esc(h.topic || '(No topic)') + '</div>'
+          + refsHtml
+          + '<div style="font-size:9.5px;color:var(--ink-4);margin-top:4px">' + esc(author) + '</div>'
+        + '</div>';
+      }).join('');
+}
+
+function headWeekShort_(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' });
+}
+
+function headFGtv_(v) {
+  v = +v || 0;
+  if (v >= 1e6) return '$' + (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return '$' + Math.round(v / 1e3) + 'k';
+  return '$' + Math.round(v).toLocaleString();
+}
+
+function headEnterTeam(team, view) {
+  if (!team) return;
+  // Trigger the existing team-switch flow, then route to requested view after data loads.
+  window.__headPendingView = view || 'overview';
+  if (typeof handleTeamSwitch === 'function' && team !== _userTeam) {
+    handleTeamSwitch(team);
+    // After data loads, handleUnifiedData will land on overview by default.
+    // We hijack: after the next handleUnifiedData completes, switchView to view.
+    setTimeout(function() {
+      if (window.__headPendingView) {
+        switchView(window.__headPendingView);
+        window.__headPendingView = null;
+      }
+    }, 1500);  // belt-and-braces; team data load typically ~600-1200ms warm
+  } else {
+    // Same team — just switch view
+    switchView(view || 'overview');
+  }
+}
+</script>

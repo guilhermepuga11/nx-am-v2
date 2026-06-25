@@ -1,0 +1,137 @@
+<script>
+/* ═══════════════════════════════════════
+   PARTNERS VIEW — reads from P directly
+   V3.0: Leading # rank column (follows current sorted order).
+═══════════════════════════════════════ */
+function setupPartnerFilters() {
+  var countries = new Set(), stages = new Set(), models = new Set(), tags = new Set();
+  P.forEach(function(d) {
+    if (d.country) countries.add(d.country);
+    if (d.stage) stages.add(d.stage);
+    if (d.model) models.add(d.model);
+    if (d.tags) d.tags.split(',').forEach(function(t) { var c = t.trim(); if (c && c.length < 30) tags.add(c); });
+  });
+  var pop = function(id, set) { var sel = document.getElementById(id); Array.from(set).sort().forEach(function(v) { sel.add(new Option(v, v)); }); };
+  pop('flt-country', countries); pop('flt-stage', stages); pop('flt-model', models);
+  document.getElementById('tagFilterBtns').innerHTML = Array.from(tags).sort().map(function(tag) {
+    return '<button class="filter-tag-btn" onclick="togglePartnersTag(\'' + esc(tag) + '\')" id="ptag-' + esc(tag.replace(/[^a-zA-Z0-9]/g, '_')) + '">' + esc(tag) + '</button>';
+  }).join('');
+}
+
+function togglePartnersTag(tag) {
+  var safeId = 'ptag-' + tag.replace(/[^a-zA-Z0-9]/g, '_');
+  var btn = document.getElementById(safeId);
+  if (partnersTagFilter.has(tag)) { partnersTagFilter.delete(tag); if (btn) btn.classList.remove('active'); }
+  else { partnersTagFilter.add(tag); if (btn) btn.classList.add('active'); }
+  filterPartners();
+}
+
+function sortPartners(col) {
+  if (partnersSortCol === col) partnersSortAsc = !partnersSortAsc;
+  else { partnersSortCol = col; partnersSortAsc = true; }
+  filterPartners();
+}
+
+function filterPartners() {
+  var q = document.getElementById('globalSearch').value.toLowerCase();
+  var fM = document.getElementById('flt-model').value;
+  var fS = document.getElementById('flt-stage').value;
+  var fC = document.getElementById('flt-country').value;
+  var filtered = P.filter(function(d) {
+    var mq = !q || (d.company || '').toLowerCase().includes(q) || (d.email || '').toLowerCase().includes(q) || (d.tags || '').toLowerCase().includes(q);
+    var mt = partnersTagFilter.size === 0 || Array.from(partnersTagFilter).every(function(f) {
+      return (d.tags || '').split(',').map(function(t) { return t.trim(); }).indexOf(f) > -1;
+    });
+    return mq && mt && (!fM || d.model === fM) && (!fS || d.stage === fS) && (!fC || d.country === fC);
+  });
+  if (partnersSortCol) {
+    filtered.sort(function(a, b) {
+      var va = a[partnersSortCol] || '', vb = b[partnersSortCol] || '';
+      if (typeof va === 'number' || typeof vb === 'number') return partnersSortAsc ? (va - vb) : (vb - va);
+      return partnersSortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+    });
+  }
+  renderPartnersTable(filtered);
+}
+
+/* ═══════════════════════════════════════
+   PROPOSE PARTNER MODAL
+═══════════════════════════════════════ */
+function openProposePartnerModal() {
+  document.getElementById('ppName').value = '';
+  document.getElementById('ppCountry').value = '';
+  document.getElementById('ppEmail').value = '';
+  document.getElementById('ppLanguage').value = '';
+  document.getElementById('ppStage').value = 'Onboarding';
+  document.getElementById('ppModel').value = '3P';
+  document.getElementById('ppType').value = '';
+  document.getElementById('ppNotes').value = '';
+  document.getElementById('proposePartnerModal').style.display = 'flex';
+  refreshIcons();
+}
+
+function closeProposePartnerModal() {
+  document.getElementById('proposePartnerModal').style.display = 'none';
+}
+
+function submitProposePartner() {
+  var name = document.getElementById('ppName').value.trim();
+  if (!name) { showToast('Partner name is required', 'error'); return; }
+  var payload = {
+    name: name,
+    country: document.getElementById('ppCountry').value.trim(),
+    email: document.getElementById('ppEmail').value.trim(),
+    language: document.getElementById('ppLanguage').value.trim(),
+    stage: document.getElementById('ppStage').value,
+    model: document.getElementById('ppModel').value,
+    partnerType: document.getElementById('ppType').value.trim(),
+    notes: document.getElementById('ppNotes').value.trim()
+  };
+  var btn = document.querySelector('#proposePartnerModal .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:12px;height:12px"></i> Submit'; refreshIcons(); }
+      if (res && res.success) { closeProposePartnerModal(); showToast(res.message || 'Partner proposed', 'success'); }
+      else { showToast(res.error || 'Failed', 'error'); }
+    })
+    .withFailureHandler(function(e) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:12px;height:12px"></i> Submit'; refreshIcons(); }
+      showToast('Error: ' + (e.message || e), 'error');
+    })
+    .proposeNewPartner(payload);
+}
+
+/* ═══════════════════════════════════════
+   PARTNERS TABLE RENDER — V3.0 with rank column
+═══════════════════════════════════════ */
+function renderPartnersTable(rows) {
+  var data = rows || P;
+  document.getElementById('partnersCount').textContent = data.length + ' records';
+  document.getElementById('partnersBody').innerHTML = data.map(function(d, i) {
+    var rank = i + 1;
+    var overdue = d.actionDate && d.actionDate < TODAY && !String(d.stage || '').includes('Inactive');
+    var tags = d.tags ? d.tags.split(',').map(function(t) { return '<span class="tag-chip">' + esc(t.trim()) + '</span>'; }).join('') : '';
+    var atHtml = (d.insight_tags || []).map(function(t) {
+      var c = autoColors[t] || '#f1f5f9;color:#64748b';
+      return '<span style="background:' + c + ';padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase;margin:1px">' + t + '</span>';
+    }).join('');
+    var emailIn = d.lastReceived && d.lastReceived !== '-' ? d.lastReceived : '—';
+    var emailOut = d.lastSent && d.lastSent !== '-' ? d.lastSent : '—';
+    return '<tr class="' + (overdue ? 'overdue' : '') + '" onclick="openDeal(' + d.row + ')">'
+      + '<td style="color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums">' + rank + '</td>'
+      + '<td style="font-weight:500;color:var(--ink)">' + esc(d.company) + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">' + esc(d.country || '') + '</div></td>'
+      + '<td style="font-size:11px;color:var(--ink-2);white-space:nowrap">' + esc(d.account_manager || '—') + '</td>'
+      + '<td><span class="pill ' + stageClass(d.stage) + '">' + esc(d.stage) + '</span></td>'
+      + '<td><span style="font-size:10px;font-weight:700;letter-spacing:0.06em;color:var(--ink-3)">' + esc(d.model || '3P') + '</span></td>'
+      + '<td style="text-align:right;font-weight:600">' + fGtv(d.cy_ytd) + '<div style="font-size:10px;margin-top:1px">' + fPctStr(d.ytd_pct, true) + '</div></td>'
+      + '<td style="text-align:right;font-size:11px;' + (emailIn === '—' ? 'color:var(--ink-4)' : 'color:var(--ink-2);font-weight:500') + '">' + esc(emailIn) + '</td>'
+      + '<td style="text-align:right;font-size:11px;' + (emailOut === '—' ? 'color:var(--ink-4)' : 'color:var(--ink-2);font-weight:500') + '">' + esc(emailOut) + '</td>'
+      + '<td>' + (atHtml || '<span style="color:var(--ink-4);font-size:11px">—</span>') + '</td>'
+      + '<td>' + tags + '</td>'
+      + '<td onclick="event.stopPropagation()"><button class="icon-btn" style="width:26px;height:26px;margin:0 auto" onclick="emailThisPartner(P.find(function(x){return x.row==' + d.row + ';}))"><i data-lucide="mail" style="width:11px;height:11px"></i></button></td>'
+      + '</tr>';
+  }).join('') || '<tr><td colspan="11" style="padding:40px;text-align:center;color:var(--ink-4)">No records matched.</td></tr>';
+  refreshIcons();
+}
+</script>

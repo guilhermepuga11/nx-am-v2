@@ -1,0 +1,396 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   ADMIN VIEW — clean rewrite
+   Tabs: Pending Contacts · System Logs · Send Log · Accounts
+   V3.0: Send Log reads from widened 14-col schema. Null-safe on status.
+═══════════════════════════════════════════════════════════════════════════ */
+
+var adminLoaded = false;
+var adminTab = 'pending';
+var adminAccounts = [];
+var adminLogsExpanded = false;
+var adminSendsExpanded = false;
+
+function initAdminView() {
+  if (!_isManager) {
+    document.getElementById('adminGate').style.display = 'flex';
+    document.getElementById('adminContent').style.display = 'none';
+    return;
+  }
+  document.getElementById('adminGate').style.display = 'none';
+  document.getElementById('adminContent').style.display = 'flex';
+  var teamLabel = document.getElementById('adminTeamLabel');
+  if (teamLabel) teamLabel.textContent = _userTeam || 'All';
+  if (!adminLoaded) { loadAdminData(); adminLoaded = true; }
+  switchAdminTab(adminTab);
+}
+
+function switchAdminTab(tab) {
+  adminTab = tab;
+  ['pending', 'logs', 'sends', 'accounts'].forEach(function(t) {
+    var p = document.getElementById('admin-' + t), b = document.getElementById('atab-' + t);
+    if (p) p.style.display = t === tab ? 'block' : 'none';
+    if (b) b.classList.toggle('active', t === tab);
+  });
+  if (tab === 'pending') renderAdminPending();
+  if (tab === 'accounts' && !adminAccounts.length) loadAdminAccounts();
+}
+
+/* ── Pending Contacts ───────────────────────────────────────────────────── */
+function renderAdminPending() {
+  var el = document.getElementById('adminPendingBody');
+  if (!el) return;
+  updatePendingBadge();
+  if (!pendingContacts || !pendingContacts.length) {
+    el.innerHTML = '<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--ink-4);font-size:11px">No pending proposals.</td></tr>';
+    return;
+  }
+  el.innerHTML = pendingContacts.map(function(c) {
+    var change = String(c.proposed_change || '');
+    var changeLabel = change === 'create'
+      ? '<span style="color:#1d4ed8;font-weight:700">New</span>'
+      : change === 'delete'
+        ? '<span style="color:#be123c;font-weight:700">Delete</span>'
+        : '<span style="color:#b45309;font-weight:700">Edit</span>';
+    return '<tr>'
+      + '<td style="font-weight:500">' + esc(c.merchant_name) + '</td>'
+      + '<td>' + esc(c.contact_name) + '</td>'
+      + '<td style="color:var(--ink-3)">' + esc(c.contact_email) + '</td>'
+      + '<td>' + esc(c.contact_role || '—') + '</td>'
+      + '<td>' + changeLabel + '</td>'
+      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(c.proposed_by || '') + '</td>'
+      + '<td><div style="display:flex;gap:6px">'
+        + '<button class="btn-approve" onclick="doApprove(' + c.rowIndex + ')">Approve</button>'
+        + '<button class="btn-reject" onclick="doReject(' + c.rowIndex + ')">Reject</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function doApprove(row) {
+  google.script.run
+    .withSuccessHandler(function() { showToast('Approved', 'success'); loadAllContacts(); })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .approveContact(row, _userTeam);
+}
+
+function doReject(row) {
+  google.script.run
+    .withSuccessHandler(function() { showToast('Rejected', 'success'); loadAllContacts(); })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .rejectContact(row, _userTeam);
+}
+
+function refreshAdminPendingFull() {
+  showToast('Reloading contacts…', 'success');
+  google.script.run
+    .withSuccessHandler(function(rows) {
+      rows = rows || [];
+      var cockpitNames = {};
+      P.forEach(function(p) { cockpitNames[(p.company || '').toLowerCase()] = true; });
+      allContacts = rows.filter(function(c) {
+        return c.status === 'active' && cockpitNames[(c.merchant_name || '').toLowerCase()];
+      });
+      pendingContacts = rows.filter(function(c) {
+        return c.status === 'pending' && cockpitNames[(c.merchant_name || '').toLowerCase()];
+      });
+      updatePendingBadge();
+      renderAdminPending();
+      showToast('Refreshed — ' + pendingContacts.length + ' pending', 'success');
+    })
+    .withFailureHandler(function(e) { showToast('Error: ' + (e.message || e), 'error'); })
+    .getAllContacts(_userTeam);
+}
+
+/* ── System Logs + Send Log + Accounts ──────────────────────────────────── */
+function loadAdminData() {
+  google.script.run
+    .withSuccessHandler(function(summary) {
+      document.getElementById('adminKpis').innerHTML =
+        kpiHtml('Total Ops', summary.total, 'last 7 days')
+        + kpiHtml('Success', summary.success, '<span style="color:#16a34a">' + (summary.total ? Math.round(summary.success / summary.total * 100) : 0) + '%</span>')
+        + kpiHtml('Errors', summary.error, '<span style="color:#dc2626">' + (summary.total ? Math.round(summary.error / summary.total * 100) : 0) + '%</span>')
+        + kpiHtml('Warnings', summary.warning, '')
+        + kpiHtml('Avg Duration', summary.avgDurationMs + 'ms', '');
+    })
+    .getLogSummary(7, _userTeam);
+  loadAdminLogs();
+}
+
+function loadAdminLogs(loadAll) {
+  var filter = document.getElementById('adminLogFilter').value;
+  var limit = loadAll ? 10000 : 200;
+  var expandBtn = document.getElementById('adminLogsExpandBtn');
+  if (loadAll && expandBtn) {
+    expandBtn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Loading all logs…';
+    expandBtn.disabled = true;
+    refreshIcons();
+  }
+  google.script.run
+    .withSuccessHandler(function(logs) {
+      if (!logs || !logs.length) {
+        document.getElementById('adminLogBody').innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No log entries.</td></tr>';
+        if (expandBtn) expandBtn.style.display = 'none';
+        return;
+      }
+      document.getElementById('adminLogBody').innerHTML = logs.map(function(l) {
+        var ts = l.timestamp ? new Date(l.timestamp).toLocaleString() : '';
+        var s = String(l.status || '');
+        var sc = s === 'error' ? 'color:#be123c;background:#fff1f2'
+          : s === 'warning' ? 'color:#b45309;background:#fffbeb'
+          : s === 'success' ? 'color:#15803d;background:#f0fdf4'
+          : 'color:var(--ink-3)';
+        return '<tr>'
+          + '<td style="font-size:11px;color:var(--ink-3);white-space:nowrap">' + esc(ts) + '</td>'
+          + '<td style="font-weight:600;font-size:11px">' + esc(l.functionName) + '</td>'
+          + '<td><span style="' + sc + ';padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">' + esc(s) + '</span></td>'
+          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(l.triggeredBy) + '</td>'
+          + '<td style="text-align:right;font-size:11px">' + (l.durationMs != null ? l.durationMs + 'ms' : '—') + '</td>'
+          + '<td style="font-size:10px;color:var(--ink-3);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.details) + '">' + esc(l.details) + '</td>'
+          + '</tr>';
+      }).join('');
+      if (expandBtn) {
+        if (loadAll || logs.length < limit) {
+          adminLogsExpanded = true;
+          expandBtn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px"></i> Showing all ' + logs.length + ' entries';
+          expandBtn.disabled = true;
+          expandBtn.style.opacity = '0.6';
+        } else {
+          expandBtn.innerHTML = '<i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Showing ' + logs.length + ' — Load all entries';
+          expandBtn.disabled = false;
+          expandBtn.style.opacity = '1';
+        }
+        expandBtn.style.display = 'inline-flex';
+        refreshIcons();
+      }
+    })
+    .getRecentLogs(limit, filter || null, _userTeam);
+}
+
+function expandAdminLogs() { loadAdminLogs(true); }
+
+/* ── Send Log (V3.0 schema — 14 cols, null-safe status) ─────────────────── */
+function loadAdminSends(loadAll) {
+  var limit = loadAll ? 10000 : 100;
+  var expandBtn = document.getElementById('adminSendsExpandBtn');
+  if (loadAll && expandBtn) {
+    expandBtn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Loading all sends…';
+    expandBtn.disabled = true;
+    refreshIcons();
+  }
+  google.script.run
+    .withSuccessHandler(function(sends) {
+      if (!sends || !sends.length) {
+        document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No send records.</td></tr>';
+        if (expandBtn) expandBtn.style.display = 'none';
+        return;
+      }
+      document.getElementById('adminSendBody').innerHTML = sends.map(function(s) {
+        var ts = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
+        // Null-safe: coerce status to string before indexOf
+        var rawStatus = String(s.status || '');
+        var isSent = rawStatus.toUpperCase().indexOf('SENT') > -1 || rawStatus.toLowerCase() === 'ok';
+        var isErr  = rawStatus.toUpperCase().indexOf('ERROR') === 0;
+        var sc = isSent
+          ? 'color:#15803d;background:#f0fdf4'
+          : isErr
+            ? 'color:#be123c;background:#fff1f2'
+            : 'color:#b45309;background:#fffbeb';
+        var statusLabel = rawStatus || '—';
+        var replyPill = s.replied && String(s.replied).toLowerCase() === 'yes'
+          ? '<span style="color:#15803d;background:#f0fdf4;border:1px solid #bbf7d0;padding:1px 7px;border-radius:99px;font-size:9px;font-weight:700">Yes</span>'
+          : '<span style="color:var(--ink-4);font-size:10px">—</span>';
+        return '<tr>'
+          + '<td style="font-size:11px;color:var(--ink-3);white-space:nowrap">' + esc(ts) + '</td>'
+          + '<td style="font-weight:500">' + esc(s.store) + '</td>'
+          + '<td style="font-size:11px;color:var(--ink-3)">' + esc(s.email) + '</td>'
+          + '<td style="font-size:11px">' + esc(s.campaign) + '</td>'
+          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(s.templateKey || '—') + '</td>'
+          + '<td><span style="' + sc + ';padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase" title="' + esc(statusLabel) + '">' + esc(statusLabel.length > 24 ? statusLabel.slice(0, 24) + '…' : statusLabel) + '</span></td>'
+          + '<td style="text-align:center">' + replyPill + '</td>'
+          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(s.sentBy) + '</td>'
+          + '</tr>';
+      }).join('');
+      if (expandBtn) {
+        if (loadAll || sends.length < limit) {
+          adminSendsExpanded = true;
+          expandBtn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px"></i> Showing all ' + sends.length + ' entries';
+          expandBtn.disabled = true;
+          expandBtn.style.opacity = '0.6';
+        } else {
+          expandBtn.innerHTML = '<i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Showing ' + sends.length + ' — Load all entries';
+          expandBtn.disabled = false;
+          expandBtn.style.opacity = '1';
+        }
+        expandBtn.style.display = 'inline-flex';
+        refreshIcons();
+      }
+    })
+    .withFailureHandler(function(e) {
+      document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:#be123c">Failed to load: ' + esc(e.message || e) + '</td></tr>';
+    })
+    .getRecentSends(limit, _userTeam);
+}
+
+function expandAdminSends() { loadAdminSends(true); }
+
+/* ── Accounts ───────────────────────────────────────────────────────────── */
+function loadAdminAccounts() {
+  google.script.run
+    .withSuccessHandler(function(accounts) {
+      adminAccounts = accounts || [];
+      renderAdminAccounts();
+    })
+    .withFailureHandler(function(e) { showToast('Error loading accounts: ' + e.message, 'error'); })
+    .getAccountsList(_userTeam);
+}
+
+function renderAdminAccounts(filter) {
+  var q = (filter || document.getElementById('acctSearch').value || '').toLowerCase();
+  var filtered = adminAccounts.filter(function(a) { return !q || a.name.toLowerCase().indexOf(q) > -1; });
+  document.getElementById('adminAcctBody').innerHTML = filtered.map(function(a) {
+    var isActive = String(a.status || '').toLowerCase() === 'active';
+    var statusHtml = isActive
+      ? '<span style="color:#15803d;background:#f0fdf4;padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">Active</span>'
+      : '<span style="color:var(--ink-4);background:var(--bg);padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">' + esc(a.status) + '</span>';
+    var nameEsc = esc(a.name).replace(/'/g, "\\'");
+    var actionBtn = isActive
+      ? '<button class="btn-reject" style="padding:3px 10px;font-size:10px" onclick="setAcctStatus(\'' + nameEsc + '\',\'Inactive\')">Deactivate</button>'
+      : '<button class="btn-approve" style="padding:3px 10px;font-size:10px" onclick="setAcctStatus(\'' + nameEsc + '\',\'Active\')">Reactivate</button>';
+    return '<tr>'
+      + '<td style="font-weight:500">' + esc(a.name) + '</td>'
+      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(a.sources) + '</td>'
+      + '<td>' + statusHtml + '</td>'
+      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(a.dateAdded) + '</td>'
+      + '<td>' + actionBtn + '</td>'
+      + '</tr>';
+  }).join('') || '<tr><td colspan="5" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No accounts found.</td></tr>';
+  var countEl = document.getElementById('acctCount');
+  if (countEl) countEl.textContent = filtered.length + ' of ' + adminAccounts.length;
+}
+
+function setAcctStatus(name, newStatus) {
+  if (!confirm((newStatus === 'Inactive' ? 'Deactivate' : 'Reactivate') + ' "' + name + '"?')) return;
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (res.success) { showToast(name + ' → ' + newStatus, 'success'); loadAdminAccounts(); }
+      else { showToast(res.error || 'Failed', 'error'); }
+    })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .setAccountStatus(name, newStatus, _userTeam);
+}
+
+/* ── Admin maintenance ──────────────────────────────────────────────────── */
+function adminClearCache() {
+  showToast('Clearing cache…', 'success');
+  google.script.run
+    .withSuccessHandler(function() { showToast('Cache cleared.', 'success'); })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .clearNexusCache();
+}
+
+function adminPurgeLogs() {
+  if (!confirm('Purge log entries older than 184 days?')) return;
+  showToast('Purging old logs…', 'success');
+  google.script.run
+    .withSuccessHandler(function() {
+      showToast('Old logs purged.', 'success');
+      adminLoaded = false;
+      adminLogsExpanded = false;
+      initAdminView();
+    })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .scheduledLogCleanup(_userTeam);
+}
+
+function adminRebuildSpine() {
+  if (!confirm('Rebuild Accounts Spine for ' + (_userTeam || 'current team') + '? This may take 10–20 seconds.')) return;
+  showToast('Rebuilding spine…', 'success');
+  google.script.run
+    .withSuccessHandler(function(r) { showToast('Spine rebuilt: ' + JSON.stringify(r), 'success'); loadAdminAccounts(); })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .buildAccountsSpineForTeam(_userTeam);
+}
+</script>
+
+<!-- ══ ADMIN VIEW HTML ══ -->
+<div id="view-admin" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0">
+  <div id="adminGate" style="display:none;flex:1;align-items:center;justify-content:center;flex-direction:column;gap:8px">
+    <i data-lucide="shield-off" style="width:32px;height:32px;color:var(--ink-4)"></i>
+    <div style="font-size:13px;font-weight:600;color:var(--ink-3)">Access restricted</div>
+    <div style="font-size:11px;color:var(--ink-4)">Manager account required.</div>
+  </div>
+
+  <div id="adminContent" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+    <!-- toolbar -->
+    <div class="filter-bar" style="justify-content:space-between;border-radius:0;border-left:none;border-right:none">
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="drawer-tab active" id="atab-pending" onclick="switchAdminTab('pending')" style="padding:8px 14px">Pending Contacts <span id="adminPendingBadge" style="display:none;background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px;margin-left:4px">0</span></button>
+        <button class="drawer-tab" id="atab-logs" onclick="switchAdminTab('logs')" style="padding:8px 14px">System Logs</button>
+        <button class="drawer-tab" id="atab-sends" onclick="switchAdminTab('sends');loadAdminSends()" style="padding:8px 14px">Send Log</button>
+        <button class="drawer-tab" id="atab-accounts" onclick="switchAdminTab('accounts')" style="padding:8px 14px">Accounts</button>
+        <span id="adminTeamLabel" style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:var(--bg);border:1px solid var(--border);padding:3px 10px;border-radius:6px;color:var(--ink-3);margin-left:8px"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminClearCache()"><i data-lucide="trash-2" style="width:12px;height:12px"></i> Clear Cache</button>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminRebuildSpine()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Rebuild Spine</button>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminPurgeLogs()"><i data-lucide="archive" style="width:12px;height:12px"></i> Purge Old Logs</button>
+      </div>
+    </div>
+
+    <!-- KPIs -->
+    <div style="padding:16px 24px 0"><div class="kpi-grid" id="adminKpis" style="grid-template-columns:repeat(5,1fr)"></div></div>
+
+    <!-- PENDING CONTACTS TAB -->
+    <div id="admin-pending" style="flex:1;overflow:auto;padding:0 24px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Approve or Reject Contact Proposals</span>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;margin-left:auto" onclick="refreshAdminPendingFull()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>
+      </div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table"><thead><tr><th>Account</th><th>Name</th><th>Email</th><th>Role</th><th>Change</th><th>Proposed by</th><th>Actions</th></tr></thead>
+        <tbody id="adminPendingBody"><tr><td colspan="7" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
+      </div>
+    </div>
+
+    <!-- SYSTEM LOGS TAB -->
+    <div id="admin-logs" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <select id="adminLogFilter" class="nx-select" onchange="adminLogsExpanded=false;loadAdminLogs()"><option value="">All Statuses</option><option value="success">Success</option><option value="error">Error</option><option value="warning">Warning</option></select>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminLogsExpanded=false;loadAdminLogs()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i></button>
+      </div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table"><thead><tr><th>Timestamp</th><th>Function</th><th>Status</th><th>Triggered By</th><th style="text-align:right">Duration</th><th>Details</th></tr></thead>
+        <tbody id="adminLogBody"><tr><td colspan="6" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
+      </div>
+      <div style="text-align:center;padding:12px 0">
+        <button class="btn-ghost" id="adminLogsExpandBtn" onclick="expandAdminLogs()" style="padding:6px 16px;font-size:11px;display:none;align-items:center;gap:6px;margin:0 auto"><i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Load all entries</button>
+      </div>
+    </div>
+
+    <!-- SEND LOG TAB (V3.0 — 8 cols: Timestamp, Partner, Email, Campaign, Template, Status, Replied, Sent By) -->
+    <div id="admin-sends" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
+      <div style="margin-bottom:12px"><button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminSendsExpanded=false;loadAdminSends()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button></div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table"><thead><tr><th>Timestamp</th><th>Partner</th><th>Email</th><th>Campaign</th><th>Template</th><th>Status</th><th style="text-align:center">Replied</th><th>Sent By</th></tr></thead>
+        <tbody id="adminSendBody"><tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Click tab to load…</td></tr></tbody></table>
+      </div>
+      <div style="text-align:center;padding:12px 0">
+        <button class="btn-ghost" id="adminSendsExpandBtn" onclick="expandAdminSends()" style="padding:6px 16px;font-size:11px;display:none;align-items:center;gap:6px;margin:0 auto"><i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Load all entries</button>
+      </div>
+    </div>
+
+    <!-- ACCOUNTS TAB -->
+    <div id="admin-accounts" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <input class="nx-input" id="acctSearch" placeholder="Search accounts…" oninput="renderAdminAccounts()" style="width:220px">
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="loadAdminAccounts()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>
+        <span style="margin-left:auto;font-size:10px;color:var(--ink-4)" id="acctCount"></span>
+      </div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table"><thead><tr><th>Account Name</th><th>Sources</th><th>Status</th><th>Date Added</th><th>Actions</th></tr></thead>
+        <tbody id="adminAcctBody"><tr><td colspan="5" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>

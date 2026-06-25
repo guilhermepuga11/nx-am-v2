@@ -1,0 +1,220 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   BID-ASK SUB-VIEW (V3.8 — DRAFT MODE)
+
+   Sibling of Contacts (under Partners) and Campaigns (under Outreach), but
+   sits under Cockpit. Read-only table view of the team's Bid-Ask data.
+
+   Data source: getBidAskData(team) → backend reads the per-team prefixed
+   tab from BIDASK_SHEET_ID. Backend returns headers + rows verbatim so the
+   schema can evolve in the source sheet without frontend redeploys.
+
+   Three render states:
+     1. Loading        → skeleton
+     2. Empty (draft)  → "Bid-Ask data coming soon" placeholder
+     3. Populated      → sortable table
+
+   Lazy-loaded on first switchView('bidask'). Cached client-side per session
+   (bidaskState.lastFetchTeam) so re-entering the view doesn't refetch.
+═══════════════════════════════════════════════════════════════════════════ */
+
+var bidaskState = {
+  loading: false,
+  data: null,            // { headers, rows, ... } from backend
+  lastFetchTeam: null,   // refetch when team switches
+  sortColIdx: -1,        // -1 = no sort (use sheet order)
+  sortAsc: true,
+  filterQuery: ''
+};
+
+function initBidAskView() {
+  var host = document.getElementById('view-bidask');
+  if (!host) return;
+
+  // Skip refetch when already loaded for this team
+  if (bidaskState.data && bidaskState.lastFetchTeam === _userTeam) {
+    renderBidAskView();
+    return;
+  }
+
+  host.innerHTML = bidaskShellHtml_();
+  loadBidAskData();
+  refreshIcons();
+}
+
+function bidaskShellHtml_() {
+  return ''
+    + '<div class="filter-bar" style="justify-content:space-between;padding:10px 14px">'
+      + '<div style="display:flex;align-items:center;gap:10px">'
+        + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Bid-Ask Data</span>'
+        + '<input class="nx-input" id="baSearchInput" placeholder="Search…" oninput="bidaskState.filterQuery=this.value.toLowerCase();renderBidAskTable()" style="width:220px;font-size:11px;padding:5px 10px">'
+        + '<span style="font-size:10px;color:var(--ink-4)" id="baCount">—</span>'
+        + '<span id="baStatusBadge" style="display:none;font-size:8px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:#fffbeb;color:#b45309;border:1px solid #fde68a;padding:2px 8px;border-radius:99px">Draft</span>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:8px">'
+        + '<button class="btn-ghost" onclick="loadBidAskData()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>'
+      + '</div>'
+    + '</div>'
+    + '<div id="baViewport" style="flex:1;overflow:auto;background:var(--bg);padding:14px">'
+      + '<div class="section-card" style="padding:0;overflow:hidden;margin:0">'
+        + '<div id="baTableWrap" style="overflow:auto;max-height:calc(100vh - 180px)">'
+          + '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:12px">Loading Bid-Ask data…</div>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+}
+
+function loadBidAskData() {
+  bidaskState.loading = true;
+  var wrap = document.getElementById('baTableWrap');
+  if (wrap) wrap.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:12px"><i data-lucide="loader-2" class="spin" style="width:14px;height:14px;vertical-align:middle"></i> Loading Bid-Ask data…</div>';
+  refreshIcons();
+
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (!useGAS) {
+    bidaskState.loading = false;
+    bidaskState.data = { headers: [], rows: [], empty: true, teamName: _userTeam || '' };
+    bidaskState.lastFetchTeam = _userTeam;
+    renderBidAskView();
+    return;
+  }
+  google.script.run
+    .withSuccessHandler(function(d) {
+      bidaskState.loading = false;
+      bidaskState.data = d || { headers: [], rows: [], empty: true };
+      bidaskState.lastFetchTeam = _userTeam;
+      renderBidAskView();
+    })
+    .withFailureHandler(function(e) {
+      bidaskState.loading = false;
+      bidaskState.data = { headers: [], rows: [], empty: true, error: (e && e.message) || String(e) };
+      bidaskState.lastFetchTeam = _userTeam;
+      renderBidAskView();
+    })
+    .getBidAskData(_userTeam);
+}
+
+function renderBidAskView() {
+  // Status pill (Draft when empty)
+  var badge = document.getElementById('baStatusBadge');
+  if (badge) badge.style.display = (bidaskState.data && bidaskState.data.empty) ? 'inline-flex' : 'none';
+  renderBidAskTable();
+}
+
+function renderBidAskTable() {
+  var wrap = document.getElementById('baTableWrap');
+  if (!wrap) return;
+  var d = bidaskState.data;
+  var countEl = document.getElementById('baCount');
+
+  if (!d || (d.empty && (!d.rows || !d.rows.length))) {
+    if (countEl) countEl.textContent = '0 rows';
+    wrap.innerHTML = baEmptyStateHtml_(d);
+    refreshIcons();
+    return;
+  }
+
+  // Apply filter
+  var q = bidaskState.filterQuery || '';
+  var rows = d.rows;
+  if (q) {
+    rows = rows.filter(function(r) {
+      for (var i = 0; i < r.length; i++) {
+        if (String(r[i] == null ? '' : r[i]).toLowerCase().indexOf(q) > -1) return true;
+      }
+      return false;
+    });
+  }
+
+  // Apply sort if user picked one
+  if (bidaskState.sortColIdx >= 0) {
+    var ci = bidaskState.sortColIdx;
+    var asc = bidaskState.sortAsc;
+    rows = rows.slice();  // don't mutate cached source
+    rows.sort(function(a, b) {
+      var av = a[ci], bv = b[ci];
+      var an = (typeof av === 'number');
+      var bn = (typeof bv === 'number');
+      if (an && bn) return asc ? (av - bv) : (bv - av);
+      // ISO date strings sort lexically
+      var as = String(av == null ? '' : av).toLowerCase();
+      var bs = String(bv == null ? '' : bv).toLowerCase();
+      if (as < bs) return asc ? -1 : 1;
+      if (as > bs) return asc ? 1 : -1;
+      return 0;
+    });
+  }
+
+  if (countEl) countEl.textContent = rows.length + (rows.length === 1 ? ' row' : ' rows') +
+                                      (q ? ' (filtered)' : '');
+
+  var headerHtml = '<tr>' + (d.headers || []).map(function(h, i) {
+    var arrow = '';
+    if (bidaskState.sortColIdx === i) {
+      arrow = bidaskState.sortAsc ? ' ↑' : ' ↓';
+    }
+    return '<th onclick="baSortCol(' + i + ')" style="cursor:pointer">' + esc(h || ('Col ' + (i + 1))) + arrow + '</th>';
+  }).join('') + '</tr>';
+
+  var bodyHtml = rows.map(function(r) {
+    return '<tr>' + (d.headers || []).map(function(_, i) {
+      var v = r[i];
+      var disp = baFmtCell_(v);
+      // Right-align numbers
+      var align = (typeof v === 'number') ? 'right' : 'left';
+      return '<td style="text-align:' + align + ';font-variant-numeric:tabular-nums">' + esc(disp) + '</td>';
+    }).join('') + '</tr>';
+  }).join('');
+
+  if (!rows.length) {
+    wrap.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:12px">No rows match the filter.</div>';
+    return;
+  }
+
+  wrap.innerHTML = '<table class="nx-table">'
+    + '<thead>' + headerHtml + '</thead>'
+    + '<tbody>' + bodyHtml + '</tbody>'
+    + '</table>';
+}
+
+function baSortCol(idx) {
+  if (bidaskState.sortColIdx === idx) bidaskState.sortAsc = !bidaskState.sortAsc;
+  else { bidaskState.sortColIdx = idx; bidaskState.sortAsc = true; }
+  renderBidAskTable();
+}
+
+function baFmtCell_(v) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number') {
+    // Whole number → tabular; decimal → 2 decimals
+    if (Math.floor(v) === v) return v.toLocaleString();
+    return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+  // ISO date detection: 'YYYY-MM-DDTHH:MM:SS...' → date string
+  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v)) {
+    var d = new Date(v);
+    if (!isNaN(d.getTime())) return d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+  return String(v);
+}
+
+function baEmptyStateHtml_(d) {
+  var team = (d && d.teamName) || _userTeam || '';
+  var tab  = (d && d.tabName) || '';
+  var err  = (d && d.error)    || '';
+  return ''
+    + '<div style="padding:60px 40px;text-align:center;color:var(--ink-3)">'
+      + '<div style="display:inline-flex;width:64px;height:64px;border-radius:50%;background:var(--bg);align-items:center;justify-content:center;margin-bottom:16px">'
+        + '<i data-lucide="construction" style="width:30px;height:30px;color:var(--ink-4)"></i>'
+      + '</div>'
+      + '<div style="font-size:16px;font-weight:700;color:var(--ink);letter-spacing:-0.01em;margin-bottom:6px">Bid-Ask data coming soon</div>'
+      + '<div style="font-size:12px;color:var(--ink-3);max-width:480px;margin:0 auto;line-height:1.6">'
+        + 'The source sheet is wired up' + (tab ? ' (looking at <b>' + esc(tab) + '</b>)' : '') + ', '
+        + 'but the data tab for team <b>' + esc(team) + '</b> isn\'t populated yet. '
+        + 'Once it lands, refresh this view.'
+      + '</div>'
+      + (err ? '<div style="margin-top:14px;font-size:10.5px;color:#be123c;background:#fff1f2;border:1px solid #fecdd3;padding:6px 12px;border-radius:6px;display:inline-block">' + esc(err) + '</div>' : '')
+      + '<div style="margin-top:18px"><button class="btn-ghost" onclick="loadBidAskData()" style="padding:6px 14px;font-size:11px"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Check again</button></div>'
+    + '</div>';
+}
+</script>

@@ -1,0 +1,525 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   OUTREACH — ATTACHMENTS (V3.8)
+
+   Self-contained feature that lets a user drop a ZIP of per-partner CSV files
+   onto a drawer and have NEXUS match each file to the right partner, then
+   attach it to that partner's outreach email.
+
+   Design goals — read the log, §11 in the rollout doc, whatever. The rules:
+     1. Raw CSV data NEVER touches a NEXUS-owned sheet, cache, Drive file, or
+        server-side anything. Bytes live in browser memory, get postMessaged
+        straight into the Mail Proxy iframe, which sends them via GmailApp.
+        After send, main-window attachment map is cleared. No persistence.
+     2. Match is filename-based: strip ".csv", normalize with nameKey_(),
+        compare against partner company names. Exact match, case-insensitive.
+     3. The user MUST explicitly confirm the match via a checkbox gate before
+        the audience filter restricts to matched partners only. No auto-send.
+     4. At send time (inside the proxy iframe), per-send verification re-runs
+        the nameKey equality check — if it fails, THAT send is skipped with
+        a loud error, batch continues.
+
+   Transport (details in nx_core.sendViaProxyBatch + proxy.html v7):
+     Main window builds `queue[]` with `attachmentKey` strings (no bytes).
+     Stages via CacheService as today. Iframe loads, postMessages `ready`.
+     Main window responds with per-index attachment postMessages carrying
+     bytes. Iframe waits until every `attachmentKey` has its bytes, then
+     postMessages `go`. Proxy sends with attachments via GmailApp options.
+
+   Failure modes we care about:
+     • Cross-team partner → hard-reject at upload (§user decision 5/a)
+     • Unmatched filename → drop from batch, show in review table
+     • Partner with no file → kept in audience pool but will NOT be fed into
+       this campaign's to-send list (see attachWizFilterAudience_)
+     • Browser navigates away mid-send → bytes lost, remaining sends fail;
+       this is acceptable for v1 (§user decision 4)
+═══════════════════════════════════════════════════════════════════════════ */
+
+// ── JSZip loader ────────────────────────────────────────────────────────────
+// JSZip is ~100 KB gzipped, pulled from cdnjs once on first dropzone open.
+// We cache the promise so repeated opens don't re-download.
+var _jszipPromise = null;
+function _loadJSZip() {
+  if (_jszipPromise) return _jszipPromise;
+  _jszipPromise = new Promise(function(resolve, reject) {
+    if (typeof JSZip !== 'undefined') return resolve(JSZip);
+    var s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    s.onload = function() { resolve(JSZip); };
+    s.onerror = function() { reject(new Error('Failed to load JSZip')); };
+    document.head.appendChild(s);
+  });
+  return _jszipPromise;
+}
+
+// ── Global singleton — attachments state for the active wizard session ──────
+// Cleared on ZIP re-drop, campaign finish, or explicit wizAttachments.clear().
+// Reads for this are shallow-safe — anything that wants to "check if attachments
+// are active" just reads wizAttachments.confirmed + .byPartnerKey.size.
+var wizAttachments = {
+  byPartnerKey: new Map(),   // nameKey(merchant) → { filename, mime, bytes:Uint8Array, partnerRow }
+  manifest: [],              // [{ filename, merchantKey, status: 'matched'|'unmatched'|'crossteam', partnerRow?, partnerName?, partnerTeam? }]
+  confirmed: false,          // set true by the "I reviewed this" checkbox
+  batchName: ''              // derived from ZIP filename, shown in UI for context
+};
+
+function attachWizHasActive() {
+  return wizAttachments.confirmed && wizAttachments.byPartnerKey.size > 0;
+}
+
+function attachWizClear() {
+  wizAttachments.byPartnerKey = new Map();
+  wizAttachments.manifest = [];
+  wizAttachments.confirmed = false;
+  wizAttachments.batchName = '';
+  // If drawer is open, re-render to reflect cleared state
+  if (document.getElementById('attachDrawer') && document.getElementById('attachDrawer').classList.contains('open')) {
+    attachWizRender_();
+  }
+  // Re-render wizard if we're in it (audience filter depends on this)
+  if (typeof wiz !== 'undefined' && typeof goStep === 'function' && document.getElementById('view-email') &&
+      document.getElementById('view-email').style.display !== 'none') {
+    goStep(wiz.step);
+  }
+  attachWizUpdateBtnBadge_();
+}
+
+// Given a partner row from P[], does this partner have an attachment?
+function attachWizFor(partnerRow) {
+  if (!wizAttachments.confirmed) return null;
+  var p = P.find(function(x) { return x.row === partnerRow; });
+  if (!p) return null;
+  var key = nameKey_(p.company);
+  var entry = wizAttachments.byPartnerKey.get(key);
+  return entry || null;
+}
+
+// Used by wizard step 1 audience filter: restrict to rows that have a match.
+function attachWizMatchedRows() {
+  var rows = [];
+  wizAttachments.byPartnerKey.forEach(function(v) { if (v.partnerRow) rows.push(v.partnerRow); });
+  return rows;
+}
+
+// ── Normalizer — must match the server-side NX.nameKey_ contract ────────────
+// Server: trim + toLowerCase. Filename can have extra junk (trailing .csv,
+// leading/trailing whitespace, capitals). We also collapse repeated spaces.
+function nameKey_(s) {
+  if (!s) return '';
+  return String(s).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// ── Drawer open/close ───────────────────────────────────────────────────────
+function attachWizOpen() {
+  var drw = document.getElementById('attachDrawer');
+  var ov = document.getElementById('attachOverlay');
+  if (!drw || !ov) return;
+  ov.style.display = 'block';
+  drw.classList.add('open');
+  attachWizRender_();
+  refreshIcons();
+}
+
+function attachWizClose() {
+  var drw = document.getElementById('attachDrawer');
+  var ov = document.getElementById('attachOverlay');
+  if (!drw || !ov) return;
+  ov.style.display = 'none';
+  drw.classList.remove('open');
+}
+
+// ── Dropzone handlers ───────────────────────────────────────────────────────
+// Prevent default browser open-file behaviour; pass the first .zip to processor.
+function attachWizDragOver_(e) {
+  e.preventDefault(); e.stopPropagation();
+  var dz = document.getElementById('attachDropzone');
+  if (dz) dz.classList.add('drag-hover');
+}
+function attachWizDragLeave_(e) {
+  e.preventDefault(); e.stopPropagation();
+  var dz = document.getElementById('attachDropzone');
+  if (dz) dz.classList.remove('drag-hover');
+}
+function attachWizDrop_(e) {
+  e.preventDefault(); e.stopPropagation();
+  var dz = document.getElementById('attachDropzone');
+  if (dz) dz.classList.remove('drag-hover');
+  var files = (e.dataTransfer && e.dataTransfer.files) ? e.dataTransfer.files : [];
+  if (!files.length) { showToast('No file detected', 'error'); return; }
+  var f = files[0];
+  if (!/\.zip$/i.test(f.name)) { showToast('Please drop a ZIP file', 'error'); return; }
+  attachWizProcessZip_(f);
+}
+
+function attachWizPickTrigger_() {
+  var inp = document.getElementById('attachFileInput');
+  if (inp) inp.click();
+}
+
+function attachWizPickChange_(e) {
+  var files = e.target.files || [];
+  if (!files.length) return;
+  var f = files[0];
+  if (!/\.zip$/i.test(f.name)) { showToast('Please select a ZIP file', 'error'); return; }
+  attachWizProcessZip_(f);
+}
+
+// ── ZIP processor ──────────────────────────────────────────────────────────
+// Read .csv entries only (skip __MACOSX cruft, .DS_Store, nested dirs).
+// Match each filename to a partner via nameKey_(). Partners not in the
+// current team (team field set from backend) get hard-rejected — user
+// chose option (a) per §user decision 5.
+function attachWizProcessZip_(file) {
+  var statusEl = document.getElementById('attachProcessStatus');
+  if (statusEl) { statusEl.textContent = 'Reading ZIP…'; statusEl.style.color = 'var(--ink-3)'; }
+
+  _loadJSZip().then(function(JSZip) {
+    return JSZip.loadAsync(file);
+  }).then(function(zip) {
+    var tasks = [];
+    var csvEntries = [];
+    zip.forEach(function(path, entry) {
+      // Skip directories, macOS resource forks, .DS_Store, non-CSV
+      if (entry.dir) return;
+      if (path.indexOf('__MACOSX') === 0 || path.indexOf('/__MACOSX') > -1) return;
+      if (/\.DS_Store$/i.test(path)) return;
+      if (!/\.csv$/i.test(path)) return;
+      csvEntries.push({ path: path, entry: entry });
+    });
+
+    if (!csvEntries.length) throw new Error('No .csv files found in ZIP');
+
+    if (statusEl) statusEl.textContent = 'Extracting ' + csvEntries.length + ' files…';
+
+    csvEntries.forEach(function(ce) {
+      tasks.push(ce.entry.async('uint8array').then(function(bytes) {
+        // Filename sans path, sans extension, normalized
+        var basename = ce.path.split('/').pop();
+        var merchant = basename.replace(/\.csv$/i, '');
+        return {
+          filename: basename,
+          merchantKey: nameKey_(merchant),
+          merchantRaw: merchant,
+          bytes: bytes
+        };
+      }));
+    });
+
+    return Promise.all(tasks);
+  }).then(function(extracted) {
+    wizAttachments.batchName = file.name.replace(/\.zip$/i, '');
+    attachWizMatch_(extracted);
+    if (statusEl) statusEl.textContent = '';
+    attachWizRender_();
+  }).catch(function(err) {
+    if (statusEl) { statusEl.textContent = 'Error: ' + (err.message || err); statusEl.style.color = '#dc2626'; }
+    showToast('ZIP error: ' + (err.message || err), 'error');
+  });
+}
+
+// ── Matcher — map extracted files to P[] partner rows ──────────────────────
+// Builds wizAttachments.manifest (for review UI) and wizAttachments.byPartnerKey
+// (the map that send time will consume). Because we're cross-team-rejecting,
+// byPartnerKey only ever contains partners the current user legitimately owns.
+function attachWizMatch_(extracted) {
+  wizAttachments.byPartnerKey = new Map();
+  wizAttachments.confirmed = false;  // re-dropping always resets confirmation
+  var manifest = [];
+
+  // Build a lookup of all partners in the CURRENT team (P[] is team-scoped already).
+  // The backend scopes P by team at data load — so if a file matches a partner in
+  // P, that partner IS in this user's team. Cross-team rejection is therefore
+  // handled implicitly: any file for a partner outside the team finds no match
+  // in P and gets flagged 'unmatched'. From the user's perspective: "file with
+  // a merchant name I don't own shows up as unmatched". Good enough and avoids
+  // an explicit team-roster lookup.
+
+  var pByKey = {};
+  P.forEach(function(p) {
+    if (!p || !p.company) return;
+    pByKey[nameKey_(p.company)] = p;
+  });
+
+  extracted.forEach(function(f) {
+    var match = pByKey[f.merchantKey];
+    if (match) {
+      wizAttachments.byPartnerKey.set(f.merchantKey, {
+        filename: f.filename,
+        mime: 'text/csv',
+        bytes: f.bytes,
+        partnerRow: match.row,
+        partnerName: match.company
+      });
+      manifest.push({
+        filename: f.filename,
+        merchantKey: f.merchantKey,
+        merchantRaw: f.merchantRaw,
+        bytes: f.bytes.length,
+        status: 'matched',
+        partnerRow: match.row,
+        partnerName: match.company
+      });
+    } else {
+      manifest.push({
+        filename: f.filename,
+        merchantKey: f.merchantKey,
+        merchantRaw: f.merchantRaw,
+        bytes: f.bytes.length,
+        status: 'unmatched'
+      });
+    }
+  });
+
+  manifest.sort(function(a, b) {
+    // Matched first, then unmatched; alpha within each group
+    if (a.status !== b.status) return a.status === 'matched' ? -1 : 1;
+    return a.filename.localeCompare(b.filename);
+  });
+
+  wizAttachments.manifest = manifest;
+}
+
+// ── Drawer render ───────────────────────────────────────────────────────────
+function attachWizRender_() {
+  var body = document.getElementById('attachDrawerBody');
+  if (!body) return;
+
+  var matched = wizAttachments.manifest.filter(function(x) { return x.status === 'matched'; });
+  var unmatched = wizAttachments.manifest.filter(function(x) { return x.status === 'unmatched'; });
+  var totalBytes = wizAttachments.manifest.reduce(function(s, x) { return s + x.bytes; }, 0);
+
+  var summary = '';
+  if (wizAttachments.manifest.length) {
+    summary = '<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">'
+      + '<span style="background:#dcfce7;color:#15803d;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:700">✓ ' + matched.length + ' matched</span>'
+      + (unmatched.length ? '<span style="background:#fee2e2;color:#dc2626;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:700">✗ ' + unmatched.length + ' unmatched</span>' : '')
+      + '<span style="font-size:10px;color:var(--ink-4)">' + _fmtBytes_(totalBytes) + ' total · from ' + esc(wizAttachments.batchName || 'ZIP') + '</span>'
+      + '<button onclick="attachWizClear()" style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:5px;padding:3px 9px;cursor:pointer;font-size:10px;color:var(--ink-3);font-family:inherit">Clear all</button>'
+      + '</div>';
+  }
+
+  var dropzone = '<div id="attachDropzone" ondragover="attachWizDragOver_(event)" ondragleave="attachWizDragLeave_(event)" ondrop="attachWizDrop_(event)" '
+    + 'style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;transition:all 0.15s;background:var(--bg)" onclick="attachWizPickTrigger_()">'
+    + '<input type="file" id="attachFileInput" accept=".zip" style="display:none" onchange="attachWizPickChange_(event)">'
+    + '<div style="font-size:28px;margin-bottom:6px">📎</div>'
+    + '<div style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:4px">Drop ZIP of partner CSVs</div>'
+    + '<div style="font-size:10px;color:var(--ink-4);line-height:1.5">'
+      + 'Filename format: <code style="background:var(--surface);padding:1px 5px;border-radius:3px">partner_name.csv</code><br>'
+      + 'Match is case-insensitive on the partner name'
+    + '</div>'
+    + '<div id="attachProcessStatus" style="margin-top:10px;font-size:10px;font-weight:600"></div>'
+    + '</div>';
+
+  var table = '';
+  if (wizAttachments.manifest.length) {
+    table = '<div style="margin-top:14px;border:1px solid var(--border);border-radius:8px;overflow:hidden">'
+      + '<div style="display:grid;grid-template-columns:24px 1.4fr 1fr 60px;gap:8px;padding:8px 12px;background:var(--bg);border-bottom:1px solid var(--border);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--ink-4)">'
+      + '<span></span><span>File</span><span>→ Partner</span><span style="text-align:right">Size</span>'
+      + '</div>'
+      + '<div style="max-height:260px;overflow-y:auto">'
+      + wizAttachments.manifest.map(function(m) {
+          var icon, color, partnerCol;
+          if (m.status === 'matched') {
+            icon = '✓'; color = '#15803d';
+            partnerCol = '<span style="color:var(--ink);font-weight:500">' + esc(m.partnerName) + '</span>';
+          } else {
+            icon = '✗'; color = '#dc2626';
+            partnerCol = '<span style="color:var(--ink-4);font-style:italic">no match in your partners</span>';
+          }
+          return '<div style="display:grid;grid-template-columns:24px 1.4fr 1fr 60px;gap:8px;padding:6px 12px;border-bottom:1px solid var(--border);font-size:11px;align-items:center">'
+            + '<span style="color:' + color + ';font-weight:700;text-align:center">' + icon + '</span>'
+            + '<span style="color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + esc(m.filename) + '">' + esc(m.filename) + '</span>'
+            + '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + partnerCol + '</span>'
+            + '<span style="text-align:right;color:var(--ink-3);font-variant-numeric:tabular-nums;font-size:10px">' + _fmtBytes_(m.bytes) + '</span>'
+            + '</div>';
+        }).join('')
+      + '</div></div>';
+
+    if (unmatched.length) {
+      table += '<div style="margin-top:8px;padding:8px 12px;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;font-size:10px;color:#92400e;line-height:1.5">'
+        + '<strong>' + unmatched.length + ' file' + (unmatched.length === 1 ? '' : 's') + ' will be skipped.</strong> '
+        + 'This usually means the partner isn\'t in your team, or the filename doesn\'t exactly match a partner name. '
+        + 'Check the filenames, or confirm the partner is actually in your team list.'
+        + '</div>';
+    }
+
+    var confirmBlock = '<div style="margin-top:14px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px">'
+      + '<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;user-select:none">'
+      + '<input type="checkbox" id="attachConfirmBox" ' + (wizAttachments.confirmed ? 'checked' : '') + ' onchange="attachWizSetConfirmed_(this.checked)" style="margin-top:2px;accent-color:var(--ink);width:14px;height:14px">'
+      + '<div>'
+        + '<div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:2px">I reviewed ' + matched.length + ' match' + (matched.length === 1 ? '' : 'es') + '</div>'
+        + '<div style="font-size:10px;color:var(--ink-3);line-height:1.5">'
+          + 'When checked, the outreach audience filter restricts to partners with an attached file. '
+          + 'Every send verifies again at dispatch that the filename matches the recipient partner name.'
+        + '</div>'
+      + '</div></label>'
+      + '</div>';
+
+    var closeBtn = '<button onclick="attachWizClose()" style="margin-top:14px;width:100%;padding:10px 16px;background:var(--ink);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:0.02em">Done</button>';
+
+    body.innerHTML = summary + dropzone + table + confirmBlock + closeBtn;
+  } else {
+    body.innerHTML = summary + dropzone;
+  }
+
+  attachWizUpdateBtnBadge_();
+}
+
+function attachWizSetConfirmed_(v) {
+  wizAttachments.confirmed = !!v;
+  // V3.8 — When activating, prune any previously-selected audience rows that
+  // don't have an attachment. Prevents "I selected 100 partners yesterday,
+  // dropped a ZIP with 30 today, and the wizard still shows 100 selected
+  // even though 70 have no file."
+  if (v && typeof wiz !== 'undefined' && wiz.audience && wiz.audience.selectedRows) {
+    var matched = new Set();
+    wizAttachments.byPartnerKey.forEach(function(entry) {
+      if (entry.partnerRow !== undefined) matched.add(entry.partnerRow);
+    });
+    var pruned = new Set();
+    wiz.audience.selectedRows.forEach(function(row) { if (matched.has(row)) pruned.add(row); });
+    wiz.audience.selectedRows = pruned;
+    // Keep the legacy alias in sync (several surfaces read emailState.selectedRows)
+    if (typeof emailState !== 'undefined') emailState.selectedRows = pruned;
+  }
+  // Re-render wizard audience / preview if visible — they should now honor the filter
+  if (typeof wiz !== 'undefined' && typeof goStep === 'function' &&
+      document.getElementById('view-email') &&
+      document.getElementById('view-email').style.display !== 'none') {
+    goStep(wiz.step);
+  }
+  attachWizUpdateBtnBadge_();
+}
+
+// Toolbar button badge — shows "N" when attachments are locked in
+function attachWizUpdateBtnBadge_() {
+  var badge = document.getElementById('attachBtnBadge');
+  if (!badge) return;
+  if (attachWizHasActive()) {
+    badge.textContent = wizAttachments.byPartnerKey.size;
+    badge.style.display = 'inline-flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function _fmtBytes_(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+
+// ── Queue enrichment helper — called by wizard's send step ─────────────────
+// Takes the queue the wizard would have sent, adds `attachmentKey` per item
+// when an attachment is matched. Returns { queue, attachmentsByIndex } where
+// attachmentsByIndex maps queue index → { filename, mime, base64 }.
+// base64 encoding happens here, once, at send-prep time — keeps everything
+// byte-transparent for the rest of the pipeline.
+function attachWizEnrichQueue_(baseQueue, previews) {
+  if (!attachWizHasActive()) return { queue: baseQueue, attachmentsByIndex: null };
+  var out = [];
+  var attachments = {};
+  for (var i = 0; i < baseQueue.length; i++) {
+    var item = baseQueue[i];
+    var preview = previews[i] || {};
+    var key = nameKey_(preview.partnerName || '');
+    var att = wizAttachments.byPartnerKey.get(key);
+    var enriched = Object.assign({}, item);
+    if (att) {
+      enriched.attachmentKey = key;
+      attachments[i] = {
+        filename: att.filename,
+        mime: att.mime,
+        base64: _bytesToBase64_(att.bytes)
+      };
+    }
+    out.push(enriched);
+  }
+  return { queue: out, attachmentsByIndex: attachments };
+}
+
+// Uint8Array → base64. Chunked to avoid "maximum call stack" on large files
+// (apply() blows up around 100k args; 8KB chunks are safe).
+function _bytesToBase64_(bytes) {
+  var CHUNK = 0x8000;
+  var out = '';
+  for (var i = 0; i < bytes.length; i += CHUNK) {
+    out += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(out);
+}
+</script>
+
+<style>
+/* Drawer + overlay. Mirrors the Partner drawer styling intentionally so the
+   UX feels consistent — same slide-in, same overlay opacity, same close-on-
+   overlay-click behaviour. */
+#attachOverlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 9998;
+  animation: attachFade 0.15s ease;
+}
+@keyframes attachFade { from { opacity: 0; } to { opacity: 1; } }
+
+#attachDrawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 480px;
+  max-width: 92vw;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.12);
+  transform: translateX(100%);
+  transition: transform 0.2s ease;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#attachDrawer.open { transform: translateX(0); }
+
+#attachDropzone.drag-hover {
+  border-color: var(--ink) !important;
+  background: var(--surface) !important;
+}
+
+/* The toolbar button badge styling */
+#wizBtnAttach { position: relative; }
+#attachBtnBadge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: #16a34a;
+  color: #fff;
+  border-radius: 99px;
+  font-size: 9px;
+  font-weight: 700;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+</style>
+
+<!-- Drawer DOM — appended to body by the include. Kept outside wizard step
+     containers so it remains accessible from any step (or even outside the
+     wizard — rare but cheap). -->
+<div id="attachOverlay" onclick="attachWizClose()"></div>
+<div id="attachDrawer">
+  <div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+    <div>
+      <div style="font-size:14px;font-weight:700;color:var(--ink);letter-spacing:-0.01em">Attach files</div>
+      <div style="font-size:10px;color:var(--ink-4);margin-top:2px">One CSV per partner · matched by filename</div>
+    </div>
+    <button onclick="attachWizClose()" style="background:none;border:none;cursor:pointer;padding:4px;color:var(--ink-3);display:flex;align-items:center;justify-content:center" aria-label="Close">
+      <i data-lucide="x" style="width:18px;height:18px"></i>
+    </button>
+  </div>
+  <div id="attachDrawerBody" style="flex:1;overflow-y:auto;padding:16px"></div>
+</div>
