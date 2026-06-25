@@ -1,1335 +1,525 @@
 <script>
 /* ═══════════════════════════════════════════════════════════════════════════
-   OUTREACH — V3.0 4-step wizard
-     Step 1 Audience  → pick partners from CRM (insight filter + manual)
-     Step 2 Template  → built-in card grid OR Custom (Google Doc + Sheet)
-     Step 3 Preview   → per-recipient fully-resolved subject/body, unresolved
-                        placeholders flagged — can't advance until fixed/skipped
-     Step 4 Confirm   → "Send N emails as [shared/personal]" + progress bar
-   Sends land in the 14-col Send Log (V3.0 schema) with a campaignId, so the
-   Campaigns Dashboard can group them.
+   OUTREACH — ATTACHMENTS (V3.8)
+
+   Self-contained feature that lets a user drop a ZIP of per-partner CSV files
+   onto a drawer and have NEXUS match each file to the right partner, then
+   attach it to that partner's outreach email.
+
+   Design goals — read the log, §11 in the rollout doc, whatever. The rules:
+     1. Raw CSV data NEVER touches a NEXUS-owned sheet, cache, Drive file, or
+        server-side anything. Bytes live in browser memory, get postMessaged
+        straight into the Mail Proxy iframe, which sends them via GmailApp.
+        After send, main-window attachment map is cleared. No persistence.
+     2. Match is filename-based: strip ".csv", normalize with nameKey_(),
+        compare against partner company names. Exact match, case-insensitive.
+     3. The user MUST explicitly confirm the match via a checkbox gate before
+        the audience filter restricts to matched partners only. No auto-send.
+     4. At send time (inside the proxy iframe), per-send verification re-runs
+        the nameKey equality check — if it fails, THAT send is skipped with
+        a loud error, batch continues.
+
+   Transport (details in nx_core.sendViaProxyBatch + proxy.html v7):
+     Main window builds `queue[]` with `attachmentKey` strings (no bytes).
+     Stages via CacheService as today. Iframe loads, postMessages `ready`.
+     Main window responds with per-index attachment postMessages carrying
+     bytes. Iframe waits until every `attachmentKey` has its bytes, then
+     postMessages `go`. Proxy sends with attachments via GmailApp options.
+
+   Failure modes we care about:
+     • Cross-team partner → hard-reject at upload (§user decision 5/a)
+     • Unmatched filename → drop from batch, show in review table
+     • Partner with no file → kept in audience pool but will NOT be fed into
+       this campaign's to-send list (see attachWizFilterAudience_)
+     • Browser navigates away mid-send → bytes lost, remaining sends fail;
+       this is acceptable for v1 (§user decision 4)
 ═══════════════════════════════════════════════════════════════════════════ */
 
-// ── Wizard state ────────────────────────────────────────────────────────────
-var wiz = {
-  step: 1,                               // 1..4
-  audience: { selectedRows: new Set(),   // Set<row> from P
-              filters: { insight: '', model: '', country: '', stage: '', search: '' },
-              useStoreGroup: false },
-  template: { source: 'builtin',         // 'builtin' | 'custom'
-              key: 'General',            // built-in key when source='builtin'
-              customDoc: '',             // GDoc URL
-              customSheet: '',           // optional GSheet URL
-              customSubject: '',         // optional subject override
-              fetchedDoc: null },        // { subject, body, placeholders } once fetched
-  previews: [],                          // [{ email, partnerName, partnerRow, subject, body, unresolved }]
-  previewIdx: 0,
-  skipUnresolved: false,
-  campaignName: '',
-  runningCampaignId: '',
-  sending: false,
-  customTemplates: []                    // last 5 from UserProperties
+// ── JSZip loader ────────────────────────────────────────────────────────────
+// JSZip is ~100 KB gzipped, pulled from cdnjs once on first dropzone open.
+// We cache the promise so repeated opens don't re-download.
+var _jszipPromise = null;
+function _loadJSZip() {
+  if (_jszipPromise) return _jszipPromise;
+  _jszipPromise = new Promise(function(resolve, reject) {
+    if (typeof JSZip !== 'undefined') return resolve(JSZip);
+    var s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    s.onload = function() { resolve(JSZip); };
+    s.onerror = function() { reject(new Error('Failed to load JSZip')); };
+    document.head.appendChild(s);
+  });
+  return _jszipPromise;
+}
+
+// ── Global singleton — attachments state for the active wizard session ──────
+// Cleared on ZIP re-drop, campaign finish, or explicit wizAttachments.clear().
+// Reads for this are shallow-safe — anything that wants to "check if attachments
+// are active" just reads wizAttachments.confirmed + .byPartnerKey.size.
+var wizAttachments = {
+  byPartnerKey: new Map(),   // nameKey(merchant) → { filename, mime, bytes:Uint8Array, partnerRow }
+  manifest: [],              // [{ filename, merchantKey, status: 'matched'|'unmatched'|'crossteam', partnerRow?, partnerName?, partnerTeam? }]
+  confirmed: false,          // set true by the "I reviewed this" checkbox
+  batchName: ''              // derived from ZIP filename, shown in UI for context
 };
 
-// ── Backwards-compat aliases (used by drawer's "Email" button + cockpit) ────
-// Some legacy call sites still reference emailState.selectedRows / emailThisPartner.
-// We keep the shape so other views don't break.
-var emailState = { templateKey: 'General', selectedRows: wiz.audience.selectedRows, activeTab: 'recipients', sendLog: [], sending: false };
+function attachWizHasActive() {
+  return wizAttachments.confirmed && wizAttachments.byPartnerKey.size > 0;
+}
 
-function initEmailView() {
-  wiz.sending = false;
-  if (!wiz.audience.selectedRows.size) wiz.step = 1;
-  // Reload custom templates (UserProperties)
-  if (typeof google !== 'undefined' && google.script && google.script.run) {
-    google.script.run.withSuccessHandler(function(list) {
-      wiz.customTemplates = Array.isArray(list) ? list : [];
-      if (wiz.step === 2) renderWizStep2();
-    }).withFailureHandler(function() {
-      wiz.customTemplates = [];
-    }).getCustomTemplates();
+function attachWizClear() {
+  wizAttachments.byPartnerKey = new Map();
+  wizAttachments.manifest = [];
+  wizAttachments.confirmed = false;
+  wizAttachments.batchName = '';
+  // If drawer is open, re-render to reflect cleared state
+  if (document.getElementById('attachDrawer') && document.getElementById('attachDrawer').classList.contains('open')) {
+    attachWizRender_();
   }
-  goStep(wiz.step);
-}
-
-// Called from cockpit when user clicks "Email filtered" — seeds audience + template.
-function wizPresetFromFilter(rows, suggestedTemplateKey) {
-  wiz.audience.selectedRows = new Set(rows);
-  emailState.selectedRows = wiz.audience.selectedRows;
-  if (suggestedTemplateKey && EMAIL_TEMPLATES && EMAIL_TEMPLATES[suggestedTemplateKey]) {
-    wiz.template.source = 'builtin';
-    wiz.template.key = suggestedTemplateKey;
+  // Re-render wizard if we're in it (audience filter depends on this)
+  if (typeof wiz !== 'undefined' && typeof goStep === 'function' && document.getElementById('view-email') &&
+      document.getElementById('view-email').style.display !== 'none') {
+    goStep(wiz.step);
   }
-  wiz.step = 1;
+  attachWizUpdateBtnBadge_();
 }
 
-// Called from drawer "Email" button
-function emailThisPartner(deal) {
-  if (!deal) return;
-  wiz.audience.selectedRows = new Set([deal.row]);
-  emailState.selectedRows = wiz.audience.selectedRows;
-  closeDetail();
-  wiz.step = 1;
-  switchView('email');
+// Given a partner row from P[], does this partner have an attachment?
+function attachWizFor(partnerRow) {
+  if (!wizAttachments.confirmed) return null;
+  var p = P.find(function(x) { return x.row === partnerRow; });
+  if (!p) return null;
+  var key = nameKey_(p.company);
+  var entry = wizAttachments.byPartnerKey.get(key);
+  return entry || null;
 }
 
-// Called from drawer's "Email" multi-select on contacts
-function mailSelectedContacts() {
-  // drawer manages its own selection; we just make sure state is fresh
-  wiz.step = 1;
-  switchView('email');
+// Used by wizard step 1 audience filter: restrict to rows that have a match.
+function attachWizMatchedRows() {
+  var rows = [];
+  wizAttachments.byPartnerKey.forEach(function(v) { if (v.partnerRow) rows.push(v.partnerRow); });
+  return rows;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   STEP ORCHESTRATION
-═══════════════════════════════════════════════════════════════════════════ */
-function goStep(n) {
-  wiz.step = n;
-  // Show/hide step containers
-  for (var i = 1; i <= 4; i++) {
-    var el = document.getElementById('wiz-step-' + i);
-    if (el) el.style.display = (i === n) ? 'flex' : 'none';
-  }
-  renderStepIndicator();
-  var back = document.getElementById('wizBtnBack');
-  var nextLabel = document.getElementById('wizBtnNextLabel');
-  if (back) back.style.display = n > 1 ? 'inline-flex' : 'none';
-  if (nextLabel) nextLabel.textContent = (n === 3) ? 'Continue' : (n === 4 ? 'Send' : 'Next');
-  // Render step content
-  if (n === 1) renderWizStep1();
-  else if (n === 2) renderWizStep2();
-  else if (n === 3) renderWizStep3();
-  else if (n === 4) renderWizStep4();
-  // Selected count in topbar
-  var selCount = document.getElementById('emailSelCount');
-  if (selCount) selCount.textContent = wiz.audience.selectedRows.size + ' selected';
+// ── Normalizer — must match the server-side NX.nameKey_ contract ────────────
+// Server: trim + toLowerCase. Filename can have extra junk (trailing .csv,
+// leading/trailing whitespace, capitals). We also collapse repeated spaces.
+function nameKey_(s) {
+  if (!s) return '';
+  return String(s).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// ── Drawer open/close ───────────────────────────────────────────────────────
+function attachWizOpen() {
+  var drw = document.getElementById('attachDrawer');
+  var ov = document.getElementById('attachOverlay');
+  if (!drw || !ov) return;
+  ov.style.display = 'block';
+  drw.classList.add('open');
+  attachWizRender_();
   refreshIcons();
 }
 
-function wizNext() {
-  if (wiz.step === 1) {
-    if (wiz.audience.selectedRows.size === 0) { showToast('Select at least one partner', 'error'); return; }
-    goStep(2);
-  } else if (wiz.step === 2) {
-    if (wiz.template.source === 'custom' && !wiz.template.customDoc) {
-      showToast('Paste a Google Doc URL', 'error'); return;
-    }
-    loadPreviewsAndAdvance();
-  } else if (wiz.step === 3) {
-    // Continue to Confirm only if every preview is resolved OR skipUnresolved checked
-    var blocked = wiz.previews.filter(function(p) { return p.unresolved && p.unresolved.length; });
-    if (blocked.length && !wiz.skipUnresolved) {
-      showToast(blocked.length + ' recipient' + (blocked.length === 1 ? ' has' : 's have') + ' unresolved placeholders. Check "Skip unresolved" to continue.', 'error');
-      return;
-    }
-    goStep(4);
-  } else if (wiz.step === 4) {
-    launchCampaign();
-  }
+function attachWizClose() {
+  var drw = document.getElementById('attachDrawer');
+  var ov = document.getElementById('attachOverlay');
+  if (!drw || !ov) return;
+  ov.style.display = 'none';
+  drw.classList.remove('open');
 }
 
-function wizBack() {
-  if (wiz.step > 1 && !wiz.sending) goStep(wiz.step - 1);
+// ── Dropzone handlers ───────────────────────────────────────────────────────
+// Prevent default browser open-file behaviour; pass the first .zip to processor.
+function attachWizDragOver_(e) {
+  e.preventDefault(); e.stopPropagation();
+  var dz = document.getElementById('attachDropzone');
+  if (dz) dz.classList.add('drag-hover');
+}
+function attachWizDragLeave_(e) {
+  e.preventDefault(); e.stopPropagation();
+  var dz = document.getElementById('attachDropzone');
+  if (dz) dz.classList.remove('drag-hover');
+}
+function attachWizDrop_(e) {
+  e.preventDefault(); e.stopPropagation();
+  var dz = document.getElementById('attachDropzone');
+  if (dz) dz.classList.remove('drag-hover');
+  var files = (e.dataTransfer && e.dataTransfer.files) ? e.dataTransfer.files : [];
+  if (!files.length) { showToast('No file detected', 'error'); return; }
+  var f = files[0];
+  if (!/\.zip$/i.test(f.name)) { showToast('Please drop a ZIP file', 'error'); return; }
+  attachWizProcessZip_(f);
 }
 
-function renderStepIndicator() {
-  var steps = [
-    { n: 1, label: 'Audience' },
-    { n: 2, label: 'Template' },
-    { n: 3, label: 'Preview'  },
-    { n: 4, label: 'Confirm'  }
-  ];
-  var el = document.getElementById('wizStepIndicator');
-  if (!el) return;
-  var html = '';
-  steps.forEach(function(s, i) {
-    var isActive = s.n === wiz.step;
-    var isDone = s.n < wiz.step;
-    var cls = isActive ? 'active' : (isDone ? 'done' : '');
-    // Clickable: current step (no-op), any prior step (jump back). Forward jumps
-    // are gated by wizJumpToStep_ so validation still runs on the "next" boundary.
-    var tabbable = !wiz.sending;
-    var clickAttr = tabbable ? ' onclick="wizJumpToStep_(' + s.n + ')"' : '';
-    var cursor = tabbable ? 'cursor:pointer' : 'cursor:default';
-    html += '<div class="wiz-step-pill ' + cls + '" style="' + cursor + '" role="button" tabindex="0"' + clickAttr + '><span class="wiz-pill-num">' + s.n + '</span>' + s.label + '</div>';
-    if (i < steps.length - 1) html += '<div class="wiz-step-sep"></div>';
-  });
-  el.innerHTML = html;
+function attachWizPickTrigger_() {
+  var inp = document.getElementById('attachFileInput');
+  if (inp) inp.click();
 }
 
-// V3.3 — phase pills are clickable. Backward jumps are free; forward jumps run
-// the same gates as the Next button (can't skip validation). Mid-send, navigation
-// is locked to avoid torpedoing an in-flight campaign.
-function wizJumpToStep_(target) {
-  if (wiz.sending) return;
-  if (target === wiz.step) return;
-  // Backward: always allowed
-  if (target < wiz.step) { goStep(target); return; }
-  // Forward: replay wizNext() up to target. wizNext already handles each step's
-  // validation and, for step 2, the async preview load (which will land on 3 then
-  // recurse back through here to reach 4 if target is 4).
-  var guard = 0;
-  var tryAdvance = function() {
-    if (wiz.step >= target || guard++ > 6) return;
-    var before = wiz.step;
-    wizNext();
-    // If wizNext succeeded synchronously, loop. Async branches (Step 2 → 3 via
-    // loadPreviewsAndAdvance) will resume naturally when the preview resolves;
-    // if the user wanted Step 4, they can click the pill again once Preview loads.
-    if (wiz.step > before && wiz.step < target) tryAdvance();
-  };
-  tryAdvance();
+function attachWizPickChange_(e) {
+  var files = e.target.files || [];
+  if (!files.length) return;
+  var f = files[0];
+  if (!/\.zip$/i.test(f.name)) { showToast('Please select a ZIP file', 'error'); return; }
+  attachWizProcessZip_(f);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   STEP 1 — AUDIENCE
-═══════════════════════════════════════════════════════════════════════════ */
-function renderWizStep1() {
-  var host = document.getElementById('wiz-step-1');
-  host.style.flexDirection = 'row';
-  host.innerHTML =
-    '<div style="width:280px;flex-shrink:0;border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;overflow:hidden">'
-      + '<div style="padding:14px 18px 10px;border-bottom:1px solid var(--border);flex-shrink:0">'
-        + '<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink);margin-bottom:2px">Filters</div>'
-        + '<div style="font-size:10px;color:var(--ink-4)">Narrow the CRM, then tick partners</div>'
-      + '</div>'
-      + '<div style="flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px">'
-        + filterBlock_('Insight', 'wiz-flt-insight', buildInsightOptions_())
-        + filterBlock_('Model',   'wiz-flt-model',   buildUniqueOptions_('model'))
-        + filterBlock_('Country', 'wiz-flt-country', buildUniqueOptions_('country'))
-        + filterBlock_('Stage',   'wiz-flt-stage',   buildUniqueOptions_('stage'))
-        + '<div><label class="nx-field-label">Search</label><input type="text" class="nx-field-input" id="wiz-flt-search" oninput="applyWizFilters()" placeholder="Partner name…"></div>'
-        + '<div style="padding-top:8px;border-top:1px solid var(--border);display:flex;gap:6px">'
-          + '<button class="btn-ghost" style="flex:1;padding:6px 10px;font-size:11px" onclick="wizSelectAllVisible()">Select all visible</button>'
-          + '<button class="btn-ghost" style="flex:1;padding:6px 10px;font-size:11px" onclick="wizClearSelection()">Clear</button>'
-        + '</div>'
-      + '</div>'
-    + '</div>'
-    + '<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)">'
-      + '<div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface);flex-shrink:0">'
-        + '<div style="display:flex;align-items:center;gap:10px">'
-          + '<span style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink)">Partners</span>'
-          + '<span style="font-size:11px;color:var(--ink-4)" id="wizAudCount">0 visible · 0 selected</span>'
-        + '</div>'
-      + '</div>'
-      + '<div id="wizAudList" style="flex:1;overflow-y:auto;background:var(--surface)"></div>'
-    + '</div>';
-  // Restore saved filters into inputs
-  setIfExists_('wiz-flt-insight', wiz.audience.filters.insight);
-  setIfExists_('wiz-flt-model',   wiz.audience.filters.model);
-  setIfExists_('wiz-flt-country', wiz.audience.filters.country);
-  setIfExists_('wiz-flt-stage',   wiz.audience.filters.stage);
-  setIfExists_('wiz-flt-search',  wiz.audience.filters.search);
-  applyWizFilters();
-}
+// ── ZIP processor ──────────────────────────────────────────────────────────
+// Read .csv entries only (skip __MACOSX cruft, .DS_Store, nested dirs).
+// Match each filename to a partner via nameKey_(). Partners not in the
+// current team (team field set from backend) get hard-rejected — user
+// chose option (a) per §user decision 5.
+function attachWizProcessZip_(file) {
+  var statusEl = document.getElementById('attachProcessStatus');
+  if (statusEl) { statusEl.textContent = 'Reading ZIP…'; statusEl.style.color = 'var(--ink-3)'; }
 
-function filterBlock_(label, id, options) {
-  return '<div><label class="nx-field-label">' + label + '</label>'
-    + '<select class="nx-field-input" id="' + id + '" onchange="applyWizFilters()">'
-    + '<option value="">All</option>'
-    + options.map(function(o) { return '<option value="' + esc(o) + '">' + esc(o) + '</option>'; }).join('')
-    + '</select></div>';
-}
-
-function buildInsightOptions_() {
-  // Driven by INSIGHT_DEFS if defined, else empty
-  var keys = (typeof INSIGHT_DEFS !== 'undefined' && INSIGHT_DEFS.length)
-    ? INSIGHT_DEFS.map(function(d) { return d.key; })
-    : ['No Stock', 'Stock Decline', 'Sales Risk', 'High Offline', 'Low Discounts', 'Heavy Discounter', 'High Growth'];
-  return keys;
-}
-
-function buildUniqueOptions_(field) {
-  var s = new Set();
-  P.forEach(function(d) { if (d[field]) s.add(d[field]); });
-  return Array.from(s).sort();
-}
-
-function setIfExists_(id, val) { var el = document.getElementById(id); if (el && val !== undefined) el.value = val || ''; }
-
-function applyWizFilters() {
-  wiz.audience.filters = {
-    insight: (document.getElementById('wiz-flt-insight') || {}).value || '',
-    model:   (document.getElementById('wiz-flt-model')   || {}).value || '',
-    country: (document.getElementById('wiz-flt-country') || {}).value || '',
-    stage:   (document.getElementById('wiz-flt-stage')   || {}).value || '',
-    search: ((document.getElementById('wiz-flt-search')  || {}).value || '').toLowerCase()
-  };
-  renderWizAudienceList_();
-}
-
-function wizAudienceVisible_() {
-  var f = wiz.audience.filters;
-  // V3.8 — When an attachment batch is locked in, audience is restricted to
-  // the matched-partner set. Prevents showing anyone in the picker who can't
-  // receive a send (they'd have no attachment). The match set is computed
-  // by attachWizMatchedRows() from nx_email_attach.html.
-  var attachLocked = (typeof attachWizHasActive === 'function') && attachWizHasActive();
-  var allowedRowSet = null;
-  if (attachLocked) {
-    var rows = attachWizMatchedRows();
-    allowedRowSet = {};
-    rows.forEach(function(r) { allowedRowSet[r] = true; });
-  }
-  return P.filter(function(d) {
-    if (allowedRowSet && !allowedRowSet[d.row]) return false;
-    if (f.insight && (d.insight_tags || []).indexOf(f.insight) === -1) return false;
-    if (f.model && d.model !== f.model) return false;
-    if (f.country && d.country !== f.country) return false;
-    if (f.stage && d.stage !== f.stage) return false;
-    if (f.search && (d.company || '').toLowerCase().indexOf(f.search) === -1) return false;
-    return true;
-  });
-}
-
-function renderWizAudienceList_() {
-  var list = wizAudienceVisible_();
-  var selected = wiz.audience.selectedRows;
-  // V3.9 — Pin selected partners to the top so the user doesn't have to
-  // scroll a long visible list to confirm what's in their cohort. Stable
-  // sort: selected (alpha) → unselected (alpha by company).
-  list = list.slice().sort(function(a, b) {
-    var as = selected.has(a.row) ? 0 : 1;
-    var bs = selected.has(b.row) ? 0 : 1;
-    if (as !== bs) return as - bs;
-    var ac = String(a.company || '').toLowerCase();
-    var bc = String(b.company || '').toLowerCase();
-    if (ac < bc) return -1;
-    if (ac > bc) return 1;
-    return 0;
-  });
-  // V3.6.2: 1 send = 1 partner. M contacts is informational (these will all be on the To line).
-  var totalContacts = 0;
-  selected.forEach(function(row) {
-    var d = P.find(function(x) { return x.row === row; });
-    if (d) totalContacts += wizPrimaryEmails_(d).length;
-  });
-  var partnerLabel = selected.size + ' partner' + (selected.size === 1 ? '' : 's');
-  var contactExtra = (totalContacts > selected.size)
-    ? ' <span style="color:var(--ink-4);font-size:10px;font-weight:600">(' + totalContacts + ' contacts on To)</span>'
-    : '';
-  document.getElementById('wizAudCount').innerHTML = list.length + ' visible · ' + partnerLabel + contactExtra;
-  document.getElementById('emailSelCount').textContent = selected.size + ' partner' + (selected.size === 1 ? '' : 's');
-  // V3.9 — Visual divider after the last selected row to make the boundary clear.
-  var sawUnselectedBoundary = false;
-  document.getElementById('wizAudList').innerHTML = list.map(function(d, idx) {
-    var checked = selected.has(d.row) ? 'checked' : '';
-    var emails = wizPrimaryEmails_(d);
-    var missing = !emails.length;
-    var emailLabel = missing ? 'No contact email' : (esc(emails[0]) + (emails.length > 1 ? ' <span style="color:var(--ink-4);font-size:10px;font-weight:600">+' + (emails.length - 1) + ' more</span>' : ''));
-    var noStock = d.is_no_stock ? '<span style="background:#f1f5f9;color:#64748b;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase;margin-left:6px">No Stock</span>' : '';
-    // Insert a thin divider before the first unselected row (only if both sides exist).
-    var divider = '';
-    if (!selected.has(d.row) && !sawUnselectedBoundary && selected.size > 0 && idx > 0) {
-      sawUnselectedBoundary = true;
-      divider = '<div style="border-top:1px dashed var(--border);margin:6px 0;font-size:9px;color:var(--ink-4);padding:6px 0 0;text-align:center;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">Not Selected</div>';
-    }
-    return divider + '<div class="wiz-recip" onclick="wizToggleRow(' + d.row + ')">'
-      + '<input type="checkbox" ' + checked + ' onclick="event.stopPropagation();wizToggleRow(' + d.row + ')">'
-      + '<div style="min-width:0;overflow:hidden"><div style="font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(d.company) + noStock + _wizLangPill_(d) + '</div><div style="font-size:10px;color:var(--ink-4)">' + esc(d.country || '') + ' · ' + esc(d.model || '3P') + '</div></div>'
-      + '<div style="min-width:0;overflow:hidden;font-size:10.5px;color:' + (missing ? '#be123c' : 'var(--ink-3)') + '">' + emailLabel + '</div>'
-      + '<div></div>'
-      + '</div>';
-  }).join('') || '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:11px">No partners match these filters.</div>';
-}
-
-// V3.10 — Language pill for audience rows + drawer ribbon. Default EN renders
-// muted; explicit other languages render dark to draw attention to localized
-// recipients (so AM doesn't accidentally pick a template missing their lang).
-function _wizLangPill_(deal) {
-  if (!deal || typeof normalizeLanguage_ !== 'function') return '';
-  var lang = normalizeLanguage_(deal.language);
-  var explicit = deal.language && String(deal.language).trim();
-  var bg = (lang === 'EN' && !explicit) ? 'background:var(--bg);color:var(--ink-4);border:1px solid var(--border)' : 'background:var(--ink);color:#fff';
-  return '<span style="font-size:8.5px;font-weight:700;padding:1px 5px;border-radius:3px;letter-spacing:0.04em;margin-left:6px;' + bg + '" title="' + (NX_LANGUAGE_LABELS[lang] || lang) + '">' + lang + '</span>';
-}
-
-function wizPrimaryEmails_(deal) {
-  // Returns an ARRAY of email strings — all primary contacts of the partner.
-  // V3.1: ALL primaries receive the outreach, not just one.
-  //   1. Prefer every is_primary contact with include_in_crm !== false
-  //   2. If none, fall back to all include_in_crm contacts
-  //   3. If none, fall back to the single CRM email on the partner record
-  if (!deal) return [];
-  var emails = [];
-  if (deal.contacts && deal.contacts.length) {
-    var primaries = deal.contacts.filter(function(c) {
-      return c.is_primary && c.contact_email && c.include_in_crm !== false;
+  _loadJSZip().then(function(JSZip) {
+    return JSZip.loadAsync(file);
+  }).then(function(zip) {
+    var tasks = [];
+    var csvEntries = [];
+    zip.forEach(function(path, entry) {
+      // Skip directories, macOS resource forks, .DS_Store, non-CSV
+      if (entry.dir) return;
+      if (path.indexOf('__MACOSX') === 0 || path.indexOf('/__MACOSX') > -1) return;
+      if (/\.DS_Store$/i.test(path)) return;
+      if (!/\.csv$/i.test(path)) return;
+      csvEntries.push({ path: path, entry: entry });
     });
-    if (primaries.length) {
-      primaries.forEach(function(c) { emails.push(c.contact_email); });
+
+    if (!csvEntries.length) throw new Error('No .csv files found in ZIP');
+
+    if (statusEl) statusEl.textContent = 'Extracting ' + csvEntries.length + ' files…';
+
+    csvEntries.forEach(function(ce) {
+      tasks.push(ce.entry.async('uint8array').then(function(bytes) {
+        // Filename sans path, sans extension, normalized
+        var basename = ce.path.split('/').pop();
+        var merchant = basename.replace(/\.csv$/i, '');
+        return {
+          filename: basename,
+          merchantKey: nameKey_(merchant),
+          merchantRaw: merchant,
+          bytes: bytes
+        };
+      }));
+    });
+
+    return Promise.all(tasks);
+  }).then(function(extracted) {
+    wizAttachments.batchName = file.name.replace(/\.zip$/i, '');
+    attachWizMatch_(extracted);
+    if (statusEl) statusEl.textContent = '';
+    attachWizRender_();
+  }).catch(function(err) {
+    if (statusEl) { statusEl.textContent = 'Error: ' + (err.message || err); statusEl.style.color = '#dc2626'; }
+    showToast('ZIP error: ' + (err.message || err), 'error');
+  });
+}
+
+// ── Matcher — map extracted files to P[] partner rows ──────────────────────
+// Builds wizAttachments.manifest (for review UI) and wizAttachments.byPartnerKey
+// (the map that send time will consume). Because we're cross-team-rejecting,
+// byPartnerKey only ever contains partners the current user legitimately owns.
+function attachWizMatch_(extracted) {
+  wizAttachments.byPartnerKey = new Map();
+  wizAttachments.confirmed = false;  // re-dropping always resets confirmation
+  var manifest = [];
+
+  // Build a lookup of all partners in the CURRENT team (P[] is team-scoped already).
+  // The backend scopes P by team at data load — so if a file matches a partner in
+  // P, that partner IS in this user's team. Cross-team rejection is therefore
+  // handled implicitly: any file for a partner outside the team finds no match
+  // in P and gets flagged 'unmatched'. From the user's perspective: "file with
+  // a merchant name I don't own shows up as unmatched". Good enough and avoids
+  // an explicit team-roster lookup.
+
+  var pByKey = {};
+  P.forEach(function(p) {
+    if (!p || !p.company) return;
+    pByKey[nameKey_(p.company)] = p;
+  });
+
+  extracted.forEach(function(f) {
+    var match = pByKey[f.merchantKey];
+    if (match) {
+      wizAttachments.byPartnerKey.set(f.merchantKey, {
+        filename: f.filename,
+        mime: 'text/csv',
+        bytes: f.bytes,
+        partnerRow: match.row,
+        partnerName: match.company
+      });
+      manifest.push({
+        filename: f.filename,
+        merchantKey: f.merchantKey,
+        merchantRaw: f.merchantRaw,
+        bytes: f.bytes.length,
+        status: 'matched',
+        partnerRow: match.row,
+        partnerName: match.company
+      });
     } else {
-      deal.contacts.filter(function(c) {
-        return c.contact_email && c.include_in_crm !== false;
-      }).forEach(function(c) { emails.push(c.contact_email); });
+      manifest.push({
+        filename: f.filename,
+        merchantKey: f.merchantKey,
+        merchantRaw: f.merchantRaw,
+        bytes: f.bytes.length,
+        status: 'unmatched'
+      });
     }
-  }
-  if (!emails.length && deal.email) emails.push(deal.email);
-  // Dedupe (case-insensitive)
-  var seen = {}, out = [];
-  emails.forEach(function(e) {
-    var key = String(e || '').toLowerCase().trim();
-    if (key && !seen[key]) { seen[key] = true; out.push(e); }
   });
-  return out;
+
+  manifest.sort(function(a, b) {
+    // Matched first, then unmatched; alpha within each group
+    if (a.status !== b.status) return a.status === 'matched' ? -1 : 1;
+    return a.filename.localeCompare(b.filename);
+  });
+
+  wizAttachments.manifest = manifest;
 }
 
-function wizPrimaryEmail_(deal) {
-  // Back-compat single-email helper, used for display in the audience list only.
-  // Returns the first primary email (not the full set).
-  var all = wizPrimaryEmails_(deal);
-  return all.length ? all[0] : '';
-}
+// ── Drawer render ───────────────────────────────────────────────────────────
+function attachWizRender_() {
+  var body = document.getElementById('attachDrawerBody');
+  if (!body) return;
 
-function wizPrimaryEmailLabel_(deal) {
-  // Display label for the audience list. Shows the first email and a "+N more"
-  // hint if there are multiple primary contacts.
-  var all = wizPrimaryEmails_(deal);
-  if (!all.length) return '';
-  if (all.length === 1) return all[0];
-  return all[0] + ' <span style="color:var(--ink-4);font-size:10px;font-weight:600">+' + (all.length - 1) + ' more</span>';
-}
+  var matched = wizAttachments.manifest.filter(function(x) { return x.status === 'matched'; });
+  var unmatched = wizAttachments.manifest.filter(function(x) { return x.status === 'unmatched'; });
+  var totalBytes = wizAttachments.manifest.reduce(function(s, x) { return s + x.bytes; }, 0);
 
-function wizToggleRow(row) {
-  if (wiz.audience.selectedRows.has(row)) wiz.audience.selectedRows.delete(row);
-  else wiz.audience.selectedRows.add(row);
-  emailState.selectedRows = wiz.audience.selectedRows;
-  renderWizAudienceList_();
-}
+  var summary = '';
+  if (wizAttachments.manifest.length) {
+    summary = '<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">'
+      + '<span style="background:#dcfce7;color:#15803d;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:700">✓ ' + matched.length + ' matched</span>'
+      + (unmatched.length ? '<span style="background:#fee2e2;color:#dc2626;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:700">✗ ' + unmatched.length + ' unmatched</span>' : '')
+      + '<span style="font-size:10px;color:var(--ink-4)">' + _fmtBytes_(totalBytes) + ' total · from ' + esc(wizAttachments.batchName || 'ZIP') + '</span>'
+      + '<button onclick="attachWizClear()" style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:5px;padding:3px 9px;cursor:pointer;font-size:10px;color:var(--ink-3);font-family:inherit">Clear all</button>'
+      + '</div>';
+  }
 
-function wizSelectAllVisible() {
-  wizAudienceVisible_().forEach(function(d) { wiz.audience.selectedRows.add(d.row); });
-  emailState.selectedRows = wiz.audience.selectedRows;
-  renderWizAudienceList_();
-}
-
-function wizClearSelection() {
-  wiz.audience.selectedRows.clear();
-  emailState.selectedRows = wiz.audience.selectedRows;
-  renderWizAudienceList_();
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   STEP 2 — TEMPLATE
-═══════════════════════════════════════════════════════════════════════════ */
-function renderWizStep2() {
-  var host = document.getElementById('wiz-step-2');
-  host.style.flexDirection = 'row';
-  host.innerHTML =
-    '<div style="width:50%;border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;overflow:hidden">'
-      + '<div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">'
-        + '<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink)">Templates</div>'
-        + '<div style="display:flex;gap:0;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:2px">'
-          + '<button class="filter-tag-btn ' + (wiz.template.source === 'builtin' ? 'active' : '') + '" style="font-size:10px;padding:3px 10px;border:none;border-radius:5px" onclick="wizSetTemplateSource(\'builtin\')">Built-in</button>'
-          + '<button class="filter-tag-btn ' + (wiz.template.source === 'custom' ? 'active' : '') + '" style="font-size:10px;padding:3px 10px;border:none;border-radius:5px" onclick="wizSetTemplateSource(\'custom\')">Custom (Google Doc)</button>'
-        + '</div>'
-      + '</div>'
-      + '<div id="wizTplPicker" style="flex:1;overflow-y:auto;padding:14px 18px"></div>'
+  var dropzone = '<div id="attachDropzone" ondragover="attachWizDragOver_(event)" ondragleave="attachWizDragLeave_(event)" ondrop="attachWizDrop_(event)" '
+    + 'style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;transition:all 0.15s;background:var(--bg)" onclick="attachWizPickTrigger_()">'
+    + '<input type="file" id="attachFileInput" accept=".zip" style="display:none" onchange="attachWizPickChange_(event)">'
+    + '<div style="font-size:28px;margin-bottom:6px">📎</div>'
+    + '<div style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:4px">Drop ZIP of partner CSVs</div>'
+    + '<div style="font-size:10px;color:var(--ink-4);line-height:1.5">'
+      + 'Filename format: <code style="background:var(--surface);padding:1px 5px;border-radius:3px">partner_name.csv</code><br>'
+      + 'Match is case-insensitive on the partner name'
     + '</div>'
-    + '<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)">'
-      + '<div style="padding:14px 18px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0">'
-        + '<label class="nx-field-label">Campaign Name</label>'
-        + '<input type="text" class="nx-field-input" id="wizCampaignName" oninput="wiz.campaignName=this.value" placeholder="e.g. Q2 Stock Recovery Wave 1">'
+    + '<div id="attachProcessStatus" style="margin-top:10px;font-size:10px;font-weight:600"></div>'
+    + '</div>';
+
+  var table = '';
+  if (wizAttachments.manifest.length) {
+    table = '<div style="margin-top:14px;border:1px solid var(--border);border-radius:8px;overflow:hidden">'
+      + '<div style="display:grid;grid-template-columns:24px 1.4fr 1fr 60px;gap:8px;padding:8px 12px;background:var(--bg);border-bottom:1px solid var(--border);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--ink-4)">'
+      + '<span></span><span>File</span><span>→ Partner</span><span style="text-align:right">Size</span>'
       + '</div>'
-      + '<div id="wizTplPreview" style="flex:1;overflow-y:auto;padding:18px"></div>'
-    + '</div>';
-  document.getElementById('wizCampaignName').value = wiz.campaignName || '';
-  renderWizTplPicker();
-}
+      + '<div style="max-height:260px;overflow-y:auto">'
+      + wizAttachments.manifest.map(function(m) {
+          var icon, color, partnerCol;
+          if (m.status === 'matched') {
+            icon = '✓'; color = '#15803d';
+            partnerCol = '<span style="color:var(--ink);font-weight:500">' + esc(m.partnerName) + '</span>';
+          } else {
+            icon = '✗'; color = '#dc2626';
+            partnerCol = '<span style="color:var(--ink-4);font-style:italic">no match in your partners</span>';
+          }
+          return '<div style="display:grid;grid-template-columns:24px 1.4fr 1fr 60px;gap:8px;padding:6px 12px;border-bottom:1px solid var(--border);font-size:11px;align-items:center">'
+            + '<span style="color:' + color + ';font-weight:700;text-align:center">' + icon + '</span>'
+            + '<span style="color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + esc(m.filename) + '">' + esc(m.filename) + '</span>'
+            + '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + partnerCol + '</span>'
+            + '<span style="text-align:right;color:var(--ink-3);font-variant-numeric:tabular-nums;font-size:10px">' + _fmtBytes_(m.bytes) + '</span>'
+            + '</div>';
+        }).join('')
+      + '</div></div>';
 
-function wizSetTemplateSource(src) {
-  wiz.template.source = src;
-  renderWizStep2();
-}
-
-function renderWizTplPicker() {
-  var host = document.getElementById('wizTplPicker');
-  if (wiz.template.source === 'builtin') {
-    var html = '';
-    
-    // 1. Define clean, standard English categories
-    var sectionsMap = {
-      'Outreach & Lifecycle': [],
-      'Sales & Performance': [],
-      'Operations & Inventory': [],
-      'Campaigns & Promos': [],
-      'Other': []
-    };
-
-    // 2. Intelligently map templates to English categories (bypassing sheet translations)
-    Object.keys(EMAIL_TEMPLATES).forEach(function(k) {
-      var t = EMAIL_TEMPLATES[k];
-      var rawCat = (t.category || '').toLowerCase();
-      var cat = 'Other';
-      
-      // Route based on the template_key or English keywords in the category
-      if (k === 'General' || k === 'Onboarding' || k === 'Follow Up' || k === 'Re-engagement' || k === 'Thank You' || k === 'Quarterly Review' || rawCat.indexOf('outreach') > -1 || rawCat.indexOf('lifecycle') > -1 || rawCat.indexOf('cadence') > -1) {
-        cat = 'Outreach & Lifecycle';
-      } else if (k === 'Sales Risk' || k === 'High Growth' || k === 'Heavy Discounter' || rawCat.indexOf('performance') > -1 || rawCat.indexOf('pricing') > -1 || rawCat.indexOf('sales') > -1) {
-        cat = 'Sales & Performance';
-      } else if (k === 'SOH Request' || k === 'Stock Decline' || k === 'Stock Replenishment' || k === 'No Stock' || k === 'Low SOS' || k === 'KPI Penalty' || k === 'Perfect Order' || k === 'Invoice Reminder' || rawCat.indexOf('operation') > -1 || rawCat.indexOf('inventory') > -1 || rawCat.indexOf('finance') > -1) {
-        cat = 'Operations & Inventory';
-      } else if (k === 'Campaign Invite' || k === 'Policy' || rawCat.indexOf('campaign') > -1 || rawCat.indexOf('kampagnen') > -1 || rawCat.indexOf('promo') > -1) {
-        cat = 'Campaigns & Promos';
-      } else if (t.category) {
-        // If it's a completely custom category from the sheet, keep it but ensure it exists in the map
-        cat = t.category;
-        if (!sectionsMap[cat]) sectionsMap[cat] = [];
-      }
-
-      sectionsMap[cat].push(k);
-    });
-
-    // 3. Render the sections
-    var catKeys = Object.keys(sectionsMap);
-    catKeys.forEach(function(cat) {
-      var keys = sectionsMap[cat];
-      if (keys.length === 0) return; // Skip empty categories
-      
-      // Auto-assign icons based on the category name
-      var icon = 'folder'; 
-      var catLower = cat.toLowerCase();
-      if (catLower.indexOf('outreach') > -1) icon = 'send';
-      else if (catLower.indexOf('performance') > -1) icon = 'trending-up';
-      else if (catLower.indexOf('operation') > -1) icon = 'settings';
-      else if (catLower.indexOf('campaign') > -1) icon = 'megaphone';
-      
-      html += '<div class="tpl-section-label"><i data-lucide="' + icon + '" style="width:11px;height:11px"></i> ' + esc(cat) + '</div>';
-      html += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">';
-      keys.forEach(function(k) { html += _wizTplCardHtml_(k); });
-      html += '</div>';
-    });
-
-    // Reload templates button
-    html += '<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);font-size:10.5px;color:var(--ink-4);display:flex;align-items:center;justify-content:space-between">'
-      + '<span>Templates loaded from sheet · ' + Object.keys(EMAIL_TEMPLATES).length + ' available</span>'
-      + '<button class="btn-ghost" onclick="reloadTemplates()" style="padding:4px 10px;font-size:10px"><i data-lucide="refresh-cw" style="width:10px;height:10px"></i> Reload</button>'
-    + '</div>';
-    host.innerHTML = html;
-  } else {
-    // Custom (Google Doc) section remains unchanged
-    var recentHtml = '';
-    if (wiz.customTemplates && wiz.customTemplates.length) {
-      recentHtml = '<div class="tpl-section-label"><i data-lucide="history" style="width:11px;height:11px"></i> Recent Custom Templates</div>'
-        + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">'
-        + wiz.customTemplates.map(function(t, i) {
-            return '<div class="tpl-card" onclick="wizLoadCustomRecent(' + i + ')" title="' + esc(t.docUrl) + '"><i data-lucide="file-text" style="width:12px;height:12px"></i><span style="font-size:11px;font-weight:600;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis">' + esc(t.name || 'Custom') + '</span></div>';
-          }).join('')
+    if (unmatched.length) {
+      table += '<div style="margin-top:8px;padding:8px 12px;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;font-size:10px;color:#92400e;line-height:1.5">'
+        + '<strong>' + unmatched.length + ' file' + (unmatched.length === 1 ? '' : 's') + ' will be skipped.</strong> '
+        + 'This usually means the partner isn\'t in your team, or the filename doesn\'t exactly match a partner name. '
+        + 'Check the filenames, or confirm the partner is actually in your team list.'
         + '</div>';
     }
-    host.innerHTML =
-      recentHtml +
-      '<div class="tpl-section-label"><i data-lucide="file-plus" style="width:11px;height:11px"></i> New Custom Template</div>'
-      + '<div style="display:flex;flex-direction:column;gap:10px">'
-        + '<div><label class="nx-field-label">Google Doc URL *</label><input type="text" class="nx-field-input" id="wizCustomDoc" placeholder="https://docs.google.com/document/d/…" value="' + esc(wiz.template.customDoc) + '"></div>'
-        + '<div><label class="nx-field-label">Google Sheet URL (optional — merge vars)</label><input type="text" class="nx-field-input" id="wizCustomSheet" placeholder="https://docs.google.com/spreadsheets/d/…" value="' + esc(wiz.template.customSheet) + '"></div>'
-        + '<div><label class="nx-field-label">Subject Override (optional)</label><input type="text" class="nx-field-input" id="wizCustomSubject" placeholder="Leave empty to use \'Subject:\' line or doc title" value="' + esc(wiz.template.customSubject) + '"></div>'
-        + '<div style="display:flex;gap:8px"><button class="btn-primary" style="padding:6px 14px;font-size:11px" onclick="wizLoadCustomDoc()"><i data-lucide="refresh-cw" style="width:11px;height:11px"></i> Load & Preview</button><button class="btn-ghost" style="padding:6px 14px;font-size:11px" onclick="wizSaveCustomForLater()"><i data-lucide="save" style="width:11px;height:11px"></i> Save to recents</button></div>'
-        + '<div id="wizCustomStatus" style="font-size:10.5px;color:var(--ink-3);min-height:14px"></div>'
-        + '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:10.5px;color:var(--ink-3);line-height:1.55">'
-          + '<b style="color:var(--ink)">How it works:</b><br>'
-          + '• The Google Doc becomes the email body. Bold, italic, links and lists are preserved.<br>'
-          + '• First line <code style="background:var(--surface);padding:1px 5px;border-radius:3px">Subject: …</code> is used as subject, otherwise the doc title.<br>'
-          + '• Write placeholders as <code style="background:var(--surface);padding:1px 5px;border-radius:3px">{{partner_name}}</code>. Built-in placeholders resolve automatically.<br>'
-          + '• For custom merge fields, point to a Google Sheet. Header row defines keys: <code style="background:var(--surface);padding:1px 5px;border-radius:3px">{{promo_code}}</code>, etc. Column A is email, column B is partner name (used as merge key).'
+
+    var confirmBlock = '<div style="margin-top:14px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px">'
+      + '<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;user-select:none">'
+      + '<input type="checkbox" id="attachConfirmBox" ' + (wizAttachments.confirmed ? 'checked' : '') + ' onchange="attachWizSetConfirmed_(this.checked)" style="margin-top:2px;accent-color:var(--ink);width:14px;height:14px">'
+      + '<div>'
+        + '<div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:2px">I reviewed ' + matched.length + ' match' + (matched.length === 1 ? '' : 'es') + '</div>'
+        + '<div style="font-size:10px;color:var(--ink-3);line-height:1.5">'
+          + 'When checked, the outreach audience filter restricts to partners with an attached file. '
+          + 'Every send verifies again at dispatch that the filename matches the recipient partner name.'
         + '</div>'
+      + '</div></label>'
       + '</div>';
-  }
-  renderWizTplPreview();
-  refreshIcons();
-}
 
-function wizPickBuiltin(key) {
-  wiz.template.source = 'builtin';
-  wiz.template.key = key;
-  emailState.templateKey = key;
-  renderWizTplPicker();
-}
+    var closeBtn = '<button onclick="attachWizClose()" style="margin-top:14px;width:100%;padding:10px 16px;background:var(--ink);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:0.02em">Done</button>';
 
-// V3.10 — Helpers for the multi-language nested EMAIL_TEMPLATES shape.
-function tplDefault_(key) {
-  // Returns the EN variant, or whichever language is the first available.
-  // Used for gallery preview + non-language-specific UI (icon, display name).
-  var t = EMAIL_TEMPLATES[key];
-  if (!t || !t.languages) return null;
-  if (t.languages.EN) return { lang: 'EN', subject: t.languages.EN.subject, body: t.languages.EN.body };
-  var first = Object.keys(t.languages)[0];
-  if (!first) return null;
-  return { lang: first, subject: t.languages[first].subject, body: t.languages[first].body };
-}
-function tplLanguagesAvailable_(key) {
-  var t = EMAIL_TEMPLATES[key];
-  return (t && t.languages) ? Object.keys(t.languages) : [];
-}
-function _wizTplCardHtml_(k) {
-  var t = EMAIL_TEMPLATES[k];
-  if (!t) return '';
-  var active = (wiz.template.key === k) ? ' active' : '';
-  
-  var langs = tplLanguagesAvailable_(k);
-  var langCount = langs.length;
-  
-  // Replaced the individual language squares with a clean numerical count badge
-  var langPills = '<div style="margin-left:6px;font-size:9.5px;color:var(--ink-4);font-weight:700;background:var(--bg);border:1px solid var(--border);padding:1px 5px;border-radius:4px" title="Available in ' + langs.join(', ') + '">' + langCount + ' lang' + (langCount > 1 ? 's' : '') + '</div>';
-  
-  // By using 'k' (template_key) directly, we guarantee the UI uses your standard 
-  // English key from the sheet, completely avoiding the display_name column which 
-  // was being clobbered by translation rows.
-  var displayName = k;
-  
-  return '<div class="tpl-card' + active + '" onclick="wizPickBuiltin(\'' + k.replace(/'/g, "\\'") + '\')" style="display:flex;align-items:center;gap:6px"><i data-lucide="' + (t.icon || 'mail') + '" style="width:12px;height:12px"></i><span style="font-size:11px;font-weight:600;white-space:nowrap">' + esc(displayName) + '</span>' + langPills + '</div>';
-}
-
-function wizLoadCustomDoc() {
-  wiz.template.customDoc = (document.getElementById('wizCustomDoc') || {}).value || '';
-  wiz.template.customSheet = (document.getElementById('wizCustomSheet') || {}).value || '';
-  wiz.template.customSubject = (document.getElementById('wizCustomSubject') || {}).value || '';
-  if (!wiz.template.customDoc) { showToast('Paste a Google Doc URL', 'error'); return; }
-  var st = document.getElementById('wizCustomStatus');
-  if (st) st.textContent = 'Fetching doc…';
-  google.script.run
-    .withSuccessHandler(function(tpl) {
-      wiz.template.fetchedDoc = tpl;
-      if (st) st.textContent = 'Loaded: ' + (tpl.name || 'Custom') + ' · ' + (tpl.placeholders ? (tpl.placeholders.length + ' placeholder' + (tpl.placeholders.length === 1 ? '' : 's')) : 'no placeholders');
-      renderWizTplPreview();
-      refreshIcons();
-    })
-    .withFailureHandler(function(e) {
-      if (st) st.innerHTML = '<span style="color:#dc2626">' + esc(e.message || 'Failed to load') + '</span>';
-    })
-    .fetchGDocTemplate(wiz.template.customDoc);
-}
-
-function wizSaveCustomForLater() {
-  wiz.template.customDoc = (document.getElementById('wizCustomDoc') || {}).value || '';
-  wiz.template.customSheet = (document.getElementById('wizCustomSheet') || {}).value || '';
-  if (!wiz.template.customDoc) { showToast('Paste a Google Doc URL first', 'error'); return; }
-  var name = (wiz.template.fetchedDoc && wiz.template.fetchedDoc.name) || prompt('Save as (name)?', 'Custom template');
-  if (!name) return;
-  google.script.run.withSuccessHandler(function(res) {
-    if (res && res.saved) {
-      wiz.customTemplates = res.list || [];
-      showToast('Saved', 'success');
-      renderWizTplPicker();
-    }
-  }).saveCustomTemplate({ name: name, docUrl: wiz.template.customDoc, sheetUrl: wiz.template.customSheet });
-}
-
-function wizLoadCustomRecent(i) {
-  var t = wiz.customTemplates[i]; if (!t) return;
-  wiz.template.source = 'custom';
-  wiz.template.customDoc = t.docUrl;
-  wiz.template.customSheet = t.sheetUrl || '';
-  renderWizStep2();
-  setTimeout(wizLoadCustomDoc, 50);
-}
-
-function renderWizTplPreview() {
-  var host = document.getElementById('wizTplPreview');
-  if (!host) return;
-  var subject = '', body = '', langInfo = '';
-  if (wiz.template.source === 'builtin') {
-    var t = EMAIL_TEMPLATES[wiz.template.key];
-    if (!t) { host.innerHTML = '<div style="color:var(--ink-4);font-size:11px;text-align:center;padding:40px">Pick a template</div>'; return; }
-    var def = tplDefault_(wiz.template.key);
-    if (!def) { host.innerHTML = '<div style="color:var(--ink-4);font-size:11px;text-align:center;padding:40px">Template has no language variants</div>'; return; }
-    subject = def.subject; body = def.body;
-    var available = tplLanguagesAvailable_(wiz.template.key);
-    langInfo = '<span style="font-size:9px;font-weight:700;letter-spacing:0.08em;color:var(--ink-4);margin-right:8px">PREVIEWING ' + def.lang + '</span>'
-      + '<span style="font-size:9.5px;color:var(--ink-3)">Available: ' + available.join(', ') + '</span>';
-  } else if (wiz.template.fetchedDoc) {
-    subject = wiz.template.customSubject || wiz.template.fetchedDoc.subject || '';
-    body = wiz.template.fetchedDoc.body || '';
+    body.innerHTML = summary + dropzone + table + confirmBlock + closeBtn;
   } else {
-    host.innerHTML = '<div style="color:var(--ink-4);font-size:11px;text-align:center;padding:40px">Paste a Google Doc URL and click <b>Load & Preview</b>.</div>';
-    return;
+    body.innerHTML = summary + dropzone;
   }
-  var bodyColored = body.replace(/\{\{([^}]+)\}\}/g, '<span style="background:#fef3c7;color:#b45309;padding:1px 5px;border-radius:4px;font-size:11px;font-family:monospace">{{$1}}</span>');
-  var subjColored = subject.replace(/\{\{([^}]+)\}\}/g, '<span style="background:#fef3c7;color:#b45309;padding:1px 5px;border-radius:4px;font-size:11px;font-family:monospace">{{$1}}</span>');
-  host.innerHTML =
-    (langInfo ? '<div style="margin-bottom:10px;display:flex;align-items:center">' + langInfo + '</div>' : '')
-    + '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px">Subject</div>'
-    + '<div style="font-size:14px;font-weight:700;margin-bottom:14px">' + subjColored + '</div>'
-    + '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px">Body</div>'
-    + '<div class="gmail-body-sandbox" style="border:1px solid var(--border);border-radius:10px;padding:16px;background:var(--surface)">' + bodyColored + '</div>'
-    + '<div style="margin-top:10px;font-size:10px;color:var(--ink-4);line-height:1.5">Placeholders resolve per-recipient in Step 3. Each partner gets their language version (or is blocked if missing).</div>';
+
+  attachWizUpdateBtnBadge_();
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   STEP 3 — PREVIEW
-═══════════════════════════════════════════════════════════════════════════ */
-function loadPreviewsAndAdvance() {
-  // V3.6.2: ONE send per partner. Each audience entry carries the full primary
-  // email list (`emails: []`); the email is sent with all of them on To.
-  // Previously fanned out one preview per email — that produced duplicate
-  // sends to the same partner from the same campaign, which is wrong.
-  var audience = [];
-  wiz.audience.selectedRows.forEach(function(row) {
-    var d = P.find(function(x) { return x.row === row; });
-    if (!d) return;
-    var emails = wizPrimaryEmails_(d);
-    audience.push({
-      emails: emails,                 // canonical list (may be empty for "no contact")
-      email: emails[0] || '',         // legacy single-email field — kept for any old reader
-      partnerName: d.company,
-      partnerRow: d.row,
-      account_manager: d.account_manager || ''  // V3.8 — for shared-send CC resolution
+function attachWizSetConfirmed_(v) {
+  wizAttachments.confirmed = !!v;
+  // V3.8 — When activating, prune any previously-selected audience rows that
+  // don't have an attachment. Prevents "I selected 100 partners yesterday,
+  // dropped a ZIP with 30 today, and the wizard still shows 100 selected
+  // even though 70 have no file."
+  if (v && typeof wiz !== 'undefined' && wiz.audience && wiz.audience.selectedRows) {
+    var matched = new Set();
+    wizAttachments.byPartnerKey.forEach(function(entry) {
+      if (entry.partnerRow !== undefined) matched.add(entry.partnerRow);
     });
-  });
+    var pruned = new Set();
+    wiz.audience.selectedRows.forEach(function(row) { if (matched.has(row)) pruned.add(row); });
+    wiz.audience.selectedRows = pruned;
+    // Keep the legacy alias in sync (several surfaces read emailState.selectedRows)
+    if (typeof emailState !== 'undefined') emailState.selectedRows = pruned;
+  }
+  // Re-render wizard audience / preview if visible — they should now honor the filter
+  if (typeof wiz !== 'undefined' && typeof goStep === 'function' &&
+      document.getElementById('view-email') &&
+      document.getElementById('view-email').style.display !== 'none') {
+    goStep(wiz.step);
+  }
+  attachWizUpdateBtnBadge_();
+}
 
-  var options;
-  if (wiz.template.source === 'builtin') {
-    var tpl = EMAIL_TEMPLATES[wiz.template.key];
-    if (!tpl) { showToast('Pick a template', 'error'); return; }
-    // V3.10 — Per-partner language resolution.
-    //   - Normalize partner.language (blank/invalid → EN)
-    //   - Resolve template[key].languages[lang]
-    //   - Match → preview as usual
-    //   - Miss → mark blocked. Preview entry still created (so user sees the
-    //     row in the list with its block reason), but flagged so the send
-    //     pipeline can skip unless user toggles "Send EN anyway".
-    var hasEnFallback = !!(tpl.languages && tpl.languages.EN);
-    wiz.previews = audience.map(function(rec) {
-      var deal = P.find(function(x) { return x.row === rec.partnerRow; });
-      var partnerLang = normalizeLanguage_(deal && deal.language);
-      var resolved = resolveTemplate_(wiz.template.key, partnerLang);
-      if (resolved.found) {
-        var subject = applyPlaceholders(resolved.subject, deal);
-        var body = applyPlaceholders(resolved.body, deal);
-        return {
-          emails: rec.emails, email: rec.email,
-          partnerName: rec.partnerName, partnerRow: rec.partnerRow,
-          account_manager: deal ? (deal.account_manager || '') : '',
-          subject: subject, body: body,
-          unresolved: checkUnresolved(subject).concat(checkUnresolved(body)),
-          partner_language: partnerLang,
-          language_used: resolved.language_used,
-          blocked: false
-        };
-      }
-      // Block path — partner's language not available for this template.
-      // We still synthesize a subject/body using EN if available, kept ready
-      // for the user to toggle override. If even EN missing, no fallback.
-      var fb = (hasEnFallback) ? tpl.languages.EN : null;
-      var fbSubj = fb ? applyPlaceholders(fb.subject, deal) : '';
-      var fbBody = fb ? applyPlaceholders(fb.body, deal) : '';
-      return {
-        emails: rec.emails, email: rec.email,
-        partnerName: rec.partnerName, partnerRow: rec.partnerRow,
-        account_manager: deal ? (deal.account_manager || '') : '',
-        subject: fbSubj, body: fbBody,
-        unresolved: fb ? checkUnresolved(fbSubj).concat(checkUnresolved(fbBody)) : [],
-        partner_language: partnerLang,
-        language_used: fb ? 'EN' : '',
-        blocked: true,
-        block_reason: 'No ' + partnerLang + ' translation' + (fb ? ' — EN fallback available' : ' — no fallback'),
-        block_can_override: !!fb,
-        send_override: false  // user toggles this on the Step 3 blocked-list panel
+// Toolbar button badge — shows "N" when attachments are locked in
+function attachWizUpdateBtnBadge_() {
+  var badge = document.getElementById('attachBtnBadge');
+  if (!badge) return;
+  if (attachWizHasActive()) {
+    badge.textContent = wizAttachments.byPartnerKey.size;
+    badge.style.display = 'inline-flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function _fmtBytes_(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+
+// ── Queue enrichment helper — called by wizard's send step ─────────────────
+// Takes the queue the wizard would have sent, adds `attachmentKey` per item
+// when an attachment is matched. Returns { queue, attachmentsByIndex } where
+// attachmentsByIndex maps queue index → { filename, mime, base64 }.
+// base64 encoding happens here, once, at send-prep time — keeps everything
+// byte-transparent for the rest of the pipeline.
+function attachWizEnrichQueue_(baseQueue, previews) {
+  if (!attachWizHasActive()) return { queue: baseQueue, attachmentsByIndex: null };
+  var out = [];
+  var attachments = {};
+  for (var i = 0; i < baseQueue.length; i++) {
+    var item = baseQueue[i];
+    var preview = previews[i] || {};
+    var key = nameKey_(preview.partnerName || '');
+    var att = wizAttachments.byPartnerKey.get(key);
+    var enriched = Object.assign({}, item);
+    if (att) {
+      enriched.attachmentKey = key;
+      attachments[i] = {
+        filename: att.filename,
+        mime: att.mime,
+        base64: _bytesToBase64_(att.bytes)
       };
-    });
-    wiz.previewIdx = 0;
-    goStep(3);
-    renderWizStep3();
-    return;
-  }
-
-  // Custom — roundtrip to LIB for doc fetch + sheet merge
-  options = {
-    source: 'custom',
-    customDocUrl: wiz.template.customDoc,
-    customSheetUrl: wiz.template.customSheet,
-    customSubject: wiz.template.customSubject
-  };
-  showToast('Loading custom template…', 'success');
-  google.script.run
-    .withSuccessHandler(function(res) {
-      wiz.previews = (res.previews || []).map(function(p) {
-        var deal = P.find(function(x) { return x.row === p.partnerRow; });
-        var subj = deal ? applyPlaceholders(p.subject, deal) : p.subject;
-        var body = deal ? applyPlaceholders(p.body, deal) : p.body;
-        return {
-          emails: Array.isArray(p.emails) ? p.emails : (p.email ? [p.email] : []),
-          email: p.email || (Array.isArray(p.emails) && p.emails[0]) || '',
-          partnerName: p.partnerName, partnerRow: p.partnerRow,
-          account_manager: deal ? (deal.account_manager || '') : '',  // V3.8 — for shared-send CC resolution
-          subject: subj, body: body,
-          unresolved: checkUnresolved(subj).concat(checkUnresolved(body))
-        };
-      });
-      wiz.previewIdx = 0;
-      goStep(3);
-      renderWizStep3();
-    })
-    .withFailureHandler(function(e) { showToast('Preview failed: ' + (e.message || e), 'error'); })
-    .buildCampaignPreview(audience, options);
-}
-
-function renderWizStep3() {
-  var host = document.getElementById('wiz-step-3');
-  host.style.flexDirection = 'row';
-  host.innerHTML =
-    '<div style="width:300px;flex-shrink:0;border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;overflow:hidden">'
-      + '<div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">'
-        + '<span style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase">Recipients</span>'
-        + '<span id="wizUnresolvedCount" style="font-size:10px;font-weight:600"></span>'
-      + '</div>'
-      + '<div id="wizPreviewList" style="flex:1;overflow-y:auto"></div>'
-      + '<div style="padding:10px 14px;border-top:1px solid var(--border);background:var(--bg);font-size:10.5px;color:var(--ink-3)">'
-        + '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'
-          + '<input type="checkbox" id="wizSkipUnresolved" onchange="wiz.skipUnresolved=this.checked;renderWizStep3_unresolvedTag()" ' + (wiz.skipUnresolved ? 'checked' : '') + ' style="accent-color:var(--ink)">'
-          + 'Skip unresolved recipients on send'
-        + '</label>'
-      + '</div>'
-    + '</div>'
-    + '<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)">'
-      + '<div id="wizPreviewDetail" style="flex:1;overflow-y:auto;padding:20px"></div>'
-    + '</div>';
-  renderWizPreviewList();
-  renderWizPreviewDetail(wiz.previewIdx);
-  refreshIcons();
-}
-
-function renderWizStep3_unresolvedTag() {
-  // no-op visual hook — kept for future
-}
-
-function renderWizPreviewList() {
-  var unresolvedCount = wiz.previews.filter(function(p) { return p.unresolved && p.unresolved.length; }).length;
-  // V3.10 — Blocked count drives the second banner. A row is "shipping
-  // blocked" when its template language is unavailable AND user hasn't
-  // toggled the per-row override.
-  var blockedNoOverride = wiz.previews.filter(function(p) { return p.blocked && !p.send_override; }).length;
-  var blockedWithOverride = wiz.previews.filter(function(p) { return p.blocked && p.send_override; }).length;
-  var statusEl = document.getElementById('wizUnresolvedCount');
-  if (statusEl) {
-    var bits = [];
-    if (unresolvedCount) bits.push('<span style="background:#fee2e2;color:#b91c1c;padding:2px 7px;border-radius:99px;font-weight:700">' + unresolvedCount + ' ⚠</span>');
-    if (blockedNoOverride) bits.push('<span style="background:#fffbeb;color:#b45309;padding:2px 7px;border-radius:99px;font-weight:700;margin-left:4px">' + blockedNoOverride + ' BLOCKED</span>');
-    if (!unresolvedCount && !blockedNoOverride) bits.push('<span style="background:#f0fdf4;color:#15803d;padding:2px 7px;border-radius:99px;font-weight:700">All ready ✓</span>');
-    statusEl.innerHTML = bits.join('');
-  }
-  document.getElementById('wizPreviewList').innerHTML = wiz.previews.map(function(p, i) {
-    var hasErr = p.unresolved && p.unresolved.length;
-    var active = i === wiz.previewIdx;
-    var emails = (p.emails && p.emails.length) ? p.emails : (p.email ? [p.email] : []);
-    var firstEmail = emails[0] || '';
-    var moreBadge = (emails.length > 1)
-      ? ' <span style="font-size:9px;color:' + (active ? '#ffffffcc' : 'var(--ink-4)') + ';font-weight:700">+' + (emails.length - 1) + '</span>'
-      : '';
-    // V3.10 — Per-row state badge: blocked / overridden / OK + language.
-    var stateBadge;
-    if (p.blocked && !p.send_override) {
-      stateBadge = '<span style="color:#b45309;font-weight:700" title="' + esc(p.block_reason || '') + '">BLOCK</span>';
-    } else if (p.blocked && p.send_override) {
-      stateBadge = '<span style="color:' + (active ? '#fff' : '#7c2d12') + ';font-weight:700" title="Sending in EN despite missing ' + esc(p.partner_language) + '">EN→</span>';
-    } else if (hasErr) {
-      stateBadge = '<span style="color:#b91c1c">⚠</span>';
-    } else {
-      stateBadge = '<span style="color:' + (active ? '#fff' : '#15803d') + '">✓</span>';
     }
-    var langTag = p.partner_language
-      ? '<span style="font-size:8.5px;font-weight:700;padding:1px 4px;border-radius:3px;letter-spacing:0.04em;margin-left:6px;background:' + (active ? 'rgba(255,255,255,0.18)' : 'var(--bg)') + ';color:' + (active ? '#fff' : 'var(--ink-3)') + ';border:1px solid ' + (active ? 'transparent' : 'var(--border)') + '">' + p.partner_language + '</span>'
-      : '';
-    return '<div class="wiz-recip ' + (hasErr ? 'unresolved' : '') + (active ? ' wiz-recip-active' : '') + '" onclick="renderWizPreviewDetail(' + i + ')" style="grid-template-columns:1fr auto">'
-      + '<div style="min-width:0;overflow:hidden"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(p.partnerName) + langTag + '</div><div style="font-size:10px;color:' + (active ? '#ffffffcc' : 'var(--ink-4)') + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(firstEmail) + moreBadge + '</div></div>'
-      + '<div style="font-size:10px;font-weight:700">' + stateBadge + '</div>'
-      + '</div>';
-  }).join('');
+    out.push(enriched);
+  }
+  return { queue: out, attachmentsByIndex: attachments };
 }
 
-function renderWizPreviewDetail(idx) {
-  wiz.previewIdx = idx;
-  var p = wiz.previews[idx];
-  if (!p) return;
-  var host = document.getElementById('wizPreviewDetail');
-  var banners = '';
-  if (p.unresolved && p.unresolved.length) {
-    banners += '<div style="background:#fff1f2;border:1px solid #fecdd3;color:#b91c1c;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:11.5px"><b>Unresolved placeholders:</b> ' + p.unresolved.map(esc).join(', ') + '<br><span style="color:#7c2d3a">Fix the template, add a Google Sheet with these columns, or tick "Skip unresolved" in the left panel.</span></div>';
+// Uint8Array → base64. Chunked to avoid "maximum call stack" on large files
+// (apply() blows up around 100k args; 8KB chunks are safe).
+function _bytesToBase64_(bytes) {
+  var CHUNK = 0x8000;
+  var out = '';
+  for (var i = 0; i < bytes.length; i += CHUNK) {
+    out += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
   }
-  // V3.10 — Blocked banner. Two sub-cases: override available (user can
-  // toggle "Send in EN") or no fallback at all (must skip).
-  if (p.blocked) {
-    if (p.block_can_override) {
-      banners += '<div style="background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:11.5px">'
-        + '<b>Language not available:</b> this partner is set to <b>' + esc(p.partner_language) + '</b> but the template only exists in: ' + tplLanguagesAvailable_(wiz.template.key).join(', ') + '.<br>'
-        + '<label style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer;font-weight:600">'
-          + '<input type="checkbox" ' + (p.send_override ? 'checked' : '') + ' onchange="wizToggleBlockedOverride(' + idx + ', this.checked)" style="accent-color:#92400e;width:14px;height:14px">'
-          + 'Send in EN anyway'
-        + '</label>'
-      + '</div>';
-    } else {
-      banners += '<div style="background:#fff1f2;border:1px solid #fecdd3;color:#b91c1c;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:11.5px"><b>Cannot send to this partner:</b> template has no version in <b>' + esc(p.partner_language) + '</b> and no EN fallback either. Add a translation row to the Templates sheet, or skip this recipient.</div>';
-    }
-  }
-  // Language used + partner language indicator
-  var langInfoHtml = '';
-  if (p.partner_language) {
-    var resolved = p.language_used || '—';
-    var langNote = (p.partner_language === resolved)
-      ? 'Sending in ' + p.partner_language
-      : 'Partner: ' + p.partner_language + ' · Sending: ' + resolved + (p.blocked ? (p.send_override ? ' (override)' : ' (blocked)') : '');
-    langInfoHtml = '<span style="font-size:9px;font-weight:700;letter-spacing:0.06em;color:var(--ink-4);text-transform:uppercase">' + langNote + '</span>';
-  }
-  var emails = (p.emails && p.emails.length) ? p.emails : (p.email ? [p.email] : []);
-  var toLine;
-  if (emails.length <= 1) {
-    toLine = '<div style="font-size:13px;font-weight:600">' + esc(p.partnerName) + ' &lt;' + esc(emails[0] || '') + '&gt;</div>';
-  } else {
-    toLine = '<div style="font-size:13px;font-weight:600">' + esc(p.partnerName)
-      + ' <span style="font-size:9px;font-weight:700;color:var(--ink-3);background:var(--bg);border:1px solid var(--border);padding:1px 6px;border-radius:5px;margin-left:4px;letter-spacing:0.04em">' + emails.length + ' RECIPIENTS</span></div>'
-      + '<div style="font-size:11px;color:var(--ink-3);margin-top:3px;line-height:1.5">' + emails.map(function(e){ return esc(e); }).join(', ') + '</div>';
-  }
-  // If there's no body (no fallback case), show a placeholder
-  var bodyHtml = p.body || '<div style="color:var(--ink-4);font-style:italic;padding:30px;text-align:center">No content available — template missing for this language.</div>';
-
-  host.innerHTML =
-    banners
-    + (langInfoHtml ? '<div style="margin-bottom:10px">' + langInfoHtml + '</div>' : '')
-    + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden">'
-      + '<div style="padding:12px 18px;border-bottom:1px solid var(--border);background:var(--bg)">'
-        + '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">To</div>'
-        + toLine
-      + '</div>'
-      + '<div style="padding:12px 18px;border-bottom:1px solid var(--border)">'
-        + '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:3px">Subject</div>'
-        + '<div style="font-size:14px;font-weight:700">' + esc(p.subject || '(empty)') + '</div>'
-      + '</div>'
-      + '<div class="gmail-body-sandbox" style="padding:20px 18px">' + bodyHtml + '</div>'
-    + '</div>';
-  renderWizPreviewList();
-}
-
-// V3.10 — Toggle the "Send in EN anyway" flag on a blocked preview row.
-function wizToggleBlockedOverride(idx, checked) {
-  var p = wiz.previews[idx];
-  if (!p || !p.blocked) return;
-  p.send_override = !!checked;
-  renderWizPreviewList();
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   STEP 4 — CONFIRM & LAUNCH
-═══════════════════════════════════════════════════════════════════════════ */
-function renderWizStep4() {
-  var host = document.getElementById('wiz-step-4');
-  host.style.flexDirection = 'column';
-  // V3.10 — Two-stage filter:
-  //   1. Drop unresolved-placeholder rows if "Skip unresolved" is on
-  //   2. Drop language-blocked rows that haven't toggled override (always)
-  var toSend = wiz.previews.filter(function(p) {
-    if (wiz.skipUnresolved && p.unresolved && p.unresolved.length) return false;
-    if (p.blocked && !p.send_override) return false;
-    return true;
-  });
-  var skipped = wiz.previews.length - toSend.length;
-  var blockedSkipped = wiz.previews.filter(function(p) { return p.blocked && !p.send_override; }).length;
-
-  var sendFromSelect = document.getElementById('sendFromSelect');
-  var sendFrom = sendFromSelect ? sendFromSelect.value : 'shared_personal';
-  var fromLabel = sendFrom === 'personal' ? (_userEmail || 'My Account') : (_mailConfig.sharedEmail || 'Commercial Support');
-  var sendAsDesc = sendFrom === 'personal' ? '(your account)' : (sendFrom === 'shared' ? '(shared mailbox)' : '(shared mailbox, signed as you)');
-
-  // V3.9 — Three CC checkboxes, available on BOTH personal/proxy and shared
-  // paths. None default-on. Each is silent-skip if unresolvable
-  // (no AM lookup, no team lead, etc).
-  //   - CC Account Manager: looks up AM_Emails tab via partner.account_manager
-  //   - CC Team Lead:        looks up Permissions.Teams.teamLead column
-  //   - CC Commercial:       hardcoded SHARED_CC_EMAIL (commercial support)
-  // Shared-send path: previously implicitly auto-CC'd commercial. That auto-add
-  // is GONE in V3.9 — explicit toggle only.
-  var ccAmChecked   = _getCcPref_('am')   ? 'checked' : '';
-  var ccLeadChecked = _getCcPref_('lead') ? 'checked' : '';
-  var ccCommChecked = _getCcPref_('comm') ? 'checked' : '';
-  // Hide CC Lead row when current user IS the team lead (no point CC'ing self).
-  // _userTeamLeadEmail set during boot via getTeamLeadEmail; null/empty means
-  // either no lead configured or fetch failed — show but with hint.
-  var leadEmail = (typeof _userTeamLeadEmail !== 'undefined' && _userTeamLeadEmail) ? _userTeamLeadEmail : '';
-  var userIsLead = leadEmail && _userEmail && leadEmail.toLowerCase() === _userEmail.toLowerCase();
-  var leadHint = leadEmail
-    ? ('Resolves to <span style="font-family:monospace;color:var(--ink-2)">' + esc(leadEmail) + '</span>')
-    : 'No team lead configured · silent skip on send';
-  var ccRowHtml =
-    '<div style="display:grid;grid-template-columns:120px 1fr;gap:10px;padding-top:6px;border-top:1px solid var(--border)">'
-      + '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-4);padding-top:2px">CC</span>'
-      + '<div style="display:flex;flex-direction:column;gap:8px">'
-        + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">'
-          + '<input type="checkbox" id="wizCcAm" ' + ccAmChecked + ' onchange="_setCcPref_(\'am\',this.checked)" style="accent-color:var(--ink);width:14px;height:14px">'
-          + '<span style="font-size:13px;color:var(--ink)">Account Manager</span>'
-          + '<span style="font-size:10px;color:var(--ink-4)">From AM_Emails · silent skip if unresolved</span>'
-        + '</label>'
-        + (userIsLead
-            ? '<div style="font-size:11px;color:var(--ink-4);font-style:italic;padding-left:22px">You are the team lead — no separate lead CC needed.</div>'
-            : '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">'
-              + '<input type="checkbox" id="wizCcLead" ' + ccLeadChecked + ' onchange="_setCcPref_(\'lead\',this.checked)" style="accent-color:var(--ink);width:14px;height:14px"' + (leadEmail ? '' : ' disabled') + '>'
-              + '<span style="font-size:13px;color:' + (leadEmail ? 'var(--ink)' : 'var(--ink-4)') + '">Team Lead</span>'
-              + '<span style="font-size:10px;color:var(--ink-4)">' + leadHint + '</span>'
-            + '</label>')
-        + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">'
-          + '<input type="checkbox" id="wizCcComm" ' + ccCommChecked + ' onchange="_setCcPref_(\'comm\',this.checked)" style="accent-color:var(--ink);width:14px;height:14px">'
-          + '<span style="font-size:13px;color:var(--ink)">Commercial Support</span>'
-          + '<span style="font-size:10px;color:var(--ink-4)">' + esc(_mailConfig.sharedEmail || 'commercialsupport@farfetch.com') + '</span>'
-        + '</label>'
-      + '</div>'
-    + '</div>';
-
-  host.innerHTML =
-    '<div style="flex:1;display:flex;align-items:center;justify-content:center;padding:30px">'
-      + '<div style="max-width:520px;width:100%">'
-        + '<div style="text-align:center;margin-bottom:24px">'
-          + '<div style="display:inline-flex;width:52px;height:52px;border-radius:50%;background:var(--ink);color:#fff;align-items:center;justify-content:center;margin-bottom:14px"><i data-lucide="send" style="width:22px;height:22px"></i></div>'
-          + '<div style="font-size:22px;font-weight:700;letter-spacing:-0.02em">Ready to send</div>'
-          + '<div style="font-size:12px;color:var(--ink-3);margin-top:6px">Click <b>Send</b> above when you\'re ready.</div>'
-        + '</div>'
-        + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 22px;display:flex;flex-direction:column;gap:12px">'
-          + summaryRow_('Campaign', esc(wiz.campaignName || '(unnamed)'))
-          + summaryRow_('Template', (wiz.template.source === 'builtin') ? esc(wiz.template.key) + ' <span style="font-size:10px;color:var(--ink-4)">(built-in)</span>' : esc((wiz.template.fetchedDoc && wiz.template.fetchedDoc.name) || 'Custom doc'))
-          + summaryRow_('Recipients', toSend.length + ' to send' + (skipped > 0 ? ' · <span style="color:#b45309">' + skipped + ' skipped</span>' : ''))
-          + summaryRow_('Sending as', esc(fromLabel) + ' <span style="font-size:10px;color:var(--ink-4)">' + sendAsDesc + '</span>')
-          + (wiz.template.customSheet ? summaryRow_('Merge sheet', '<span style="font-size:11px;color:var(--ink-3);font-family:monospace">' + esc(wiz.template.customSheet.slice(0, 60)) + '…</span>') : '')
-          + ccRowHtml
-        + '</div>'
-        + '<div id="wizLaunchLog" style="margin-top:18px;display:none"></div>'
-      + '</div>'
-    + '</div>';
-  refreshIcons();
-}
-
-// V3.9 — Generic CC preference persistence. User-level (not team-level) —
-// cc preferences are personal habits, not team policy. Storage key namespaced
-// by user email to avoid collisions on shared machines.
-//   kind: 'am' | 'lead' | 'comm'
-function _getCcPref_(kind) {
-  try {
-    var k = 'nx_cc_' + kind + '_' + (_userEmail || 'anon');
-    return localStorage.getItem(k) === '1';
-  } catch (e) { return false; }
-}
-function _setCcPref_(kind, v) {
-  try {
-    var k = 'nx_cc_' + kind + '_' + (_userEmail || 'anon');
-    localStorage.setItem(k, v ? '1' : '0');
-  } catch (e) {}
-}
-// V3.8 back-compat — retained for any legacy caller. Routes to new keyed pref.
-function _getCcAmPref_() { return _getCcPref_('am'); }
-function _setCcAmPref_(v) { _setCcPref_('am', v); }
-
-function summaryRow_(label, value) {
-  return '<div style="display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:baseline">'
-    + '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-4)">' + label + '</span>'
-    + '<span style="font-size:13px;color:var(--ink)">' + value + '</span>'
-    + '</div>';
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   LAUNCH
-═══════════════════════════════════════════════════════════════════════════ */
-function launchCampaign() {
-  if (wiz.sending) return;
-  // V3.10 — Same dual filter as renderWizStep4 (must stay in sync).
-  var toSend = wiz.previews.filter(function(p) {
-    if (wiz.skipUnresolved && p.unresolved && p.unresolved.length) return false;
-    if (p.blocked && !p.send_override) return false;
-    return true;
-  });
-  if (!toSend.length) { showToast('Nothing to send', 'error'); return; }
-
-  var campaignName = (wiz.campaignName || 'Outreach ' + new Date().toISOString().slice(0, 10)).trim();
-  var campaignId = 'camp-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
-  wiz.runningCampaignId = campaignId;
-  var templateKey = wiz.template.source === 'builtin' ? wiz.template.key : 'custom';
-
-  var sendFrom = (document.getElementById('sendFromSelect') || {}).value || 'shared_personal';
-  wiz.sending = true;
-  document.getElementById('wizBtnNext').disabled = true;
-  document.getElementById('wizBtnBack').disabled = true;
-
-  // Show progress
-  var progressWrap = document.getElementById('sendProgressWrap');
-  var progressFill = document.getElementById('sendProgressFill');
-  var progressLabel = document.getElementById('sendProgressLabel');
-  if (progressWrap) progressWrap.style.display = 'flex';
-
-  var launchLog = document.getElementById('wizLaunchLog');
-  if (launchLog) {
-    launchLog.style.display = 'block';
-    launchLog.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden"><div style="padding:10px 14px;border-bottom:1px solid var(--border);font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4)">Send Log</div><div id="wizLaunchLogRows" style="max-height:260px;overflow-y:auto;font-size:11px"></div></div>';
-  }
-
-  var total = toSend.length, done = 0;
-  function setProgress(label) {
-    if (progressLabel) progressLabel.textContent = label;
-    if (progressFill) progressFill.style.width = Math.round((done / total) * 100) + '%';
-  }
-  function appendLogRow(p, status, msg) {
-    var rows = document.getElementById('wizLaunchLogRows');
-    if (!rows) return;
-    var color = status === 'sent' ? '#16a34a' : status === 'error' ? '#be123c' : 'var(--ink-4)';
-    var icon = status === 'sent' ? '✓' : status === 'error' ? '✗' : '…';
-    rows.insertAdjacentHTML('beforeend',
-      '<div style="display:grid;grid-template-columns:22px 1fr auto;gap:10px;padding:7px 14px;border-bottom:1px solid var(--border);align-items:center"><span style="color:' + color + ';font-weight:700">' + icon + '</span><span style="color:var(--ink)">' + esc(p.partnerName) + '</span><span style="font-size:10px;color:var(--ink-4)">' + esc(msg || p.email) + '</span></div>');
-    rows.scrollTop = rows.scrollHeight;
-  }
-
-  setProgress('Starting…');
-
-  if (sendFrom === 'personal') {
-    // V3.6.2 — Proxy path: one queue item per partner, To is comma-separated.
-    // Gmail (and the proxy's GmailApp call) accepts comma-separated To natively,
-    // so the Mail Proxy GAS project does NOT need any change.
-    // V3.8 — Attachments layered on top. If active, enrichQueue tags each
-    // item with attachmentKey + produces a parallel attachments map (base64
-    // bytes by queue index). sendViaProxyBatch handles the postMessage
-    // handshake that transfers bytes directly into the iframe — bytes never
-    // enter NEXUS's server-side CacheService or any Drive-resident storage.
-    // V3.9 — Read CC toggles once, resolve AM email map + lead email upfront.
-    // Per-item CC is built below by combining whichever toggles are on, deduped
-    // against the To line. Proxy backend supports a 'cc' field on each queue
-    // item — if your MAIL_PROXY_URL deployment doesn't yet, the cc property
-    // is silently ignored (extra fields don't break GmailApp.sendEmail).
-    var ccAmOn   = _getCcPref_('am');
-    var ccLeadOn = _getCcPref_('lead');
-    var ccCommOn = _getCcPref_('comm');
-    var commercialEmail = (_mailConfig && _mailConfig.sharedEmail) || '';
-    var leadEmailForCc = (typeof _userTeamLeadEmail !== 'undefined' && _userTeamLeadEmail) ? _userTeamLeadEmail : '';
-    // AM map is partner-specific so we resolve per-item below. Frontend doesn't
-    // have AM_Emails — we rely on each preview's `cc_am_email` field which
-    // buildCampaignPreview can populate. If absent, AM CC silently skips for
-    // this partner (proxy path is best-effort; precise AM CC happens via
-    // shared/executeCampaign path which has direct sheet access).
-
-    var baseQueue = toSend.map(function(p) {
-      var emails = (p.emails && p.emails.length) ? p.emails : (p.email ? [p.email] : []);
-      var validEmails = emails.filter(function(e) { return e && String(e).indexOf('@') > -1; });
-
-      // Build per-item CC list, dedupe against To and amongst itself
-      var toLowercase = {};
-      validEmails.forEach(function(e) { toLowercase[String(e).toLowerCase().trim()] = true; });
-      var ccSeen = {};
-      var ccList = [];
-      var pushCc = function(email) {
-        if (!email) return;
-        var k = String(email).toLowerCase().trim();
-        if (!k || toLowercase[k] || ccSeen[k]) return;
-        ccSeen[k] = true;
-        ccList.push(email);
-      };
-      // AM CC: only works if preview already carries cc_am_email (rare on
-      // proxy path). Silent skip otherwise.
-      if (ccAmOn && p.cc_am_email) pushCc(p.cc_am_email);
-      if (ccLeadOn && leadEmailForCc) pushCc(leadEmailForCc);
-      if (ccCommOn && commercialEmail) pushCc(commercialEmail);
-
-      var item = {
-        to: validEmails.join(', '),
-        subject: p.subject,
-        htmlBody: p.body,
-        storeName: p.partnerName,
-        templateName: templateKey
-      };
-      if (ccList.length) item.cc = ccList.join(', ');
-      return item;
-    });
-
-    // V3.8 — If the Attachments drawer is active & confirmed, enrich.
-    // attachWizEnrichQueue_ is defined in nx_email_attach.html. Falls through
-    // as a no-op (returns original queue, null attachments) when inactive.
-    var enriched = (typeof attachWizEnrichQueue_ === 'function')
-      ? attachWizEnrichQueue_(baseQueue, toSend)
-      : { queue: baseQueue, attachmentsByIndex: null };
-    var queue = enriched.queue;
-    var attachmentsByIndex = enriched.attachmentsByIndex;
-
-    if (attachmentsByIndex && Object.keys(attachmentsByIndex).length) {
-      setProgress('Preparing ' + queue.length + ' emails with attachments via your account…');
-    } else {
-      setProgress('Preparing ' + queue.length + ' emails via your account…');
-    }
-    sendViaProxyBatch(queue, attachmentsByIndex)
-      .then(function(results) {
-        // Log each send to the DB via backend (one row per partner)
-        toSend.forEach(function(p, i) {
-          var r = (results && results[i]) || {};
-          var status = r.status === 'error' ? 'error' : 'sent';
-          appendLogRow(p, status, r.status === 'error' ? (r.message || 'Error') : 'Sent');
-          done++;
-          setProgress(done + '/' + total + ' sent');
-          var emails = (p.emails && p.emails.length) ? p.emails : (p.email ? [p.email] : []);
-          google.script.run.logCampaignSend({
-            emails: emails,                     // V3.6.2 — canonical recipient list
-            to: emails[0] || '',                // legacy field (kept for compat)
-            partnerName: p.partnerName,
-            subject: p.subject, body: p.body,
-            threadId: r.threadId || '',
-            status: status === 'error' ? ('ERROR: ' + (r.message || 'proxy error')) : 'SENT',
-            campaignName: campaignName, campaignId: campaignId,
-            templateKey: templateKey, sentBy: _userEmail || 'proxy'
-          }, _userTeam);
-        });
-        finishCampaign_(campaignId, total, done);
-      })
-      .catch(function(e) {
-        showToast('Proxy error: ' + (e.message || e), 'error');
-        finishCampaign_(campaignId, total, done);
-      });
-  } else {
-    // Shared path: executeCampaign in one library call (GmailApp direct).
-    setProgress('Preparing ' + total + ' emails via shared mailbox…');
-
-    // 1. Map the base64 file data directly into the payload array
-    var finalToSend = toSend.map(function(p) {
-      var payloadP = Object.assign({}, p);
-      
-      // If attachments are active, append the base64 data to this specific recipient
-      if (typeof attachWizHasActive === 'function' && attachWizHasActive()) {
-        var key = nameKey_(p.partnerName || '');
-        var att = wizAttachments.byPartnerKey.get(key);
-        if (att) {
-          payloadP.attachment = {
-            filename: att.filename,
-            mime: att.mime,
-            base64: _bytesToBase64_(att.bytes)
-          };
-        }
-      }
-      return payloadP;
-    });
-
-    // 2. Execute a SINGLE backend call
-    google.script.run
-      .withSuccessHandler(function(res) {
-        // Fake per-row progress: we already got the aggregate
-        finalToSend.forEach(function(p) {
-          done++;
-          appendLogRow(p, 'sent', 'Sent');
-          setProgress(done + '/' + total + ' sent');
-        });
-        if (res && res.errors) showToast(res.errors + ' error' + (res.errors === 1 ? '' : 's') + ' — check Send Log', 'error');
-        finishCampaign_(res && res.campaignId ? res.campaignId : campaignId, total, res && res.sent !== undefined ? res.sent : done);
-      })
-      .withFailureHandler(function(e) {
-        showToast('Send failed: ' + (e.message || e), 'error');
-        finishCampaign_(campaignId, total, done);
-      })
-      .executeCampaign(finalToSend, {
-        campaignName: campaignName, campaignId: campaignId,
-        templateKey: templateKey, source: wiz.template.source,
-        // V3.9 — three independent CC toggles, all opt-in. Backend resolves
-        // AM email per partner (AM_Emails tab) and team lead from Permissions.
-        ccAccountManager: _getCcPref_('am'),
-        ccTeamLead:       _getCcPref_('lead'),
-        ccCommercial:     _getCcPref_('comm')
-      }, _userTeam);
-  }
-}
-
-function finishCampaign_(campaignId, total, done) {
-  wiz.sending = false;
-  var progressFill = document.getElementById('sendProgressFill');
-  var progressLabel = document.getElementById('sendProgressLabel');
-  if (progressFill) progressFill.style.width = '100%';
-  if (progressLabel) progressLabel.textContent = done + '/' + total + ' complete';
-
-  showToast(done + ' of ' + total + ' sent. Campaign "' + (wiz.campaignName || campaignId) + '" created.', 'success');
-
-  // Reset wizard state slightly — keep audience so they can retry, but bump to campaigns dashboard
-  document.getElementById('wizBtnNext').disabled = false;
-  document.getElementById('wizBtnBack').disabled = false;
-
-  setTimeout(function() {
-    // Jump to Campaigns dashboard with this campaign pre-selected
-    window.__highlightCampaignId = campaignId;
-    switchView('campaigns');
-    var progressWrap = document.getElementById('sendProgressWrap');
-    if (progressWrap) progressWrap.style.display = 'none';
-    // Reset wizard to step 1 and clear selection for the next campaign
-    wiz.step = 1;
-    wiz.previews = [];
-    wiz.campaignName = '';
-    wiz.audience.selectedRows.clear();
-  }, 1500);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   TEST SEND (unchanged flow — kept so existing modal still works)
-═══════════════════════════════════════════════════════════════════════════ */
-function openTestSendModal() {
-  var key = wiz.template.source === 'builtin' ? wiz.template.key : 'custom';
-  document.getElementById('testSendTemplateName').textContent = key;
-  var subj = '';
-  if (wiz.template.source === 'builtin') {
-    // V3.10 — Use default-language variant for test-send subject preview.
-    var def = tplDefault_(wiz.template.key); subj = def ? def.subject : '';
-  } else if (wiz.template.fetchedDoc) {
-    subj = wiz.template.customSubject || wiz.template.fetchedDoc.subject || '';
-  }
-  document.getElementById('testSendSubjectPreview').textContent = subj || '—';
-  document.getElementById('testSendTo').value = _userEmail || '';
-  document.getElementById('testSendModal').style.display = 'flex';
-}
-
-function closeTestSendModal() {
-  document.getElementById('testSendModal').style.display = 'none';
-  var btn = document.getElementById('btnSubmitTestSend');
-  if (btn) { btn.disabled = false; btn.textContent = 'Send Test'; }
-}
-
-async function submitTestSend() {
-  var to = document.getElementById('testSendTo').value.trim();
-  if (!to || !to.includes('@')) { showToast('Enter a valid email address', 'error'); return; }
-  var dummyDeal = {
-    company: 'Test Partner', email: to, country: 'PT', stage: 'Active - Stable',
-    model: '3P', ytd_pct: 0.12, cy_ytd: 50000, cy_fp: 40000, cy_4w: 8000, cy_7d: 2000,
-    nextAction: 'Follow Up', actionDate: TODAY, tags: 'test', notes: 'Test send',
-    partnerValue: '', partnerType: 'Boutique', language: 'EN', insight_tags: []
-  };
-  var subj, body;
-  if (wiz.template.source === 'builtin') {
-    var tpl = EMAIL_TEMPLATES[wiz.template.key];
-    if (!tpl) { showToast('No template', 'error'); return; }
-    // V3.10 — Test send resolves against the dummy deal's language (EN by default
-    // in the dummyDeal seed below). Block on miss with same UX as real send.
-    var lang = normalizeLanguage_(dummyDeal.language);
-    var resolved = resolveTemplate_(wiz.template.key, lang);
-    if (!resolved.found) { showToast('Template missing for ' + lang + '. Available: ' + (resolved.available || []).join(', '), 'error'); return; }
-    subj = '[TEST] ' + applyPlaceholders(resolved.subject, dummyDeal);
-    body = applyPlaceholders(resolved.body, dummyDeal);
-  } else if (wiz.template.fetchedDoc) {
-    subj = '[TEST] ' + applyPlaceholders(wiz.template.customSubject || wiz.template.fetchedDoc.subject || '', dummyDeal);
-    body = applyPlaceholders(wiz.template.fetchedDoc.body || '', dummyDeal);
-  } else {
-    showToast('Load a custom template first', 'error'); return;
-  }
-  var btn = document.getElementById('btnSubmitTestSend');
-  btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Sending…'; refreshIcons();
-  var sendFrom = (document.getElementById('sendFromSelect') || {}).value || 'shared';
-
-  if (sendFrom === 'personal' && _mailConfig.proxyUrl) {
-    try {
-      await sendViaProxyBatch([{ to: to, subject: subj, htmlBody: body, storeName: 'Test Partner', templateName: 'test' }]);
-      google.script.run.logCampaignSend({
-        to: to, partnerName: 'Test Partner', subject: subj, body: body,
-        threadId: '', status: 'SENT',
-        campaignName: 'Test', campaignId: 'test-' + Date.now().toString(36),
-        templateKey: 'test', sentBy: _userEmail || 'proxy'
-      }, _userTeam);
-      showToast('Test sent to ' + to, 'success');
-      closeTestSendModal();
-    } catch(e) {
-      showToast('Failed: ' + (e.message || 'unknown error'), 'error');
-      btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:13px;height:13px"></i> Send Test'; refreshIcons();
-    }
-  } else {
-    google.script.run
-      .withSuccessHandler(function() {
-        showToast('Test sent to ' + to, 'success');
-        closeTestSendModal();
-      })
-      .withFailureHandler(function(err) {
-        showToast('Failed: ' + (err.message || 'unknown error'), 'error');
-        btn.disabled = false; btn.innerHTML = '<i data-lucide="send" style="width:13px;height:13px"></i> Send Test'; refreshIcons();
-      })
-      .sendMail(to, subj, body, 'Test Partner', 'test', dummyDeal, { contact_name: '', contact_email: '' },
-                { campaignName: 'Test', campaignId: 'test-' + Date.now().toString(36), templateKey: 'test' });
-  }
+  return btoa(out);
 }
 </script>
+
+<style>
+/* Drawer + overlay. Mirrors the Partner drawer styling intentionally so the
+   UX feels consistent — same slide-in, same overlay opacity, same close-on-
+   overlay-click behaviour. */
+#attachOverlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 9998;
+  animation: attachFade 0.15s ease;
+}
+@keyframes attachFade { from { opacity: 0; } to { opacity: 1; } }
+
+#attachDrawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 480px;
+  max-width: 92vw;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.12);
+  transform: translateX(100%);
+  transition: transform 0.2s ease;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#attachDrawer.open { transform: translateX(0); }
+
+#attachDropzone.drag-hover {
+  border-color: var(--ink) !important;
+  background: var(--surface) !important;
+}
+
+/* The toolbar button badge styling */
+#wizBtnAttach { position: relative; }
+#attachBtnBadge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: #16a34a;
+  color: #fff;
+  border-radius: 99px;
+  font-size: 9px;
+  font-weight: 700;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+</style>
+
+<!-- Drawer DOM — appended to body by the include. Kept outside wizard step
+     containers so it remains accessible from any step (or even outside the
+     wizard — rare but cheap). -->
+<div id="attachOverlay" onclick="attachWizClose()"></div>
+<div id="attachDrawer">
+  <div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+    <div>
+      <div style="font-size:14px;font-weight:700;color:var(--ink);letter-spacing:-0.01em">Attach files</div>
+      <div style="font-size:10px;color:var(--ink-4);margin-top:2px">One CSV per partner · matched by filename</div>
+    </div>
+    <button onclick="attachWizClose()" style="background:none;border:none;cursor:pointer;padding:4px;color:var(--ink-3);display:flex;align-items:center;justify-content:center" aria-label="Close">
+      <i data-lucide="x" style="width:18px;height:18px"></i>
+    </button>
+  </div>
+  <div id="attachDrawerBody" style="flex:1;overflow-y:auto;padding:16px"></div>
+</div>

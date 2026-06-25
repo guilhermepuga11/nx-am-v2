@@ -1,828 +1,396 @@
-<html lang="en">
-<head>
-  <base target="_top">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90' font-weight='700' font-family='Barlow, sans-serif' fill='black'>N</text></svg>">
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NEXUS</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@300;400;500;600;700;900&display=swap" rel="stylesheet">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/lucide@latest"></script>
-  <?!= include('nx_styles') ?>
-  <style>
-    /* V3.1 Snapshot pill */
-    .snapshot-pill{display:flex;align-items:center;gap:8px;padding:7px 10px;margin:0 0 4px;border-radius:8px;
-      background:var(--bg);border:1px solid var(--border);cursor:pointer;font-size:10px;font-weight:600;
-      letter-spacing:0.04em;color:var(--ink-3);transition:all .15s;user-select:none;}
-    .snapshot-pill:hover{border-color:var(--ink-3);color:var(--ink);}
-    .snapshot-pill-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:#94a3b8;}
-    .snapshot-pill[data-state="fresh"] .snapshot-pill-dot{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.18);}
-    .snapshot-pill[data-state="amber"] .snapshot-pill-dot{background:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.18);}
-    .snapshot-pill[data-state="red"]   .snapshot-pill-dot{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.18);}
-    .snapshot-pill[data-state="stale"] .snapshot-pill-dot{background:#ef4444;animation:snapshot-pulse 1.6s infinite;}
-    .snapshot-pill-icon{opacity:.5;transition:opacity .15s,transform .3s;}
-    .snapshot-pill:hover .snapshot-pill-icon{opacity:1;}
-    .snapshot-pill[data-refreshing="1"] .snapshot-pill-icon{animation:snapshot-spin .8s linear infinite;opacity:1;}
-    @keyframes snapshot-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
-    @keyframes snapshot-pulse{0%,100%{opacity:1}50%{opacity:.3}}
-    /* V3.12 — Sales table month-mode: hide YTD-only columns. */
-    #ckSalesTable.ck-period-month .ck-col-ytd-only{display:none;}
-  </style>
-</head>
-<body>
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   ADMIN VIEW — clean rewrite
+   Tabs: Pending Contacts · System Logs · Send Log · Accounts
+   V3.0: Send Log reads from widened 14-col schema. Null-safe on status.
+═══════════════════════════════════════════════════════════════════════════ */
 
+var adminLoaded = false;
+var adminTab = 'pending';
+var adminAccounts = [];
+var adminLogsExpanded = false;
+var adminSendsExpanded = false;
 
-<!-- LOADING -->
-<div id="loadingOverlay">
-  <div style="font-family:'Barlow',sans-serif;font-weight:700;font-size:36px;letter-spacing:-0.04em;text-transform:uppercase">NE<span style="color:#a0a0a0;font-weight:400;font-size:0.75em">&middot;</span>XU<span style="color:#a0a0a0;font-weight:400;font-size:0.75em">&middot;</span>S</div>
-  <div style="display:flex;align-items:center;gap:8px">
-    <i data-lucide="loader-2" class="spin" style="width:14px;height:14px;color:var(--ink-4)"></i>
-    <span style="font-size:11px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4)" id="loadMsg">Connecting…</span>
+function initAdminView() {
+  if (!_isManager) {
+    document.getElementById('adminGate').style.display = 'flex';
+    document.getElementById('adminContent').style.display = 'none';
+    return;
+  }
+  document.getElementById('adminGate').style.display = 'none';
+  document.getElementById('adminContent').style.display = 'flex';
+  var teamLabel = document.getElementById('adminTeamLabel');
+  if (teamLabel) teamLabel.textContent = _userTeam || 'All';
+  if (!adminLoaded) { loadAdminData(); adminLoaded = true; }
+  switchAdminTab(adminTab);
+}
+
+function switchAdminTab(tab) {
+  adminTab = tab;
+  ['pending', 'logs', 'sends', 'accounts'].forEach(function(t) {
+    var p = document.getElementById('admin-' + t), b = document.getElementById('atab-' + t);
+    if (p) p.style.display = t === tab ? 'block' : 'none';
+    if (b) b.classList.toggle('active', t === tab);
+  });
+  if (tab === 'pending') renderAdminPending();
+  if (tab === 'accounts' && !adminAccounts.length) loadAdminAccounts();
+}
+
+/* ── Pending Contacts ───────────────────────────────────────────────────── */
+function renderAdminPending() {
+  var el = document.getElementById('adminPendingBody');
+  if (!el) return;
+  updatePendingBadge();
+  if (!pendingContacts || !pendingContacts.length) {
+    el.innerHTML = '<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--ink-4);font-size:11px">No pending proposals.</td></tr>';
+    return;
+  }
+  el.innerHTML = pendingContacts.map(function(c) {
+    var change = String(c.proposed_change || '');
+    var changeLabel = change === 'create'
+      ? '<span style="color:#1d4ed8;font-weight:700">New</span>'
+      : change === 'delete'
+        ? '<span style="color:#be123c;font-weight:700">Delete</span>'
+        : '<span style="color:#b45309;font-weight:700">Edit</span>';
+    return '<tr>'
+      + '<td style="font-weight:500">' + esc(c.merchant_name) + '</td>'
+      + '<td>' + esc(c.contact_name) + '</td>'
+      + '<td style="color:var(--ink-3)">' + esc(c.contact_email) + '</td>'
+      + '<td>' + esc(c.contact_role || '—') + '</td>'
+      + '<td>' + changeLabel + '</td>'
+      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(c.proposed_by || '') + '</td>'
+      + '<td><div style="display:flex;gap:6px">'
+        + '<button class="btn-approve" onclick="doApprove(' + c.rowIndex + ')">Approve</button>'
+        + '<button class="btn-reject" onclick="doReject(' + c.rowIndex + ')">Reject</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function doApprove(row) {
+  google.script.run
+    .withSuccessHandler(function() { showToast('Approved', 'success'); loadAllContacts(); })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .approveContact(row, _userTeam);
+}
+
+function doReject(row) {
+  google.script.run
+    .withSuccessHandler(function() { showToast('Rejected', 'success'); loadAllContacts(); })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .rejectContact(row, _userTeam);
+}
+
+function refreshAdminPendingFull() {
+  showToast('Reloading contacts…', 'success');
+  google.script.run
+    .withSuccessHandler(function(rows) {
+      rows = rows || [];
+      var cockpitNames = {};
+      P.forEach(function(p) { cockpitNames[(p.company || '').toLowerCase()] = true; });
+      allContacts = rows.filter(function(c) {
+        return c.status === 'active' && cockpitNames[(c.merchant_name || '').toLowerCase()];
+      });
+      pendingContacts = rows.filter(function(c) {
+        return c.status === 'pending' && cockpitNames[(c.merchant_name || '').toLowerCase()];
+      });
+      updatePendingBadge();
+      renderAdminPending();
+      showToast('Refreshed — ' + pendingContacts.length + ' pending', 'success');
+    })
+    .withFailureHandler(function(e) { showToast('Error: ' + (e.message || e), 'error'); })
+    .getAllContacts(_userTeam);
+}
+
+/* ── System Logs + Send Log + Accounts ──────────────────────────────────── */
+function loadAdminData() {
+  google.script.run
+    .withSuccessHandler(function(summary) {
+      document.getElementById('adminKpis').innerHTML =
+        kpiHtml('Total Ops', summary.total, 'last 7 days')
+        + kpiHtml('Success', summary.success, '<span style="color:#16a34a">' + (summary.total ? Math.round(summary.success / summary.total * 100) : 0) + '%</span>')
+        + kpiHtml('Errors', summary.error, '<span style="color:#dc2626">' + (summary.total ? Math.round(summary.error / summary.total * 100) : 0) + '%</span>')
+        + kpiHtml('Warnings', summary.warning, '')
+        + kpiHtml('Avg Duration', summary.avgDurationMs + 'ms', '');
+    })
+    .getLogSummary(7, _userTeam);
+  loadAdminLogs();
+}
+
+function loadAdminLogs(loadAll) {
+  var filter = document.getElementById('adminLogFilter').value;
+  var limit = loadAll ? 10000 : 200;
+  var expandBtn = document.getElementById('adminLogsExpandBtn');
+  if (loadAll && expandBtn) {
+    expandBtn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Loading all logs…';
+    expandBtn.disabled = true;
+    refreshIcons();
+  }
+  google.script.run
+    .withSuccessHandler(function(logs) {
+      if (!logs || !logs.length) {
+        document.getElementById('adminLogBody').innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No log entries.</td></tr>';
+        if (expandBtn) expandBtn.style.display = 'none';
+        return;
+      }
+      document.getElementById('adminLogBody').innerHTML = logs.map(function(l) {
+        var ts = l.timestamp ? new Date(l.timestamp).toLocaleString() : '';
+        var s = String(l.status || '');
+        var sc = s === 'error' ? 'color:#be123c;background:#fff1f2'
+          : s === 'warning' ? 'color:#b45309;background:#fffbeb'
+          : s === 'success' ? 'color:#15803d;background:#f0fdf4'
+          : 'color:var(--ink-3)';
+        return '<tr>'
+          + '<td style="font-size:11px;color:var(--ink-3);white-space:nowrap">' + esc(ts) + '</td>'
+          + '<td style="font-weight:600;font-size:11px">' + esc(l.functionName) + '</td>'
+          + '<td><span style="' + sc + ';padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">' + esc(s) + '</span></td>'
+          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(l.triggeredBy) + '</td>'
+          + '<td style="text-align:right;font-size:11px">' + (l.durationMs != null ? l.durationMs + 'ms' : '—') + '</td>'
+          + '<td style="font-size:10px;color:var(--ink-3);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.details) + '">' + esc(l.details) + '</td>'
+          + '</tr>';
+      }).join('');
+      if (expandBtn) {
+        if (loadAll || logs.length < limit) {
+          adminLogsExpanded = true;
+          expandBtn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px"></i> Showing all ' + logs.length + ' entries';
+          expandBtn.disabled = true;
+          expandBtn.style.opacity = '0.6';
+        } else {
+          expandBtn.innerHTML = '<i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Showing ' + logs.length + ' — Load all entries';
+          expandBtn.disabled = false;
+          expandBtn.style.opacity = '1';
+        }
+        expandBtn.style.display = 'inline-flex';
+        refreshIcons();
+      }
+    })
+    .getRecentLogs(limit, filter || null, _userTeam);
+}
+
+function expandAdminLogs() { loadAdminLogs(true); }
+
+/* ── Send Log (V3.0 schema — 14 cols, null-safe status) ─────────────────── */
+function loadAdminSends(loadAll) {
+  var limit = loadAll ? 10000 : 100;
+  var expandBtn = document.getElementById('adminSendsExpandBtn');
+  if (loadAll && expandBtn) {
+    expandBtn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Loading all sends…';
+    expandBtn.disabled = true;
+    refreshIcons();
+  }
+  google.script.run
+    .withSuccessHandler(function(sends) {
+      if (!sends || !sends.length) {
+        document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No send records.</td></tr>';
+        if (expandBtn) expandBtn.style.display = 'none';
+        return;
+      }
+      document.getElementById('adminSendBody').innerHTML = sends.map(function(s) {
+        var ts = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
+        // Null-safe: coerce status to string before indexOf
+        var rawStatus = String(s.status || '');
+        var isSent = rawStatus.toUpperCase().indexOf('SENT') > -1 || rawStatus.toLowerCase() === 'ok';
+        var isErr  = rawStatus.toUpperCase().indexOf('ERROR') === 0;
+        var sc = isSent
+          ? 'color:#15803d;background:#f0fdf4'
+          : isErr
+            ? 'color:#be123c;background:#fff1f2'
+            : 'color:#b45309;background:#fffbeb';
+        var statusLabel = rawStatus || '—';
+        var replyPill = s.replied && String(s.replied).toLowerCase() === 'yes'
+          ? '<span style="color:#15803d;background:#f0fdf4;border:1px solid #bbf7d0;padding:1px 7px;border-radius:99px;font-size:9px;font-weight:700">Yes</span>'
+          : '<span style="color:var(--ink-4);font-size:10px">—</span>';
+        return '<tr>'
+          + '<td style="font-size:11px;color:var(--ink-3);white-space:nowrap">' + esc(ts) + '</td>'
+          + '<td style="font-weight:500">' + esc(s.store) + '</td>'
+          + '<td style="font-size:11px;color:var(--ink-3)">' + esc(s.email) + '</td>'
+          + '<td style="font-size:11px">' + esc(s.campaign) + '</td>'
+          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(s.templateKey || '—') + '</td>'
+          + '<td><span style="' + sc + ';padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase" title="' + esc(statusLabel) + '">' + esc(statusLabel.length > 24 ? statusLabel.slice(0, 24) + '…' : statusLabel) + '</span></td>'
+          + '<td style="text-align:center">' + replyPill + '</td>'
+          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(s.sentBy) + '</td>'
+          + '</tr>';
+      }).join('');
+      if (expandBtn) {
+        if (loadAll || sends.length < limit) {
+          adminSendsExpanded = true;
+          expandBtn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px"></i> Showing all ' + sends.length + ' entries';
+          expandBtn.disabled = true;
+          expandBtn.style.opacity = '0.6';
+        } else {
+          expandBtn.innerHTML = '<i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Showing ' + sends.length + ' — Load all entries';
+          expandBtn.disabled = false;
+          expandBtn.style.opacity = '1';
+        }
+        expandBtn.style.display = 'inline-flex';
+        refreshIcons();
+      }
+    })
+    .withFailureHandler(function(e) {
+      document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:#be123c">Failed to load: ' + esc(e.message || e) + '</td></tr>';
+    })
+    .getRecentSends(limit, _userTeam);
+}
+
+function expandAdminSends() { loadAdminSends(true); }
+
+/* ── Accounts ───────────────────────────────────────────────────────────── */
+function loadAdminAccounts() {
+  google.script.run
+    .withSuccessHandler(function(accounts) {
+      adminAccounts = accounts || [];
+      renderAdminAccounts();
+    })
+    .withFailureHandler(function(e) { showToast('Error loading accounts: ' + e.message, 'error'); })
+    .getAccountsList(_userTeam);
+}
+
+function renderAdminAccounts(filter) {
+  var q = (filter || document.getElementById('acctSearch').value || '').toLowerCase();
+  var filtered = adminAccounts.filter(function(a) { return !q || a.name.toLowerCase().indexOf(q) > -1; });
+  document.getElementById('adminAcctBody').innerHTML = filtered.map(function(a) {
+    var isActive = String(a.status || '').toLowerCase() === 'active';
+    var statusHtml = isActive
+      ? '<span style="color:#15803d;background:#f0fdf4;padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">Active</span>'
+      : '<span style="color:var(--ink-4);background:var(--bg);padding:1px 8px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase">' + esc(a.status) + '</span>';
+    var nameEsc = esc(a.name).replace(/'/g, "\\'");
+    var actionBtn = isActive
+      ? '<button class="btn-reject" style="padding:3px 10px;font-size:10px" onclick="setAcctStatus(\'' + nameEsc + '\',\'Inactive\')">Deactivate</button>'
+      : '<button class="btn-approve" style="padding:3px 10px;font-size:10px" onclick="setAcctStatus(\'' + nameEsc + '\',\'Active\')">Reactivate</button>';
+    return '<tr>'
+      + '<td style="font-weight:500">' + esc(a.name) + '</td>'
+      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(a.sources) + '</td>'
+      + '<td>' + statusHtml + '</td>'
+      + '<td style="font-size:10px;color:var(--ink-4)">' + esc(a.dateAdded) + '</td>'
+      + '<td>' + actionBtn + '</td>'
+      + '</tr>';
+  }).join('') || '<tr><td colspan="5" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No accounts found.</td></tr>';
+  var countEl = document.getElementById('acctCount');
+  if (countEl) countEl.textContent = filtered.length + ' of ' + adminAccounts.length;
+}
+
+function setAcctStatus(name, newStatus) {
+  if (!confirm((newStatus === 'Inactive' ? 'Deactivate' : 'Reactivate') + ' "' + name + '"?')) return;
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (res.success) { showToast(name + ' → ' + newStatus, 'success'); loadAdminAccounts(); }
+      else { showToast(res.error || 'Failed', 'error'); }
+    })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .setAccountStatus(name, newStatus, _userTeam);
+}
+
+/* ── Admin maintenance ──────────────────────────────────────────────────── */
+function adminClearCache() {
+  showToast('Clearing cache…', 'success');
+  google.script.run
+    .withSuccessHandler(function() { showToast('Cache cleared.', 'success'); })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .clearNexusCache();
+}
+
+function adminPurgeLogs() {
+  if (!confirm('Purge log entries older than 184 days?')) return;
+  showToast('Purging old logs…', 'success');
+  google.script.run
+    .withSuccessHandler(function() {
+      showToast('Old logs purged.', 'success');
+      adminLoaded = false;
+      adminLogsExpanded = false;
+      initAdminView();
+    })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .scheduledLogCleanup(_userTeam);
+}
+
+function adminRebuildSpine() {
+  if (!confirm('Rebuild Accounts Spine for ' + (_userTeam || 'current team') + '? This may take 10–20 seconds.')) return;
+  showToast('Rebuilding spine…', 'success');
+  google.script.run
+    .withSuccessHandler(function(r) { showToast('Spine rebuilt: ' + JSON.stringify(r), 'success'); loadAdminAccounts(); })
+    .withFailureHandler(function(e) { showToast('Error: ' + e.message, 'error'); })
+    .buildAccountsSpineForTeam(_userTeam);
+}
+</script>
+
+<!-- ══ ADMIN VIEW HTML ══ -->
+<div id="view-admin" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0">
+  <div id="adminGate" style="display:none;flex:1;align-items:center;justify-content:center;flex-direction:column;gap:8px">
+    <i data-lucide="shield-off" style="width:32px;height:32px;color:var(--ink-4)"></i>
+    <div style="font-size:13px;font-weight:600;color:var(--ink-3)">Access restricted</div>
+    <div style="font-size:11px;color:var(--ink-4)">Manager account required.</div>
   </div>
-</div>
 
-
-<div id="app" style="display:none">
-  <!-- SIDEBAR -->
-  <aside class="sidebar">
-    <div class="logo-wordmark">NE<span class="dot">&middot;</span>XU<span class="dot">&middot;</span>S</div>
-    <div style="font-size:9px;font-weight:600;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-4);text-align:right;margin-top:-2px;margin-bottom:6px;padding:0 4px">Account Management</div>
-    <div style="padding:8px 4px 10px;border-bottom:1px solid var(--border);margin-bottom:0">
-      <div style="font-size:8px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px;padding:0 2px;display:flex;align-items:center;gap:6px">User <span id="teamRoleBadge" style="display:none"></span></div>
-      <select id="ctxUser" class="ctx-select"><option value="">Loading…</option></select>
-    </div>
-    <!-- V11: Team selector -->
-    <div id="teamSelectorWrap" style="padding:6px 4px 12px;border-bottom:1px solid var(--border);margin-bottom:4px">
-      <div style="font-size:8px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px;padding:0 2px">Team</div>
-      <select id="ctxTeam" class="ctx-select" onchange="handleTeamSwitch(this.value)"><option value="">Loading…</option></select>
-    </div>
-    <div class="nav-section-label">Menu</div>
-    <div class="nav-item active" id="nav-overview" onclick="switchView('overview')"><i data-lucide="layout-dashboard" style="width:14px;height:14px;flex-shrink:0"></i> Overview</div>
-    <div class="nav-item" id="nav-cockpit" onclick="switchView('cockpit')"><i data-lucide="bar-chart-2" style="width:14px;height:14px;flex-shrink:0"></i> Cockpit</div>
-    <div class="nav-item" id="nav-bidask" onclick="switchView('bidask')" style="display:none;padding-left:34px;font-size:12px">
-      <i data-lucide="line-chart" style="width:12px;height:12px;flex-shrink:0"></i> Bid-Ask
-      <span style="margin-left:auto;font-size:7px;font-weight:700;background:#fffbeb;border:1px solid #fde68a;padding:1px 5px;border-radius:4px;color:#b45309;letter-spacing:0.06em">DRAFT</span>
-    </div>
-    <div class="nav-item" id="nav-partners" onclick="switchView('partners')"><i data-lucide="users" style="width:14px;height:14px;flex-shrink:0"></i> Partners</div>
-    <div class="nav-item" id="nav-contacts" onclick="switchView('contacts')" style="display:none;padding-left:34px;font-size:12px">
-      <i data-lucide="contact" style="width:12px;height:12px;flex-shrink:0"></i> Contacts
-    </div>
-    <div class="nav-item" id="nav-team" onclick="switchView('team')"><i data-lucide="users" style="width:14px;height:14px;flex-shrink:0"></i> Team</div>
-    <div class="nav-item" id="nav-huddle" onclick="switchView('huddle')" style="display:none;padding-left:34px;font-size:12px">
-      <i data-lucide="users-round" style="width:12px;height:12px;flex-shrink:0"></i> Huddles
-    </div>
-    <div class="nav-item" id="nav-calendar-sub" onclick="switchView('calendar')" style="display:none;padding-left:34px;font-size:12px">
-      <i data-lucide="calendar-days" style="width:12px;height:12px;flex-shrink:0"></i> Calendar
-    </div>
-    <div class="nav-item" id="nav-holidays" onclick="switchView('holidays')" style="display:none;padding-left:34px;font-size:12px">
-      <i data-lucide="palmtree" style="width:12px;height:12px;flex-shrink:0"></i> Holidays
-    </div>
-    <div class="nav-item" id="nav-email" onclick="switchView('email')"><i data-lucide="send" style="width:14px;height:14px;flex-shrink:0"></i> Outreach</div>
-    <div class="nav-item" id="nav-campaigns" onclick="switchView('campaigns')" style="display:none;padding-left:34px;font-size:12px">
-      <i data-lucide="megaphone" style="width:12px;height:12px;flex-shrink:0"></i> Campaigns
-    </div>
-    <div class="nav-item" id="nav-replies" onclick="switchView('replies')" style="display:none;padding-left:34px;font-size:12px">
-      <i data-lucide="reply" style="width:12px;height:12px;flex-shrink:0"></i> Reply Center
-    </div>
-    <!-- V11: OPS Projects (read-only view for AM) -->
-    <div style="background:#EEEDFE;border-radius:8px;margin:10px 0 4px;padding:4px 0 6px">
-      <div class="nav-section-label" style="margin-top:4px;color:#534AB7">Operations</div>
-      <div class="nav-item" id="nav-projects" onclick="switchView('projects')" style="padding-left:16px">
-        <i data-lucide="folder-kanban" style="width:14px;height:14px;flex-shrink:0"></i> Projects
-        <span style="margin-left:auto;font-size:7px;font-weight:700;background:#fff;border:1px solid #534AB7;padding:1px 5px;border-radius:4px;color:#3C3489;letter-spacing:0.06em">NEXUS OPS</span>
+  <div id="adminContent" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+    <!-- toolbar -->
+    <div class="filter-bar" style="justify-content:space-between;border-radius:0;border-left:none;border-right:none">
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="drawer-tab active" id="atab-pending" onclick="switchAdminTab('pending')" style="padding:8px 14px">Pending Contacts <span id="adminPendingBadge" style="display:none;background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px;margin-left:4px">0</span></button>
+        <button class="drawer-tab" id="atab-logs" onclick="switchAdminTab('logs')" style="padding:8px 14px">System Logs</button>
+        <button class="drawer-tab" id="atab-sends" onclick="switchAdminTab('sends');loadAdminSends()" style="padding:8px 14px">Send Log</button>
+        <button class="drawer-tab" id="atab-accounts" onclick="switchAdminTab('accounts')" style="padding:8px 14px">Accounts</button>
+        <span id="adminTeamLabel" style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:var(--bg);border:1px solid var(--border);padding:3px 10px;border-radius:6px;color:var(--ink-3);margin-left:8px"></span>
       </div>
-    </div>
-    <div class="nav-section-label" style="margin-top:14px">Global Tools</div>
-    <a class="nav-item-ext" href="https://gemini.google.com/gem/12sRDSiiqZdOQ7q2ZsfBZHtF7g1mhxPhW?usp=sharing" target="_blank" rel="noopener">
-      <i data-lucide="sparkles" style="width:14px;height:14px;flex-shrink:0"></i> MBO Studio
-      <span style="margin-left:auto;font-size:8px;font-weight:700;background:var(--bg);border:1px solid var(--border);padding:1px 5px;border-radius:4px;color:var(--ink-4)">AI</span>
-    </a>
-    <div class="nav-item" id="nav-head" onclick="switchView('head')" style="display:none">
-      <i data-lucide="crown" style="width:14px;height:14px;flex-shrink:0"></i> Head
-      <span style="margin-left:auto;font-size:7px;font-weight:700;background:#FAEEDA;border:1px solid #854F0B;padding:1px 5px;border-radius:4px;color:#854F0B;letter-spacing:0.06em">MGR</span>
-    </div>
-    <div class="nav-item" id="nav-admin" onclick="switchView('admin')" style="display:none">
-      <i data-lucide="shield" style="width:14px;height:14px;flex-shrink:0"></i> Admin
-      <span id="pendingBadge" style="display:none;margin-left:auto;background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px">0</span>
-    </div>
-    <div class="sidebar-footer">
-      <!-- V3.1 Snapshot freshness pill (hidden until NX_SNAPSHOT.boot runs) -->
-      <div id="snapshotPill" class="snapshot-pill" data-state="unknown" onclick="snapshotManualRefresh()" style="display:none" title="Click to refresh snapshot">
-        <span class="snapshot-pill-dot"></span>
-        <span data-pill-text style="flex:1">No snapshot</span>
-        <i data-lucide="refresh-cw" style="width:11px;height:11px" class="snapshot-pill-icon"></i>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;padding:8px">
-        <span class="sync-dot pulse"></span>
-        <span style="font-size:10px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4)" id="syncLabel">NEXUS</span>
-      </div>
-    </div>
-  </aside>
-
-
-  <!-- MAIN AREA -->
-  <div class="main-area">
-    <!-- Topbar -->
-    <div class="topbar" style="position:relative">
       <div style="display:flex;align-items:center;gap:8px">
-        <span class="topbar-title" id="pageTitle">Cockpit</span>
-        <span id="topbarTeamBadge" style="display:none;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:var(--bg);border:1px solid var(--border);padding:3px 10px;border-radius:6px;color:var(--ink-3)"></span>
-        <span id="topbarViewBadge" style="display:none;font-size:8px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:#EEEDFE;border:1px solid #534AB7;padding:2px 7px;border-radius:4px;color:#3C3489"></span>
-      </div>
-      <div id="ckTabToggle" style="display:none;position:absolute;left:50%;transform:translateX(-50%)">
-        <div style="display:flex;gap:0;background:var(--bg);border:2px solid var(--ink);border-radius:10px;padding:3px">
-          <button id="ctab-sales" onclick="switchCockpitTab('sales')" class="perf-tab active" style="padding:6px 18px;border-radius:8px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:6px"><i data-lucide="trending-up" style="width:13px;height:13px"></i> Sales</button>
-          <button id="ctab-stock" onclick="switchCockpitTab('stock')" class="perf-tab" style="padding:6px 18px;border-radius:8px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:6px"><i data-lucide="package" style="width:13px;height:13px"></i> Stock</button>
-          <button id="ctab-kpi" onclick="switchCockpitTab('kpi')" class="perf-tab" style="padding:6px 18px;border-radius:8px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:6px"><i data-lucide="activity" style="width:13px;height:13px"></i> KPI</button>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <button id="btnConnectGmail" onclick="openProxyAuth()" style="display:none;padding:5px 12px;font-size:10px;font-weight:700;letter-spacing:0.04em;border-radius:8px;border:1.5px solid var(--border);background:var(--bg);color:var(--ink-2);cursor:pointer;font-family:inherit;display:none;align-items:center;gap:5px;white-space:nowrap;transition:all 0.15s" onmouseenter="this.style.borderColor='var(--ink)'" onmouseleave="this.style.borderColor='var(--border)'"><i data-lucide="mail-check" style="width:12px;height:12px"></i> <span id="btnConnectGmailLabel">Connect Gmail</span></button>
-        <div style="position:relative;display:none;align-items:center" id="gmailInfoWrap">
-          <div style="width:18px;height:18px;border-radius:50%;border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:help;font-size:10px;font-weight:700;color:var(--ink-4);font-style:italic;font-family:Georgia,serif;flex-shrink:0" onmouseenter="document.getElementById('gmailInfoTip').style.display='block'" onmouseleave="document.getElementById('gmailInfoTip').style.display='none'">i</div>
-          <div id="gmailInfoTip" style="display:none;position:absolute;top:32px;right:0;width:260px;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px -4px rgba(13,13,12,0.15);padding:12px 14px;z-index:300;font-size:11px;color:var(--ink-2);line-height:1.55">
-            <div style="font-weight:700;margin-bottom:4px;font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4)">First-time setup</div>
-            Google will ask you to authorize NEXUS to send emails from your account. You'll see an "Unverified app" screen — this is normal for internal tools. Click <strong>Review Permissions → Allow</strong>. This only happens once.
-          </div>
-        </div>
-        <input class="nx-input" id="globalSearch" placeholder="Search partners…" oninput="handleSearch()" style="width:180px">
-        <div style="position:relative">
-          <div class="icon-btn" id="notifBtn" onclick="toggleNotif()"><i data-lucide="bell" style="width:14px;height:14px"></i></div>
-          <div id="notifPanel" style="display:none;position:absolute;top:42px;right:0;width:300px;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:0 16px 40px -8px rgba(13,13,12,0.2);z-index:200;overflow:hidden">
-            <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
-              <span style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase">Notifications</span>
-              <div class="icon-btn" style="width:24px;height:24px" onclick="toggleNotif()"><i data-lucide="x" style="width:11px;height:11px"></i></div>
-            </div>
-            <div style="max-height:280px;overflow-y:auto" id="notifContent"><div style="padding:20px;text-align:center;font-size:12px;color:var(--ink-3)">Loading…</div></div>
-          </div>
-        </div>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminClearCache()"><i data-lucide="trash-2" style="width:12px;height:12px"></i> Clear Cache</button>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminRebuildSpine()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Rebuild Spine</button>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;display:flex;align-items:center;gap:6px" onclick="adminPurgeLogs()"><i data-lucide="archive" style="width:12px;height:12px"></i> Purge Old Logs</button>
       </div>
     </div>
 
+    <!-- KPIs -->
+    <div style="padding:16px 24px 0"><div class="kpi-grid" id="adminKpis" style="grid-template-columns:repeat(5,1fr)"></div></div>
 
-    <!-- ══ OVERVIEW VIEW ══ -->
-    <div id="view-overview" class="content" style="display:block">
-      <!-- Greeting -->
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <div>
-          <div style="font-size:17px;font-weight:700;letter-spacing:-0.02em" id="ovGreeting">Good morning</div>
-          <div style="font-size:11px;color:var(--ink-3);margin-top:2px" id="ovDate"></div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:10px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4)" id="ovPartnerCount"></span>
-        </div>
+    <!-- PENDING CONTACTS TAB -->
+    <div id="admin-pending" style="flex:1;overflow:auto;padding:0 24px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Approve or Reject Contact Proposals</span>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;margin-left:auto" onclick="refreshAdminPendingFull()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>
       </div>
-
-
-      <!-- Compact KPI Strip — 3 sections (Sales | Stock | KPI) × 2 rows each -->
-      <div id="ovKpis" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:10px"></div>
-
-
-      <!-- V3.8 — Two-column layout reversed: Data LEFT (closer to nav), Mail RIGHT.
-                  Left column is now 2 merged cards (Top Movers + Breakdown Mix)
-                  replacing the prior 3 (Top Sales + Stock Alerts + SOH Pie). -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start">
-
-
-        <!-- LEFT: Data widgets — Top Movers (lens-switchable) + Breakdown Mix (dim+lens-switchable) -->
-        <div style="display:flex;flex-direction:column;gap:10px">
-          <!-- Top Movers — V3.8 merged Top Sales + Stock Alerts + At Risk; V3.12 drops At Risk + adds subtext per lens. -->
-          <div class="section-card" style="margin:0;padding:0;overflow:hidden;height:260px;display:flex;flex-direction:column">
-            <div style="padding:8px 14px 6px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-shrink:0">
-              <span style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:6px"><i data-lucide="users" style="width:11px;height:11px"></i> Top Movers</span>
-              <div id="ovMoversLens" style="display:flex;gap:3px"></div>
-              <span style="font-size:10px;color:var(--ink-4);cursor:pointer" onclick="switchView('cockpit')">View all →</span>
-            </div>
-            <div id="ovMoversSub" style="padding:0 14px 6px;font-size:10px;color:var(--ink-4);font-style:italic;flex-shrink:0"></div>
-            <div id="ovMoversWrap" style="flex:1;overflow-y:auto"></div>
-          </div>
-
-
-          <!-- Breakdown Mix — dim switcher (Season/Brand/Family) × lens (Sales/Stock) pie -->
-          <div class="section-card" style="margin:0;padding:0;overflow:hidden;height:320px;display:flex;flex-direction:column">
-            <div style="padding:8px 14px 6px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;flex-shrink:0">
-              <span style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:6px"><i data-lucide="pie-chart" style="width:11px;height:11px"></i> <span id="ovMixTitle">Mix</span></span>
-              <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
-                <div id="ovMixDim" style="display:flex;gap:3px"></div>
-                <span style="width:1px;height:12px;background:var(--border)"></span>
-                <div id="ovMixLens" style="display:flex;gap:3px"></div>
-              </div>
-              <span style="font-size:10px;color:var(--ink-4);cursor:pointer" id="ovMixViewLink">View →</span>
-            </div>
-            <div id="ovMixWrap" style="flex:1;overflow:hidden"></div>
-          </div>
-        </div>
-
-
-        <!-- RIGHT: Outreach bubble + Email Feed (unchanged, just moved from left) -->
-        <div style="display:flex;flex-direction:column;gap:10px">
-          <div class="section-card" style="margin:0;padding:0;overflow:hidden;height:260px;display:flex;flex-direction:column">
-            <div style="padding:8px 14px 6px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
-              <span style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:6px"><i data-lucide="megaphone" style="width:11px;height:11px"></i> Outreach</span>
-              <span style="font-size:10px;color:var(--ink-4);cursor:pointer" onclick="switchView('campaigns')">View all →</span>
-            </div>
-            <div id="ovOutreachWrap" style="flex:1;overflow:hidden;display:flex;flex-direction:column"></div>
-          </div>
-
-          <div class="section-card" style="margin:0;padding:0;overflow:hidden;height:320px;display:flex;flex-direction:column">
-            <div style="padding:8px 14px 6px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0">
-              <span style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:6px"><i data-lucide="mail" style="width:11px;height:11px"></i> Email Feed</span>
-              <span style="font-size:10px;color:var(--ink-4);cursor:pointer" onclick="switchView('email')">Open outreach →</span>
-            </div>
-            <div id="ovEmailFeedList" style="flex:1;overflow-y:auto">
-              <div style="text-align:center;padding:40px;color:var(--ink-4);font-size:11px">Loading…</div>
-            </div>
-          </div>
-        </div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table"><thead><tr><th>Account</th><th>Name</th><th>Email</th><th>Role</th><th>Change</th><th>Proposed by</th><th>Actions</th></tr></thead>
+        <tbody id="adminPendingBody"><tr><td colspan="7" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
       </div>
     </div>
 
-
-    <!-- ══ COCKPIT VIEW ══ -->
-    <div id="view-cockpit" class="content" style="display:none">
-      <!-- Per-tab KPI summary cards (toggled by JS) -->
-      <div class="kpi-grid" id="ckKpiGrid"></div>
-      <div class="kpi-grid" id="ckStockKpis" style="display:none;grid-template-columns:repeat(4,1fr)"></div>
-      <div class="kpi-grid" id="ckKpiMetrics" style="display:none;grid-template-columns:repeat(6,1fr)"></div>
-      <!-- V3.3 — Season-mode KPI strips (shown only when lens is Season / SOH) -->
-      <div class="kpi-grid" id="ckSalesSeasonKpis" style="display:none;grid-template-columns:repeat(4,1fr)"></div>
-      <div class="kpi-grid" id="ckStockSOHKpis" style="display:none;grid-template-columns:repeat(3,1fr)"></div>
-
-
-      <!-- Toggle moved to topbar -->
-
-
-      <!-- Universal filter bar -->
-      <div class="filter-bar" style="margin-bottom:0;border-radius:12px 12px 0 0">
-        <div id="ckGroupToggleWrap" style="display:flex;align-items:center;gap:6px;margin-right:10px">
-          <span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">View</span>
-          <div style="display:flex;gap:0;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:2px">
-            <button id="ckViewStore" onclick="setCkGroupMode(false)" class="filter-tag-btn active" style="font-size:10px;padding:3px 10px;border-radius:5px">Store</button>
-            <button id="ckViewGroup" onclick="setCkGroupMode(true)" class="filter-tag-btn" style="font-size:10px;padding:3px 10px;border-radius:5px">Store Group</button>
-          </div>
-        </div>
-        <!-- V3.3 — Lens toggle: per-tab default vs breakdown view. V3.7 — breakdown
-             dim (season/brand/family) selectable via the popover under the "By" pill. -->
-        <div id="ckLensToggleWrap" style="display:flex;align-items:center;gap:6px;margin-right:10px;position:relative">
-          <span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Lens</span>
-          <div style="display:flex;gap:0;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:2px">
-            <button id="ckLensDefault" onclick="setCkLens('default')" class="filter-tag-btn active" style="font-size:10px;padding:3px 10px;border-radius:5px">All</button>
-            <button id="ckLensSeason" onclick="toggleCkDimMenu()" class="filter-tag-btn" style="font-size:10px;padding:3px 10px;border-radius:5px;display:inline-flex;align-items:center;gap:4px">
-              <span id="ckLensSeasonLabel">By Season</span>
-              <i data-lucide="chevron-down" style="width:10px;height:10px"></i>
-            </button>
-          </div>
-          <!-- V3.7 dim popover (hidden by default) -->
-          <div id="ckDimMenu" style="display:none;position:absolute;top:calc(100% + 4px);right:0;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.08);padding:4px;z-index:1000;min-width:120px">
-            <button id="ckDimOpt_season" onclick="setCkDim('season')" class="ck-dim-opt">Season</button>
-            <button id="ckDimOpt_brand"  onclick="setCkDim('brand')"  class="ck-dim-opt">Brand</button>
-            <button id="ckDimOpt_family" onclick="setCkDim('family')" class="ck-dim-opt">Family</button>
-          </div>
-        </div>
-        <!-- V3.12 — Period toggle (YTD vs selected Month). Sales tab only;
-             hidden by applyCkLens_ on Stock/KPI. Month nav appears only when
-             Month is active; mirrors the KPI tab's existing month chevrons. -->
-        <div id="ckPeriodToggleWrap" style="display:flex;align-items:center;gap:6px;margin-right:10px">
-          <span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Period</span>
-          <div style="display:flex;gap:0;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:2px">
-            <button id="ckPerYtd"   onclick="setCkPeriod('ytd')"   class="filter-tag-btn active" style="font-size:10px;padding:3px 10px;border-radius:5px">YTD</button>
-            <button id="ckPerMonth" onclick="setCkPeriod('month')" class="filter-tag-btn"        style="font-size:10px;padding:3px 10px;border-radius:5px">Month</button>
-          </div>
-          <span id="ckPerMonthNav" style="display:none;align-items:center;gap:4px">
-            <button onclick="cycleCkSalesMonth(1)" style="background:none;border:1px solid var(--border);border-radius:5px;padding:2px 6px;cursor:pointer;font-size:10px;color:var(--ink-3)" title="Older month">←</button>
-            <span id="ckPerMonthLabel" style="font-size:10px;color:var(--ink-2);min-width:64px;text-align:center;font-weight:600"></span>
-            <button onclick="cycleCkSalesMonth(-1)" style="background:none;border:1px solid var(--border);border-radius:5px;padding:2px 6px;cursor:pointer;font-size:10px;color:var(--ink-3)" title="Newer month">→</button>
-          </span>
-        </div>
-        <span id="ckModelLabel" style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Model</span>
-        <div id="ckModelFilters" style="display:flex;gap:6px;flex-wrap:wrap"></div>
-        <button id="btnEmailCkFiltered" onclick="emailCkFiltered()" style="display:none;align-items:center;gap:6px;padding:5px 14px;font-size:11px;font-weight:700;background:var(--ink);color:#fff;border:none;border-radius:8px;cursor:pointer;letter-spacing:0.03em"><i data-lucide="mail" style="width:12px;height:12px"></i> <span id="btnEmailCkLabel">Email filtered</span></button>
-        <span style="margin-left:auto;font-size:10px;color:var(--ink-4)" id="ckCount">—</span>
+    <!-- SYSTEM LOGS TAB -->
+    <div id="admin-logs" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <select id="adminLogFilter" class="nx-select" onchange="adminLogsExpanded=false;loadAdminLogs()"><option value="">All Statuses</option><option value="success">Success</option><option value="error">Error</option><option value="warning">Warning</option></select>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminLogsExpanded=false;loadAdminLogs()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i></button>
       </div>
-
-
-      <!-- Per-tab smart filters (consistent height slot) -->
-      <div id="ckInsightSection" class="ck-insight-slot">
-        <div style="font-size:9px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:8px;margin-bottom:10px">
-          <i data-lucide="sparkles" style="width:11px;height:11px"></i> Insight Filters
-        </div>
-        <div id="ckInsightCards" style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px"></div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table"><thead><tr><th>Timestamp</th><th>Function</th><th>Status</th><th>Triggered By</th><th style="text-align:right">Duration</th><th>Details</th></tr></thead>
+        <tbody id="adminLogBody"><tr><td colspan="6" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
       </div>
-      <div id="ckStockInsightSection" class="ck-insight-slot" style="display:none">
-        <div style="font-size:9px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:8px;margin-bottom:10px">
-          <i data-lucide="sparkles" style="width:11px;height:11px"></i> Stock Filters
-        </div>
-        <div id="ckStockInsightCards" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px"></div>
-      </div>
-      <div id="ckKpiInsightSection" class="ck-insight-slot" style="display:none">
-        <div style="font-size:9px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:8px;margin-bottom:10px">
-          <i data-lucide="sparkles" style="width:11px;height:11px"></i> KPI Filters
-          <span style="margin-left:auto;display:flex;align-items:center;gap:4px">
-            <button onclick="cycleKpiMonth(1)" style="background:none;border:1px solid var(--border);border-radius:5px;padding:2px 6px;cursor:pointer;font-size:10px;color:var(--ink-3)" title="Previous month">←</button>
-            <span id="ckKpiMonthLabel" style="font-size:10px;letter-spacing:0.04em;text-transform:none;color:var(--ink-2);display:flex;align-items:center;gap:5px;min-width:70px;justify-content:center"></span>
-            <button onclick="cycleKpiMonth(-1)" style="background:none;border:1px solid var(--border);border-radius:5px;padding:2px 6px;cursor:pointer;font-size:10px;color:var(--ink-3)" title="Next month">→</button>
-          </span>
-        </div>
-        <div id="ckKpiInsightCards" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px"></div>
-      </div>
-      <!-- V3.3 → V3.7.1 — Breakdown value picker (shown when breakdown lens is on).
-           Was a chip grid (ckSeasonCards) which became unusable at 800+ brands.
-           Now: native select, DESC-sorted by the active lens metric. -->
-      <div id="ckSeasonPickerSection" class="ck-insight-slot" style="display:none">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <div style="font-size:9px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:6px">
-            <i data-lucide="filter" style="width:11px;height:11px"></i> <span id="ckSeasonPickerLabel">Season</span>
-          </div>
-          <select id="ckValueSelect" onchange="setCkSeason(this.value)" class="nx-select" style="min-width:280px;max-width:420px;flex:1"></select>
-          <span id="ckValueMeta" style="font-size:10px;color:var(--ink-4);font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap"></span>
-        </div>
-      </div>
-
-
-      <!-- Per-tab tables -->
-      <div id="ck-sales" class="section-card" style="padding:0;overflow:hidden">
-        <div style="overflow:auto;max-height:calc(100vh - 320px)">
-          <table class="nx-table" id="ckSalesTable">
-            <thead><tr><th style="width:36px;text-align:center">#</th><th onclick="sortCk('store')">Partner</th><th onclick="sortCk('country')">Country</th><th onclick="sortCk('model')">Model</th><th onclick="sortCk('cy_ytd')" style="text-align:right"><span id="ckHdrGtv">YTD GTV</span></th><th onclick="sortCk('ytd_pct')" style="text-align:right"><span id="ckHdrPct">YoY%</span></th><th class="ck-col-ytd-only" onclick="sortCk('w4_pct')" style="text-align:right">4W%</th><th class="ck-col-ytd-only" onclick="sortCk('d7_pct')" style="text-align:right">7D%</th><th class="ck-col-ytd-only" onclick="sortCk('fp_share')" style="text-align:right">FP%</th><th onclick="sortCk('cy_units_tot')" style="text-align:right"><span id="ckHdrUnits">Units</span></th><th onclick="sortCk('units_pct')" style="text-align:right"><span id="ckHdrUnitsPct">Units YoY%</span></th><th class="ck-col-ytd-only" onclick="sortCk('offline_pct')" style="text-align:right">Offline%</th><th>Insights</th></tr></thead>
-            <tbody id="ckSalesBody"></tbody>
-          </table>
-        </div>
-      </div>
-      <!-- V3.3 — Season-mode Sales table -->
-      <div id="ck-sales-season" class="section-card" style="display:none;padding:0;overflow:hidden">
-        <div style="overflow:auto;max-height:calc(100vh - 320px)">
-          <table class="nx-table" id="ckSalesSeasonTable">
-            <thead><tr>
-              <th style="width:36px;text-align:center">#</th>
-              <th onclick="sortCkSeason('store')">Partner</th>
-              <th onclick="sortCkSeason('country')">Country</th>
-              <th onclick="sortCkSeason('model')">Model</th>
-              <th onclick="sortCkSeason('units_total')" style="text-align:right">Units</th>
-              <th onclick="sortCkSeason('gtv_total')" style="text-align:right">GTV</th>
-              <th onclick="sortCkSeason('asp_avg')" style="text-align:right">ASP</th>
-              <th style="text-align:right">Monthly Trend</th>
-            </tr></thead>
-            <tbody id="ckSalesSeasonBody"></tbody>
-          </table>
-        </div>
-      </div>
-      <div id="ck-stock" style="display:none">
-        <div class="section-card" style="padding:0;overflow:hidden">
-          <div style="overflow:auto;max-height:calc(100vh - 320px)">
-            <table class="nx-table" id="ckStockTable">
-              <thead><tr><th style="width:36px;text-align:center">#</th><th onclick="sortCkSt('store')">Partner</th><th onclick="sortCkSt('today')" style="text-align:right">Today</th><th onclick="sortCkSt('diff')" style="text-align:right">Day Δ</th><th onclick="sortCkSt('pct15')" style="text-align:right">15D Var</th><th style="text-align:right">15D Trend</th><th style="text-align:center">Status</th></tr></thead>
-              <tbody id="ckStockBody"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      <!-- V3.3 — SOH Stock table (lens = SOH by Season) -->
-      <div id="ck-stock-soh" style="display:none">
-        <div class="section-card" style="padding:0;overflow:hidden">
-          <div style="overflow:auto;max-height:calc(100vh - 320px)">
-            <table class="nx-table" id="ckStockSOHTable">
-              <thead><tr>
-                <th style="width:36px;text-align:center">#</th>
-                <th onclick="sortCkSOH('store')">Partner</th>
-                <th onclick="sortCkSOH('country')">Country</th>
-                <th onclick="sortCkSOH('model')">Model</th>
-                <th onclick="sortCkSOH('online')" style="text-align:right">Online &amp; Available</th>
-                <th onclick="sortCkSOH('total')" style="text-align:right">Total (EoD)</th>
-                <th onclick="sortCkSOH('fill_pct')" style="text-align:right">Online %</th>
-              </tr></thead>
-              <tbody id="ckStockSOHBody"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      <div id="ck-kpi" style="display:none">
-        <div class="section-card" style="padding:0;overflow:hidden">
-          <div style="overflow:auto;max-height:calc(100vh - 320px)">
-            <table class="nx-table" id="ckKpiTable">
-              <thead><tr>
-                <th style="width:36px;text-align:center">#</th>
-                <th onclick="sortCkKpi('store')">Partner</th>
-                <th onclick="sortCkKpi('orders_now')" style="text-align:right">Orders</th>
-                <th onclick="sortCkKpi('perfect_now')" style="text-align:right">Perfect%</th>
-                <th onclick="sortCkKpi('ns_now')" style="text-align:right">NS%</th>
-                <th onclick="sortCkKpi('sos_now')" style="text-align:right">SOS%</th>
-                <th onclick="sortCkKpi('wi_now')" style="text-align:right">WI%</th>
-                <th onclick="sortCkKpi('imperfect_now')" style="text-align:right">Imperfect</th>
-                <th onclick="sortCkKpi('penalty_now')" style="text-align:right">Penalty</th>
-                <th style="text-align:center">MoM</th>
-              </tr></thead>
-              <tbody id="ckKpiBody"></tbody>
-            </table>
-          </div>
-        </div>
+      <div style="text-align:center;padding:12px 0">
+        <button class="btn-ghost" id="adminLogsExpandBtn" onclick="expandAdminLogs()" style="padding:6px 16px;font-size:11px;display:none;align-items:center;gap:6px;margin:0 auto"><i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Load all entries</button>
       </div>
     </div>
 
-
-    <!-- ══ BID-ASK VIEW (V3.8 — DRAFT) ══ -->
-    <div id="view-bidask" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
-
-
-    <!-- ══ PARTNERS VIEW ══ -->
-    <!-- ══ PARTNERS VIEW ══ -->
-    <div id="view-partners" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0">
-      <div class="filter-bar" style="padding:10px 14px">
-        <span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Filter</span>
-        <select class="nx-select" id="flt-model" onchange="filterPartners()"><option value="">All Models</option></select>
-        <select class="nx-select" id="flt-stage" onchange="filterPartners()"><option value="">All Stages</option></select>
-        <select class="nx-select" id="flt-country" onchange="filterPartners()"><option value="">All Countries</option></select>
-        <div id="tagFilterBtns" style="display:flex;gap:5px;flex-wrap:wrap"></div>
-        <span style="margin-left:auto;font-size:10px;color:var(--ink-4)" id="partnersCount">— records</span>
-        <button class="btn-primary" style="padding:6px 14px;font-size:11px" onclick="openProposePartnerModal()"><i data-lucide="plus" style="width:12px;height:12px"></i> Propose Partner</button>
+    <!-- SEND LOG TAB (V3.0 — 8 cols: Timestamp, Partner, Email, Campaign, Template, Status, Replied, Sent By) -->
+    <div id="admin-sends" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
+      <div style="margin-bottom:12px"><button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminSendsExpanded=false;loadAdminSends()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button></div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table"><thead><tr><th>Timestamp</th><th>Partner</th><th>Email</th><th>Campaign</th><th>Template</th><th>Status</th><th style="text-align:center">Replied</th><th>Sent By</th></tr></thead>
+        <tbody id="adminSendBody"><tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Click tab to load…</td></tr></tbody></table>
       </div>
-      <div style="flex:1;overflow:auto;background:var(--surface)">
-        <table class="nx-table"><thead><tr><th style="width:36px;text-align:center">#</th><th onclick="sortPartners('company')">Partner</th><th onclick="sortPartners('account_manager')">AM</th><th onclick="sortPartners('stage')">Stage</th><th onclick="sortPartners('model')">Model</th><th onclick="sortPartners('cy_ytd')" style="text-align:right">YTD GTV</th><th onclick="sortPartners('lastReceived')" style="text-align:right;white-space:nowrap">Last In</th><th onclick="sortPartners('lastSent')" style="text-align:right;white-space:nowrap">Last Out</th><th>Insights</th><th>Tags</th><th></th></tr></thead><tbody id="partnersBody"></tbody></table>
+      <div style="text-align:center;padding:12px 0">
+        <button class="btn-ghost" id="adminSendsExpandBtn" onclick="expandAdminSends()" style="padding:6px 16px;font-size:11px;display:none;align-items:center;gap:6px;margin:0 auto"><i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Load all entries</button>
       </div>
     </div>
 
-
-    <!-- ══ CALENDAR VIEW ══ -->
-    <div id="view-calendar" class="content" style="display:none">
-      <div class="section-card" style="height:calc(100vh - 140px);display:flex;flex-direction:column;overflow:hidden">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-shrink:0">
-          <div style="display:flex;align-items:center;gap:12px">
-            <div style="display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:3px">
-              <div class="icon-btn" style="border:none;background:none" onclick="changeWeek(-1)"><i data-lucide="chevron-left" style="width:14px;height:14px"></i></div>
-              <span style="font-size:11px;font-weight:600;padding:0 6px;cursor:pointer" onclick="changeWeek(0)">Today</span>
-              <div class="icon-btn" style="border:none;background:none" onclick="changeWeek(1)"><i data-lucide="chevron-right" style="width:14px;height:14px"></i></div>
-            </div>
-            <span style="font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:0.06em;text-transform:uppercase" id="weekLabel"></span>
-          </div>
-          <button class="btn-primary" onclick="openCreateEventModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Event</button>
-        </div>
-        <div style="flex:1;display:flex;gap:10px;overflow:hidden" id="calGrid"></div>
+    <!-- ACCOUNTS TAB -->
+    <div id="admin-accounts" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <input class="nx-input" id="acctSearch" placeholder="Search accounts…" oninput="renderAdminAccounts()" style="width:220px">
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="loadAdminAccounts()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>
+        <span style="margin-left:auto;font-size:10px;color:var(--ink-4)" id="acctCount"></span>
       </div>
-    </div>
-
-
-    <!-- ══ EMAIL VIEW (V3.0 — unified 4-step wizard) ══ -->
-    <div id="view-email" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0">
-      <!-- Step indicator + action bar. V3.4: 3-zone grid so Next is centered,
-           bigger, and more obvious. Step pills pin left; progress/count/send-from/
-           Back/Test stay on the right; Next takes the center slot. -->
-      <div class="filter-bar" style="padding:8px 14px;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px">
-        <div id="wizStepIndicator" style="display:flex;align-items:center;gap:4px;justify-self:start">
-          <!-- Step pills injected by JS: 1 Audience · 2 Template · 3 Preview · 4 Confirm -->
-        </div>
-        <button class="btn-primary" id="wizBtnNext" onclick="wizNext()" style="justify-self:center;padding:10px 26px;font-size:13px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,0.10);gap:8px"><span id="wizBtnNextLabel">Next</span><i data-lucide="chevron-right" style="width:15px;height:15px"></i></button>
-        <div style="display:flex;align-items:center;gap:8px;justify-self:end">
-          <div id="sendProgressWrap" style="display:none;align-items:center;gap:10px;min-width:220px">
-            <div style="flex:1"><div style="font-size:10px;font-weight:600;color:var(--ink-3);margin-bottom:3px" id="sendProgressLabel">Sending…</div><div class="send-progress-bar"><div class="send-progress-fill" id="sendProgressFill" style="width:0%"></div></div></div>
-          </div>
-          <span style="font-size:10px;font-weight:600;color:var(--ink-4)" id="emailSelCount">0 selected</span>
-          <select id="sendFromSelect" style="font-size:10px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--ink-2);font-weight:600;display:none" title="Send from">
-            <option value="shared_personal" selected>📧 Shared (signed as me)</option>
-            <option value="shared">📧 Commercial Support</option>
-            <option value="personal">👤 My Account</option>
-          </select>
-          <!-- V3.8 — Attachments. Available from any wizard step. Badge shows
-               count when attachments are locked in. -->
-          <button class="btn-ghost" id="wizBtnAttach" onclick="attachWizOpen()" style="padding:8px 12px;font-size:12px;position:relative"><i data-lucide="paperclip" style="width:14px;height:14px"></i> Attach<span id="attachBtnBadge">0</span></button>
-          <button class="btn-ghost" id="wizBtnBack" onclick="wizBack()" style="display:none;padding:8px 16px;font-size:12px;font-weight:700"><i data-lucide="chevron-left" style="width:14px;height:14px"></i> Back</button>
-          <button class="btn-ghost" id="btnTestSend" onclick="openTestSendModal()" style="display:none;padding:8px 14px;font-size:12px"><i data-lucide="flask-conical" style="width:14px;height:14px"></i> Test</button>
-        </div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table"><thead><tr><th>Account Name</th><th>Sources</th><th>Status</th><th>Date Added</th><th>Actions</th></tr></thead>
+        <tbody id="adminAcctBody"><tr><td colspan="5" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody></table>
       </div>
-      <!-- Steps -->
-      <div id="wiz-step-1" class="wiz-step" style="flex:1;display:flex;overflow:hidden;min-height:0"></div>
-      <div id="wiz-step-2" class="wiz-step" style="flex:1;display:none;overflow:hidden;min-height:0"></div>
-      <div id="wiz-step-3" class="wiz-step" style="flex:1;display:none;overflow:hidden;min-height:0"></div>
-      <div id="wiz-step-4" class="wiz-step" style="flex:1;display:none;overflow:hidden;min-height:0"></div>
-    </div>
-
-
-    <!-- ══ CAMPAIGNS VIEW (V3.0) ══ -->
-    <div id="view-campaigns" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
-
-
-    <!-- ══ REPLY CENTER VIEW (V3.8 — sibling of Campaigns) ══ -->
-    <div id="view-replies" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
-
-
-    <!-- ══ HUDDLE VIEW (V3.9 — team weekly meeting log) ══ -->
-    <div id="view-huddle" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
-
-
-    <!-- ══ HOLIDAYS VIEW (V3.11 — team time-off planning) ══ -->
-    <div id="view-holidays" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
-
-
-    <!-- ══ HEAD DASHBOARD VIEW (V3.9 — manager-only cross-team rollup) ══ -->
-    <div id="view-head" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
-
-
-    <!-- ══ CONTACTS VIEW ══ -->
-    <div id="view-contacts" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0">
-      <div class="filter-bar" style="justify-content:space-between">
-        <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">All Contacts</span>
-          <button class="btn-ghost" style="padding:3px 9px;font-size:10px" onclick="expandAllStores()">Expand all</button>
-          <button class="btn-ghost" style="padding:3px 9px;font-size:10px" onclick="collapseAllStores()">Collapse</button>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <input class="nx-input" id="cSearch" placeholder="Search contacts/store…" oninput="renderContactsAll()" style="width:160px">
-          <select class="nx-select" id="cRoleFilter" onchange="renderContactsAll()"><option value="">All Roles</option><option>Buyer</option><option>GM</option><option>Finance</option><option>Operations</option><option>Other</option></select>
-          <label style="display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:500;color:var(--ink-3);cursor:pointer"><input type="checkbox" id="cPrimaryOnly" onchange="renderContactsAll()" style="accent-color:var(--ink)"> Primary only</label>
-          <span style="font-size:10px;color:var(--ink-4)" id="cCount"></span>
-          <button class="btn-ghost" id="btnImport" onclick="runCleanedImport()" style="padding:5px 12px;font-size:11px"><i data-lucide="upload" style="width:12px;height:12px"></i> Import</button>
-          <button class="btn-primary" onclick="openProposeModal()" style="padding:5px 14px;font-size:11px"><i data-lucide="plus" style="width:12px;height:12px"></i> Propose</button>
-        </div>
-      </div>
-      <div id="contacts-all" style="flex:1;overflow:auto;background:var(--surface)"><div id="cGroupedList"></div></div>
-    </div>
-
-
-    <?!= include('nx_admin') ?>
-  </div>
-</div>
-
-
-<!-- ══ DRAWER ══ --> and </div> after
-     the compose modal (lines ~2340–2475 in current file).
-     Also replace the Log Call modal (line ~2481).
-     Also add new CSS rules to nx_styles (after existing drawer CSS).
-     ═══════════════════════════════════════════════════════════════════════ -->
-
-
-
-
-<!-- ══════════════════════════════════════════════════════════════════════
-     SECTION 1: REPLACE DRAWER HTML (replaces lines 2340–2475)
-     ══════════════════════════════════════════════════════════════════════ -->
-
-
-<!-- ══ DRAWER ══ -->
-<div id="detailOverlay" onclick="closeDetail()"></div>
-<div id="detailDrawer">
-  <div class="drawer-header">
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">
-      <div>
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
-          <h2 style="font-size:17px;font-weight:700;letter-spacing:-0.02em;line-height:1" id="detailName">—</h2>
-          <span id="detailModelBadge" style="font-size:9px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;background:var(--ink);color:#fff;padding:3px 10px;border-radius:99px">3P</span>
-          <span id="saveStatus" style="display:none;font-size:9px;font-weight:700;text-transform:uppercase;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;padding:2px 8px;border-radius:99px">Saved</span>
-        </div>
-        <div style="font-size:11px;color:var(--ink-3);display:flex;gap:14px;align-items:center">
-          <span id="detailEmail">—</span><span style="color:var(--border-2)">·</span><span id="detailCountry">—</span><span id="detailLangChip" style="display:none;font-size:8.5px;font-weight:700;letter-spacing:0.04em;background:var(--ink);color:#fff;padding:1px 6px;border-radius:4px;margin-left:6px"></span>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px">
-        <button class="btn-ghost drawer-new-email-btn" onclick="openCorrCompose()"><i data-lucide="pen-square" style="width:13px;height:13px"></i> New Mail</button>
-        <button class="btn-ghost" onclick="openLogCallModal(currentDeal)"><i data-lucide="phone" style="width:13px;height:13px"></i> Log Call</button>
-        <button class="btn-ghost" onclick="openCreateEventModal(null,currentDeal?currentDeal.row:null)"><i data-lucide="calendar-plus" style="width:13px;height:13px"></i> Event</button>
-        <button class="btn-ghost" onclick="emailThisPartner(currentDeal)"><i data-lucide="mail" style="width:13px;height:13px"></i> Email</button>
-        <button class="btn-primary" onclick="saveDeal()"><i data-lucide="save" style="width:13px;height:13px"></i> Save</button>
-        <div class="icon-btn" onclick="closeDetail()"><i data-lucide="x" style="width:14px;height:14px"></i></div>
-      </div>
-    </div>
-    <div class="drawer-ribbon">
-      <div><div class="ribbon-label">Stage</div><div style="font-weight:700;font-size:12px" id="ribbonStage">—</div></div>
-      <div><div class="ribbon-label">Next Action</div><div style="font-weight:700;font-size:12px" id="ribbonDate">—</div></div>
-      <div><div class="ribbon-label">Model</div><div style="font-weight:700;font-size:12px" id="ribbonModel">—</div></div>
-      <div><div class="ribbon-label">Account Manager</div><div style="font-weight:700;font-size:12px" id="ribbonAm">—</div></div>
-      <div><div class="ribbon-label">YTD GTV</div><div style="font-weight:700;font-size:12px" id="ribbonYtd">—</div></div>
-    </div>
-    <div class="drawer-tabs">
-      <button class="drawer-tab active" id="dtab-snapshot" onclick="switchDrawerTab('snapshot')">Snapshot</button>
-      <button class="drawer-tab" id="dtab-performance" onclick="switchDrawerTab('performance')">Performance</button>
-      <button class="drawer-tab" id="dtab-contacts" onclick="switchDrawerTab('contacts')">Contacts</button>
-      <button class="drawer-tab" id="dtab-timeline" onclick="switchDrawerTab('timeline')">Timeline</button>
-      <button class="drawer-tab" id="dtab-correspondence" onclick="switchDrawerTab('correspondence')">Correspondence</button>
-    </div>
-  </div>
-  <div style="flex:1;overflow:hidden;position:relative">
-
-
-    <!-- ① Snapshot -->
-    <div id="drawer-snapshot" class="drawer-panel" style="position:absolute;inset:0;display:flex;flex-direction:column;overflow:hidden">
-      <input type="hidden" id="editRow">
-      <!-- Two-panel layout -->
-      <div style="flex:1;display:flex;overflow:hidden;min-height:0">
-        <!-- LEFT: Partner data -->
-        <div style="width:55%;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:var(--bg)">
-          <div style="padding:14px 18px 10px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:8px"><span class="module-label">Partner Snapshot</span><span id="drawerHuddleBadge" style="display:none"></span></div>
-          <div id="ovEmailPane" style="display:none;position:absolute;left:0;top:0;width:55%;height:100%;background:var(--surface);padding:24px;overflow-y:auto;z-index:10">
-            <button onclick="document.getElementById('ovEmailPane').style.display='none'" style="font-size:11px;font-weight:700;color:var(--ink);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:6px 12px;cursor:pointer;margin-bottom:20px;display:flex;align-items:center;gap:6px;font-family:'Barlow',sans-serif"><i data-lucide="arrow-left" style="width:12px;height:12px"></i> Back</button>
-            <div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px" id="ovEmailMeta"></div>
-            <div style="font-size:17px;font-weight:700;margin-bottom:14px" id="ovEmailSubject"></div>
-            <div style="font-size:13px;color:var(--ink-2);line-height:1.8;white-space:pre-wrap" id="ovEmailBody"></div>
-          </div>
-          <div id="ovFeed" style="flex:1;overflow-y:auto;padding:14px 18px">
-            <div style="text-align:center;padding:32px;font-size:11px;color:var(--ink-4)">Loading…</div>
-          </div>
-        </div>
-        <!-- RIGHT: CRM fields -->
-        <div style="width:45%;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
-              <div><label class="nx-field-label">Stage</label><select class="nx-field-input" id="editStage" onchange="updateRibbon()" style="padding:6px 8px;font-size:11.5px"><option>Onboarding</option><option>Active - Stable</option><option>Active - Needs Attention</option><option>Issue Resolution</option><option>Inactive</option></select></div>
-              <div><label class="nx-field-label">Next Action</label><select class="nx-field-input" id="editAction" onchange="updateRibbon()" style="padding:6px 8px;font-size:11.5px"><option>Monitor</option><option>Follow Up</option><option>Send Report</option><option>Resolve Issue</option><option>None</option></select></div>
-              <div><label class="nx-field-label">Action Date</label><input type="date" class="nx-field-input" id="editDate" onchange="updateRibbon()" style="padding:6px 8px;font-size:11.5px"></div>
-              <div><label class="nx-field-label">Model</label><div class="nx-field-input" id="editModel" style="background:var(--bg);cursor:default;color:var(--ink-2);font-weight:600;padding:6px 8px;font-size:11.5px">—</div></div>
-          </div>
-          <textarea id="editNotes" rows="5" class="nx-field-input" style="display:none"></textarea>
-          <div style="flex:1;min-height:0;display:flex;flex-direction:column">
-            <div class="module-label" style="margin-bottom:6px">Notes & Timeline</div>
-            <div id="drawerRecentNotes" style="flex:1;overflow-y:auto;font-size:12px;color:var(--ink-2);line-height:1.5;min-height:60px"><span style="color:var(--ink-4);font-size:10px">Loading…</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-
-    <!-- ② Performance -->
-    <div id="drawer-performance" class="drawer-panel" style="position:absolute;inset:0;overflow-y:auto;padding:16px;display:none;background:var(--bg)">
-      <div class="kpi-grid" style="margin-bottom:10px" id="dpKpis"></div>
-      <div id="dpTags" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
-      <!-- V3.8 — Performance metrics table + Stock card side-by-side. Both stretch to equal height via grid. -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;align-items:stretch">
-        <div class="section-card" style="margin:0;padding:0;overflow:hidden;display:flex;flex-direction:column">
-          <table class="nx-table" style="flex:1"><thead><tr><th>Period</th><th style="text-align:right">GTV</th><th style="text-align:right">vs PY</th><th style="text-align:right">PY GTV</th></tr></thead><tbody id="dpMetrics"></tbody></table>
-        </div>
-        <div id="dpStockLine" style="display:flex;flex-direction:column"></div>
-      </div>
-      <!-- V3.3 → V3.7 — Breakdown mix: two donuts sharing one color scale, dim-switchable (Season / Brand / Family). -->
-      <div id="dpSeasonMix"></div>
-    </div>
-
-
-    <!-- ③ Contacts -->
-    <div id="drawer-contacts" class="drawer-panel" style="position:absolute;inset:0;overflow-y:auto;padding:24px;display:none">
-      <div style="max-width:640px;display:flex;flex-direction:column;gap:14px">
-        <div style="display:flex;align-items:center;justify-content:space-between"><span class="module-label">Contacts</span><div style="display:flex;gap:6px"><button class="btn-ghost drawer-new-email-btn" style="padding:4px 11px;font-size:10px;display:none;align-items:center;gap:4px" id="btnMailSelected" onclick="mailSelectedContacts()"><i data-lucide="pen-square" style="width:10px;height:10px"></i> New Mail</button><button class="btn-ghost" style="padding:4px 11px;font-size:11px;display:flex;align-items:center;gap:5px" onclick="toggleDrawerProposeForm()"><i data-lucide="plus" style="width:11px;height:11px"></i> Propose</button></div></div>
-        <div id="drawerContactsList"><div style="text-align:center;padding:24px;font-size:11px;color:var(--ink-4)">Loading…</div></div>
-        <div id="drawerProposeForm" style="display:none;background:var(--bg);border:1px solid var(--border);border-radius:14px;padding:18px">
-          <div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:14px">Propose New Contact</div>
-          <div style="display:flex;flex-direction:column;gap:10px">
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-              <div><label class="nx-field-label">Name *</label><input type="text" class="nx-field-input" id="dpName"></div>
-              <div><label class="nx-field-label">Role</label><select class="nx-field-input" id="dpRole"><option>Buyer</option><option>GM</option><option>Finance</option><option>Operations</option><option>Other</option></select></div>
-            </div>
-            <div><label class="nx-field-label">Email *</label><input type="email" class="nx-field-input" id="dpEmail"></div>
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;font-weight:500;color:var(--ink-2)"><input type="checkbox" id="dpPrimary" style="accent-color:var(--ink)"> Primary contact</label>
-            <div style="display:flex;gap:8px;justify-content:flex-end">
-              <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="toggleDrawerProposeForm()">Cancel</button>
-              <button class="btn-primary" style="padding:5px 14px;font-size:11px" onclick="submitDrawerPropose()"><i data-lucide="send" style="width:11px;height:11px"></i> Submit</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-
-    <!-- ④ Timeline (NEW) -->
-    <div id="drawer-timeline" class="drawer-panel" style="position:absolute;inset:0;overflow-y:auto;padding:24px;display:none;background:var(--bg)">
-      <div style="max-width:720px;display:flex;flex-direction:column;gap:14px;height:100%">
-        <!-- Add note inline -->
-        <div style="display:flex;gap:8px;flex-shrink:0;align-items:flex-end">
-          <div style="flex:1"><textarea id="timelineNoteInput" class="nx-field-input" placeholder="Add a note…" rows="2" style="resize:none;font-size:12px;line-height:1.5" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();addTimelineNote();}"></textarea></div>
-          <button class="btn-primary" id="btnAddTimelineNote" style="padding:8px 14px;font-size:11px;flex-shrink:0;border-radius:10px" onclick="addTimelineNote()"><i data-lucide="plus" style="width:11px;height:11px"></i></button>
-        </div>
-        <!-- Timeline feed -->
-        <div id="timelineList" style="flex:1;overflow-y:auto;min-height:0">
-          <div style="text-align:center;padding:48px;font-size:11px;color:var(--ink-4)">Loading timeline…</div>
-        </div>
-      </div>
-    </div>
-
-
-    <!-- ⑤ Correspondence — email feed from CRM data -->
-    <div id="drawer-correspondence" class="drawer-panel" style="position:absolute;inset:0;display:none;flex-direction:column;overflow:hidden;background:var(--bg)">
-      <!-- Feed header -->
-      <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;background:var(--surface)">
-        <span class="module-label">Emails</span>
-        <span id="corrCount" style="font-size:9px;font-weight:600;color:var(--ink-4);background:var(--bg);padding:2px 8px;border-radius:99px;border:1px solid var(--border)">0</span>
-      </div>
-      <!-- Scrollable feed -->
-      <div id="corrFeed" style="flex:1;height:0;overflow-y:auto;padding:14px 18px"></div>
-    </div>
-
-
-  </div>
-</div>
-
-
-
-<!-- ══ COMPOSE MODAL (new email from drawer) ══ -->
-<div class="modal-overlay" id="composeModal" style="z-index:500;align-items:stretch;padding:24px">
-  <div class="compose-container">
-    <div style="padding:12px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-shrink:0;background:var(--bg)">
-      <div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700;letter-spacing:0.02em" id="composeModalTitle">Compose</div></div>
-      <select id="composeSendFrom" style="font-size:10px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--ink-2);font-weight:600" title="Send from">
-        <option value="shared_personal" selected>Shared (signed as me)</option>
-        <option value="shared">Shared (Commercial Support)</option>
-        <option value="personal">My Account</option>
-      </select>
-      <div class="icon-btn" onclick="closeComposeModal()"><i data-lucide="x" style="width:13px;height:13px"></i></div>
-    </div>
-    <div style="padding:10px 22px 6px;background:var(--surface);flex-shrink:0">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
-        <label style="font-size:10px;font-weight:700;color:var(--ink-3);width:32px;flex-shrink:0;text-transform:uppercase;letter-spacing:0.08em">To</label>
-        <input type="email" id="composeTo" class="nx-field-input" placeholder="Recipient email" style="padding:6px 10px;font-size:12px">
-      </div>
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
-        <label style="font-size:10px;font-weight:700;color:var(--ink-3);width:32px;flex-shrink:0;text-transform:uppercase;letter-spacing:0.08em">Subj</label>
-        <input type="text" id="composeSubject" class="nx-field-input" placeholder="Subject" style="padding:6px 10px;font-size:12px">
-      </div>
-    </div>
-    <div style="border-top:1px solid var(--ink);background:var(--surface);flex:1;display:flex;flex-direction:column;min-height:0">
-      <div style="padding:5px 22px 3px;display:flex;align-items:center;gap:2px;flex-shrink:0">
-        <button class="icon-btn" style="width:28px;height:28px;border:none;background:none" onclick="execFmt('bold')" title="Bold"><i data-lucide="bold" style="width:12px;height:12px"></i></button>
-        <button class="icon-btn" style="width:28px;height:28px;border:none;background:none" onclick="execFmt('italic')" title="Italic"><i data-lucide="italic" style="width:12px;height:12px"></i></button>
-        <button class="icon-btn" style="width:28px;height:28px;border:none;background:none" onclick="execFmt('underline')" title="Underline"><i data-lucide="underline" style="width:12px;height:12px"></i></button>
-        <div style="width:1px;height:14px;background:var(--border);margin:0 3px"></div>
-        <button class="icon-btn" style="width:28px;height:28px;border:none;background:none" onclick="execFmt('insertUnorderedList')" title="List"><i data-lucide="list" style="width:12px;height:12px"></i></button>
-        <button class="icon-btn" style="width:28px;height:28px;border:none;background:none" onclick="insertLink()" title="Link"><i data-lucide="link" style="width:12px;height:12px"></i></button>
-        <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
-          <button class="btn-ghost" onclick="closeComposeModal()" style="padding:5px 14px;font-size:11px">Discard</button>
-          <button class="btn-primary" id="btnSendCompose" onclick="sendComposeEmail()" style="padding:5px 14px;font-size:11px"><i data-lucide="send" style="width:11px;height:11px"></i> Send</button>
-        </div>
-      </div>
-      <div id="composeEditor" contenteditable="true" style="flex:1;padding:10px 22px;font-family:'Barlow',sans-serif;font-size:13px;color:var(--ink);line-height:1.65;outline:none;overflow-y:auto;min-height:120px" data-placeholder="Write your message…"></div>
     </div>
   </div>
 </div>
-
-<!-- CREATE EVENT MODAL -->
-<div class="modal-overlay" id="createEventModal"><div class="modal-box"><div class="modal-header"><span style="font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase">New Calendar Event</span><div class="icon-btn" style="background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.15);color:#fff" onclick="closeCreateEventModal()"><i data-lucide="x" style="width:13px;height:13px"></i></div></div><div class="modal-body" style="display:flex;flex-direction:column;gap:14px"><div><label class="nx-field-label">Event Title *</label><input type="text" class="nx-field-input" id="newEventTitle" placeholder="e.g. Quarterly Review…"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div><label class="nx-field-label">Date *</label><input type="date" class="nx-field-input" id="newEventDate"></div><div><label class="nx-field-label">Time</label><input type="time" class="nx-field-input" id="newEventTime"></div></div><div><label class="nx-field-label">Type</label><select class="nx-field-input" id="newEventType"><option>Meeting</option><option>Call</option><option>Follow Up</option><option>Deadline</option><option>Review</option><option>Internal</option></select></div><div><label class="nx-field-label">Partners</label><div id="eventPartnersChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;min-height:24px;align-items:center"><span style="font-size:11px;color:var(--ink-4);font-style:italic">None selected</span></div><select class="nx-field-input" id="newEventPartnerAdd" onchange="addEventPartner(this.value);this.value=''"><option value="">+ Add partner…</option></select></div><div><label class="nx-field-label">Invite Guests <span style="font-weight:300;text-transform:none;letter-spacing:0">(org members)</span></label><div id="eventGuestsChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;min-height:24px;align-items:center"></div><div style="position:relative"><div style="display:flex;gap:6px"><input type="text" class="nx-field-input" id="newEventGuestEmail" placeholder="Start typing name or email…" style="flex:1" oninput="filterGuestSuggestions()" onkeydown="handleGuestKeydown(event)"><button class="btn-ghost" onclick="addEventGuest()" style="padding:5px 10px;font-size:11px;flex-shrink:0">+ Add</button></div><div id="guestSuggestionsDropdown" style="display:none;position:absolute;top:100%;left:0;right:50px;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px -4px rgba(13,13,12,0.15);max-height:180px;overflow-y:auto;z-index:10;margin-top:4px"></div></div></div><div><label class="nx-field-label">Notes</label><textarea class="nx-field-input" id="newEventDesc" rows="3" style="resize:none"></textarea></div><label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px"><input type="checkbox" id="newEventSyncGCal" style="accent-color:var(--ink)"><div><div style="font-size:12.5px;font-weight:600">Sync to Google Calendar</div><div style="font-size:11px;color:var(--ink-3)">Creates a real event in your Google Calendar.</div></div></label></div><div class="modal-footer"><button class="btn-ghost" onclick="closeCreateEventModal()">Cancel</button><button class="btn-primary" onclick="submitCreateEvent()"><i data-lucide="calendar-check" style="width:13px;height:13px"></i> Create Event</button></div></div></div>
-
-
-<!-- LOG CALL MODAL — with Contact dropdown -->
-<div class="modal-overlay" id="logCallModal"><div class="modal-box"><div class="modal-header"><span style="font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase">Log a Call</span><div class="icon-btn" style="background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.15);color:#fff" onclick="closeLogCallModal()"><i data-lucide="x" style="width:13px;height:13px"></i></div></div><div class="modal-body" style="display:flex;flex-direction:column;gap:14px"><input type="hidden" id="logCallRow"><div style="font-size:13px;font-weight:700" id="logCallLabel">—</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div><label class="nx-field-label">Date</label><input type="date" class="nx-field-input" id="logCallDate"></div><div><label class="nx-field-label">Duration</label><select class="nx-field-input" id="logCallDuration"><option>15 min</option><option>30 min</option><option>45 min</option><option>60 min</option><option>90 min</option></select></div></div><div><label class="nx-field-label">Contact</label><select class="nx-field-input" id="logCallContact"><option value="">(none)</option></select></div><div><label class="nx-field-label">Outcome</label><select class="nx-field-input" id="logCallOutcome"><option>Positive</option><option>Neutral</option><option>Negative</option><option>No Answer</option><option>Follow Up Needed</option></select></div><div><label class="nx-field-label">Notes</label><textarea class="nx-field-input" id="logCallNotes" rows="3" style="resize:none" placeholder="Key discussion points…"></textarea></div><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;font-weight:500;color:var(--ink-2)"><input type="checkbox" id="logCallFollowUp" style="accent-color:var(--ink)"> Auto-create follow-up for tomorrow</label></div><div class="modal-footer"><button class="btn-ghost" onclick="closeLogCallModal()">Cancel</button><button class="btn-primary" onclick="submitLogCall()"><i data-lucide="phone" style="width:13px;height:13px"></i> Log Call</button></div></div></div>
-
-
-<!-- PROPOSE CONTACT MODAL -->
-<div class="modal-overlay" id="proposeModal"><div class="modal-box"><div class="modal-header"><span style="font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase">Propose Contact</span><div class="icon-btn" style="background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.15);color:#fff" onclick="closeProposeModal()"><i data-lucide="x" style="width:13px;height:13px"></i></div></div><div class="modal-body" style="display:flex;flex-direction:column;gap:14px"><div><label class="nx-field-label">Account *</label><select class="nx-field-input" id="pmAccount"><option value="">Select…</option></select></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div><label class="nx-field-label">Name *</label><input type="text" class="nx-field-input" id="pmName"></div><div><label class="nx-field-label">Role</label><select class="nx-field-input" id="pmRole"><option>Buyer</option><option>GM</option><option>Finance</option><option>Operations</option><option>Other</option></select></div></div><div><label class="nx-field-label">Email *</label><input type="email" class="nx-field-input" id="pmEmail"></div><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;font-weight:500"><input type="checkbox" id="pmPrimary" style="accent-color:var(--ink)"> Primary contact</label></div><div class="modal-footer"><button class="btn-ghost" onclick="closeProposeModal()">Cancel</button><button class="btn-primary" onclick="submitProposeModal()"><i data-lucide="send" style="width:13px;height:13px"></i> Submit</button></div></div></div>
-
-
-<div class="modal-overlay" id="testSendModal"><div class="modal-box"><div class="modal-header"><span style="font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase">Test Send</span><div class="icon-btn" style="background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.15);color:#fff" onclick="closeTestSendModal()"><i data-lucide="x" style="width:13px;height:13px"></i></div></div><div class="modal-body" style="display:flex;flex-direction:column;gap:14px"><div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:11px;color:var(--ink-3)">Template: <b id="testSendTemplateName"></b> · Subject: <span id="testSendSubjectPreview" style="color:var(--ink-2)"></span></div><div><label class="nx-field-label">Send To (manual recipient) *</label><input type="email" class="nx-field-input" id="testSendTo" placeholder="e.g. you@example.com"></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:8px"><i data-lucide="info" style="width:12px;height:12px;color:var(--ink-4);flex-shrink:0"></i><span style="font-size:10px;color:var(--ink-3);line-height:1.3">Placeholders will resolve with dummy values. Subject will be prefixed with <b>[TEST]</b>.</span></div></div><div class="modal-footer"><button class="btn-ghost" onclick="closeTestSendModal()">Cancel</button><button class="btn-primary" id="btnSubmitTestSend" onclick="submitTestSend()"><i data-lucide="send" style="width:13px;height:13px"></i> Send Test</button></div></div></div>
-
-
-<!-- PROPOSE PARTNER MODAL -->
-<div class="modal-overlay" id="proposePartnerModal"><div class="modal-box"><div class="modal-header"><span style="font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase">Propose New Partner</span><div class="icon-btn" style="background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.15);color:#fff" onclick="closeProposePartnerModal()"><i data-lucide="x" style="width:13px;height:13px"></i></div></div><div class="modal-body" style="display:flex;flex-direction:column;gap:14px"><div><label class="nx-field-label">Partner Name *</label><input type="text" class="nx-field-input" id="ppName" placeholder="e.g. Store Name"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div><label class="nx-field-label">Country</label><input type="text" class="nx-field-input" id="ppCountry" placeholder="e.g. Portugal"></div><div><label class="nx-field-label">Language</label><input type="text" class="nx-field-input" id="ppLanguage" placeholder="e.g. EN"></div></div><div><label class="nx-field-label">Email</label><input type="email" class="nx-field-input" id="ppEmail" placeholder="contact@partner.com"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div><label class="nx-field-label">Stage</label><select class="nx-field-input" id="ppStage"><option>Onboarding</option><option>Active</option><option>Active - Stable</option><option>Active - Needs Attention</option><option>Active - Disengaged</option><option>Issue Resolution</option><option>Inactive</option></select></div><div><label class="nx-field-label">Model</label><select class="nx-field-input" id="ppModel"><option>3P</option><option>1P</option><option>Hybrid</option></select></div></div><div><label class="nx-field-label">Partner Type</label><input type="text" class="nx-field-input" id="ppType" placeholder="e.g. Boutique, Brand, Department Store"></div><div><label class="nx-field-label">Notes</label><textarea class="nx-field-input" id="ppNotes" rows="3" style="resize:none" placeholder="Any relevant context…"></textarea></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:8px"><i data-lucide="info" style="width:12px;height:12px;color:var(--ink-4);flex-shrink:0"></i><span style="font-size:10px;color:var(--ink-3);line-height:1.3">Partner will be added as <b>Pending</b>. An admin must activate it before it appears in the system.</span></div></div><div class="modal-footer"><button class="btn-ghost" onclick="closeProposePartnerModal()">Cancel</button><button class="btn-primary" onclick="submitProposePartner()"><i data-lucide="send" style="width:12px;height:12px"></i> Submit</button></div></div></div>
-
-
-<div id="toastContainer" style="position:fixed;bottom:20px;right:20px;z-index:999;display:flex;flex-direction:column;gap:8px;pointer-events:none"></div>
-
-
-<!-- V3.0 — Outreach wizard + Campaigns Dashboard styles -->
-<style>
-  /* V3.3 — wizard step pills: bigger, clickable, with hover affordance */
-  .wiz-step-pill{display:inline-flex;align-items:center;gap:8px;padding:7px 16px;border-radius:99px;font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--bg);color:var(--ink-4);border:1px solid var(--border);transition:all 0.15s;outline:none;}
-  .wiz-step-pill:hover{border-color:var(--ink-3);color:var(--ink-2);transform:translateY(-1px);}
-  .wiz-step-pill:focus-visible{box-shadow:0 0 0 2px var(--ink);}
-  .wiz-step-pill .wiz-pill-num{display:inline-flex;width:20px;height:20px;border-radius:50%;background:var(--border);color:var(--ink-3);align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;}
-  .wiz-step-pill.active{background:var(--ink);color:#fff;border-color:var(--ink);}
-  .wiz-step-pill.active .wiz-pill-num{background:#fff;color:var(--ink);}
-  .wiz-step-pill.active:hover{transform:none;}
-  .wiz-step-pill.done{background:var(--surface);color:var(--ink-2);border-color:var(--ink-2);}
-  .wiz-step-pill.done .wiz-pill-num{background:var(--ink-2);color:#fff;}
-  .wiz-step-sep{width:18px;height:1px;background:var(--border);margin:0 3px;}
-  .tpl-card{display:flex;align-items:center;gap:7px;padding:8px 12px;border-radius:10px;cursor:pointer;background:var(--surface);border:1px solid var(--border);transition:all 0.15s;min-width:0;}
-  .tpl-card:hover{border-color:var(--ink-3);}
-  .tpl-card.active{background:var(--ink);border-color:var(--ink);color:#fff;}
-  .tpl-card.active i, .tpl-card.active span{color:#fff !important;}
-  .tpl-section-label{font-size:8px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-4);margin:10px 0 6px;display:flex;align-items:center;gap:6px;}
-  .tpl-section-label::after{content:'';flex:1;height:1px;background:var(--border);}
-  .wiz-recip{display:grid;grid-template-columns:22px 1fr 1fr auto;align-items:center;gap:8px;padding:7px 14px;border-bottom:1px solid var(--border);cursor:pointer;font-size:11.5px;}
-  .wiz-recip:hover{background:var(--bg);}
-  .wiz-recip input[type=checkbox]{accent-color:var(--ink);width:13px;height:13px;cursor:pointer;}
-  .wiz-recip.unresolved{background:#fff5f5;}
-  .wiz-recip.unresolved:hover{background:#ffe4e6;}
-  .wiz-recip-active{background:var(--ink) !important;color:#fff !important;}
-  .wiz-recip-active > div, .wiz-recip-active span{color:#fff !important;}
-  .camp-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 18px;transition:all 0.15s;cursor:pointer;position:relative;}
-  .camp-card:hover{border-color:var(--ink);transform:translateY(-1px);box-shadow:0 6px 20px -8px rgba(13,13,12,0.12);}
-  .camp-rate-high{color:#16a34a;}
-  .camp-rate-mid{color:#b45309;}
-  .camp-rate-low{color:#dc2626;}
-  .camp-detail-row{display:grid;grid-template-columns:160px 1fr 70px 90px auto;gap:10px;align-items:center;padding:9px 14px;border-bottom:1px solid var(--border);font-size:11.5px;}
-  .camp-detail-row:hover{background:var(--bg);}
-  .filter-tag-btn{background:var(--surface);color:var(--ink-3);border:1px solid var(--border);padding:4px 10px;border-radius:7px;font-size:10px;font-weight:600;font-family:'Barlow',sans-serif;cursor:pointer;transition:all 0.15s;}
-  .filter-tag-btn:hover{border-color:var(--ink-3);}
-  .filter-tag-btn.active{background:var(--ink);color:#fff;border-color:var(--ink);}
-</style>
-
-
-<?!= include('nx_snapshot_client') ?>
-<?!= include('nx_core') ?>
-<?!= include('nx_cockpit') ?>
-<?!= include('nx_partners') ?>
-<?!= include('nx_drawer') ?>
-<?!= include('nx_calendar') ?>
-<?!= include('nx_email') ?>
-<?!= include('nx_email_attach') ?>
-<?!= include('nx_campaigns') ?>
-<?!= include('nx_contacts') ?>
-<?!= include('nx_overview') ?>
-<?!= include('nx_bidask') ?>
-<?!= include('nx_reply_center') ?>
-<?!= include('nx_huddle') ?>
-<?!= include('nx_holidays') ?>
-<?!= include('nx_head') ?>
-
-</body>
-</html>

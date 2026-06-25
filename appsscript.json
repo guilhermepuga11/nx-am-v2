@@ -1,2 +1,19 @@
-# nx
-nexus
+{
+  "timeZone": "Europe/Lisbon",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "dependencies": {
+    "libraries": [
+      {
+        "userSymbol": "NX",
+        "libraryId": "1YPhuTPy8H8DbI5c_WhFlJXlAVqCvjLE8UEWshKQhpT-Pa-R6f5KOl1Lf",
+        "version": "0",
+        "developmentMode": true
+      }
+    ]
+  },
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "DOMAIN"
+  }
+}

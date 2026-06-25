@@ -1,510 +1,510 @@
-<script>
-/* ═══════════════════════════════════════════════════════════════════════════
-   HUDDLE — team weekly meeting (V3.9.1)
-
-   A huddle is a meeting. Inside the meeting, you walk through partners and
-   capture: was it discussed (note), do we need to come back to it next week
-   (followup checkbox)?
-
-   "Pull forward" button populates this week's meeting with last week's
-   followup partners + their prior notes as context.
-
-   No delete. Edit only. Edits append to history.
-═══════════════════════════════════════════════════════════════════════════ */
-
-var huddleState = {
-  loading: false,
-  weeks: 12,
-  data: null,
-  lastFetchTeam: null,
-  modalOpen: false,
-  modalEditingId: null,
-  modalDraft: { week_start: '', title: '', partner_notes: [], general_notes: '' },
-  partnerSuggest: { items: [] },
-  pullForwardAvailable: null   // { count, items } | null while loading
-};
-
-function initHuddleView() {
-  var host = document.getElementById('view-huddle');
-  if (!host) return;
-  if (huddleState.data && huddleState.lastFetchTeam === _userTeam) {
-    huddleRenderBody_();
-    return;
-  }
-  host.innerHTML = huddleShellHtml_();
-  loadHuddle();
+<script>  
+/* ═══════════════════════════════════════
+   OVERVIEW — unified dashboard landing
+   V3.8 — Left column collapsed from 3 widgets (Top Sales, Stock Alerts,
+          SOH-by-Season pie) to 2 (Top Movers lens-switchable, Breakdown
+          Mix dim+lens-switchable). Outreach + Email Feed moved right.
+═══════════════════════════════════════ */
+function buildOverview() {
+  try {
+    buildOvKpis();
+    buildOvOutreach();
+    buildOvTopMovers();      // V3.8 — replaces buildOvSales + buildOvStock
+    buildOvBreakdownMix();   // V3.8 — replaces buildOvSohPie
+    buildOvEmailFeed();
+  } catch(e) { console.error('NEXUS buildOverview:', e); }
   refreshIcons();
 }
 
-function huddleShellHtml_() {
-  return ''
-    + '<div class="filter-bar" style="justify-content:space-between;padding:10px 14px">'
-      + '<div style="display:flex;align-items:center;gap:10px">'
-        + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Window</span>'
-        + '<select id="huddleWeeks" class="nx-select" onchange="huddleSetWeeks(parseInt(this.value,10))">'
-          + ['4','12','26','52','0'].map(function(v) {
-              var sel = parseInt(v, 10) === huddleState.weeks ? ' selected' : '';
-              var label = v === '0' ? 'All time' : 'Last ' + v + (v === '52' ? ' weeks (1y)' : ' weeks');
-              return '<option value="' + v + '"' + sel + '>' + label + '</option>';
-            }).join('')
-        + '</select>'
-        + '<span id="huddleCount" style="font-size:10px;color:var(--ink-4)">—</span>'
-      + '</div>'
-      + '<div style="display:flex;align-items:center;gap:8px">'
-        + '<button class="btn-ghost" onclick="loadHuddle()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>'
-        + '<button class="btn-primary" onclick="huddleOpenModal(null)"><i data-lucide="plus" style="width:12px;height:12px"></i> New Meeting</button>'
-      + '</div>'
-    + '</div>'
-    + '<div id="huddleBody" style="flex:1;overflow-y:auto;background:var(--bg);padding:18px 24px"></div>';
-}
+/* ── COMPACT KPI STRIP — 4 sections × 2 rows (Sales | Stock | Mail | KPIs) ── */  
+function buildOvKpis() {  
+  var ck = P.filter(function(p) { return p.cockpit_matched; });
 
-function huddleSetWeeks(w) { huddleState.weeks = w; loadHuddle(); }
+  var ytd = 0, pyYtd = 0, d7 = 0, pyD7 = 0;  
+  ck.forEach(function(d) { ytd += d.cy_ytd; pyYtd += d.py_ytd; d7 += d.cy_7d; pyD7 += d.py_7d; });
 
-function loadHuddle() {
-  huddleState.loading = true;
-  huddleRenderBody_();
-  google.script.run
-    .withSuccessHandler(function(d) {
-      huddleState.loading = false;
-      huddleState.data = d || { team: _userTeam, entries: [] };
-      huddleState.lastFetchTeam = _userTeam;
-      huddleRenderBody_();
-    })
-    .withFailureHandler(function() {
-      huddleState.loading = false;
-      huddleState.data = { team: _userTeam, entries: [] };
-      huddleRenderBody_();
-    })
-    .getHuddleLog(_userTeam, huddleState.weeks);
-}
+  var stk = stockPartners();  
+  var totalUnits = stk.reduce(function(s, r) { return s + r.today; }, 0);  
+  var d15Total = stk.reduce(function(s, r) { return s + (r.values[r.values.length - 1] || 0); }, 0);
 
-function huddleRenderBody_() {
-  var el = document.getElementById('huddleBody');
-  var countEl = document.getElementById('huddleCount');
+  // Mail metrics — outreach reply rate from Send Log totals  
+  var totalSends = 0, totalReplied = 0;  
+  P.forEach(function(d) {  
+    var t = d.send_totals || { sent: 0, replied: 0 };  
+    totalSends += t.sent;  
+    totalReplied += t.replied;  
+  });  
+  var replyRate = totalSends > 0 ? Math.round((totalReplied / totalSends) * 100) : 0;
+
+  var kRows = kpiPartners();  
+  var avgPerfect = kRows.length ? kRows.reduce(function(s, r) { return s + r.perfect_now; }, 0) / kRows.length : 0;  
+  var avgPerfectPrev = kRows.length ? kRows.reduce(function(s, r) { return s + r.perfect_prev; }, 0) / kRows.length : 0;  
+  var avgNs = kRows.length ? kRows.reduce(function(s, r) { return s + r.ns_now; }, 0) / kRows.length : 0;  
+  var avgNsPrev = kRows.length ? kRows.reduce(function(s, r) { return s + r.ns_prev; }, 0) / kRows.length : 0;
+
+  var el = document.getElementById('ovKpis');  
   if (!el) return;
 
-  if (huddleState.loading) {
-    el.innerHTML = '<div style="padding:60px;text-align:center;color:var(--ink-4);font-size:12px"><i data-lucide="loader-2" class="spin" style="width:14px;height:14px;vertical-align:middle"></i> Loading meetings…</div>';
-    if (countEl) countEl.textContent = '—';
-    refreshIcons();
+  function mini(label, value, sub) {  
+    return '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:5px 0">'  
+      + '<span style="font-size:9px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-4)">' + label + '</span>'  
+      + '<div style="text-align:right"><span style="font-size:22px;font-weight:700;letter-spacing:-0.03em;line-height:1">' + value + '</span>'  
+      + '<div style="font-size:10px;color:var(--ink-3);margin-top:2px">' + sub + '</div></div></div>';  
+  }
+
+  function section(title, icon, tint, row1, row2) {  
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;position:relative;overflow:hidden">'  
+      + '<div style="position:absolute;top:0;left:0;right:0;height:2px;background:' + tint + '"></div>'  
+      + '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:2px;display:flex;align-items:center;gap:5px;padding-top:1px"><i data-lucide="' + icon + '" style="width:10px;height:10px"></i>' + title + '</div>'  
+      + row1  
+      + '<div style="border-top:1px solid var(--border);margin:3px 0"></div>'  
+      + row2  
+      + '</div>';  
+  }
+
+  el.innerHTML =  
+    section('Sales', 'trending-up', 'var(--ink)',  
+      mini('YTD GTV', fGtv(ytd), fPctStr(fPct(ytd, pyYtd), true) + ' vs PY'),  
+      mini('7D GTV', fGtv(d7), fPctStr(fPct(d7, pyD7), true) + ' vs PY')  
+    ) +  
+    section('Stock', 'package', '#b0b0ac',  
+      mini('Total Online', totalUnits.toLocaleString(), stk.length + ' partners'),  
+      mini('15D Var', fPctStr(fPct(totalUnits, d15Total), false), (totalUnits - d15Total >= 0 ? '+' : '') + (totalUnits - d15Total).toLocaleString() + ' units')  
+    ) +  
+    section('Mail', 'mail', '#1d4ed8',  
+      mini('Emails Logged', totalSends.toLocaleString(), 'total sends tracked'),  
+      mini('Reply Rate', replyRate + '%', totalReplied + ' of ' + totalSends + ' outreach replied')  
+    ) +  
+    section('KPI', 'activity', '#c8c8c4',  
+      mini('Avg Perfect%', avgPerfect.toFixed(1) + '%', fPctStr(fPct(avgPerfect, avgPerfectPrev), true) + ' vs prev'),  
+      mini('Avg NS%', avgNs.toFixed(1) + '%', fPctStr(fPct(avgNs, avgNsPrev), true) + ' vs prev')  
+    );  
+}
+
+/* ── OUTREACH (V3.2) — KPIs only with timeframe switcher ──────────────── */
+// No row list — just 4 aggregate KPIs (Campaigns, Sent, Replied, Reply rate).
+// Tiny segmented control inside the bubble lets the user flip between
+// 30d / 90d / All-time. Backend supports days=0 to mean "no cutoff".
+var _ovOutreachWindow = 90;   // default timeframe in days (0 = all time)
+// V3.8 fix — Cache keyed by team + days. Was days-only, so team-switching kept
+// stale outreach data from the previous team. Cache cleared in handleTeamSwitch.
+var _ovOutreachCache = {};    // { '<team>:<days>': list }
+
+function _ovOutreachCacheKey_(days) { return (_userTeam || '') + ':' + days; }
+
+function buildOvOutreach() {
+  loadOvOutreach_(_ovOutreachWindow);
+}
+
+function setOvOutreachWindow(days) {
+  _ovOutreachWindow = days;
+  loadOvOutreach_(days);
+}
+
+function loadOvOutreach_(days) {
+  var el = document.getElementById('ovOutreachWrap');
+  if (!el) return;
+
+  var ck = _ovOutreachCacheKey_(days);
+  // Cache hit — render immediately
+  if (_ovOutreachCache[ck]) {
+    renderOvOutreach_(_ovOutreachCache[ck], days);
     return;
   }
 
-  var entries = (huddleState.data && huddleState.data.entries) || [];
-  if (countEl) countEl.textContent = entries.length + (entries.length === 1 ? ' meeting' : ' meetings');
-
-  if (!entries.length) {
-    el.innerHTML = '<div class="section-card" style="padding:48px 20px;text-align:center;color:var(--ink-4);font-size:12px">'
-      + '<i data-lucide="users-round" style="width:32px;height:32px;opacity:0.4;display:block;margin:0 auto 12px"></i>'
-      + '<div style="font-size:14px;font-weight:700;color:var(--ink);margin-bottom:6px">No meetings logged</div>'
-      + '<div style="margin-bottom:16px">Capture this week\'s team meeting — partner-by-partner, what was discussed, what needs followup.</div>'
-      + '<button class="btn-primary" onclick="huddleOpenModal(null)"><i data-lucide="plus" style="width:12px;height:12px"></i> New Meeting</button>'
-    + '</div>';
-    refreshIcons();
-    return;
-  }
-
-  // Group by week_start
-  var groups = {};
-  entries.forEach(function(e) {
-    var key = (e.week_start || '').slice(0, 10);
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(e);
-  });
-  var weekKeys = Object.keys(groups).sort(function(a, b) { return b.localeCompare(a); });
-
-  el.innerHTML = weekKeys.map(function(wk) {
-    return '<div style="margin-bottom:24px">'
-      + '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px;padding-left:2px">' + huddleWeekLabel_(wk) + '</div>'
-      + groups[wk].map(huddleEntryCardHtml_).join('')
-    + '</div>';
-  }).join('');
-  refreshIcons();
-}
-
-function huddleEntryCardHtml_(e) {
-  var author = huddleAuthorShort_(e.created_by);
-  var ts = huddleDateStr_(e.created_ts);
-  var editedSuffix = e.last_edited_ts
-    ? ' · <span style="color:var(--ink-4);font-style:italic">edited ' + huddleDateStr_(e.last_edited_ts) + '</span>'
-    : '';
-
-  // Per-partner rows (compact). Followup pill on the right.
-  var partnerRowsHtml = '';
-  var followupCount = 0;
-  if (e.partner_notes && e.partner_notes.length) {
-    partnerRowsHtml = '<div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">'
-      + e.partner_notes.map(function(pn) {
-          if (pn.followup) followupCount++;
-          var followupPill = pn.followup
-            ? '<span style="font-size:8px;font-weight:700;background:#fef3c7;color:#92400e;border:1px solid #fde68a;padding:1px 6px;border-radius:99px;letter-spacing:0.06em;flex-shrink:0">FOLLOWUP</span>'
-            : '';
-          var noteHtml = pn.note
-            ? '<div style="font-size:11.5px;color:var(--ink-2);margin-top:2px;line-height:1.5;white-space:pre-wrap">' + esc(pn.note) + '</div>'
-            : '<div style="font-size:11px;color:var(--ink-4);font-style:italic;margin-top:1px">All good — no notes</div>';
-          return '<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px">'
-            + '<div style="display:flex;align-items:center;gap:8px">'
-              + '<span style="font-weight:700;font-size:12px;color:var(--ink);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(pn.partner) + '</span>'
-              + followupPill
-            + '</div>'
-            + noteHtml
-          + '</div>';
-        }).join('')
-    + '</div>';
-  }
-
-  var generalHtml = e.general_notes
-    ? '<div style="margin-top:10px;background:var(--bg);border:1px dashed var(--border);border-radius:8px;padding:8px 12px">'
-      + '<div style="font-size:8.5px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px">General notes</div>'
-      + '<div style="font-size:11.5px;color:var(--ink-2);line-height:1.5;white-space:pre-wrap">' + esc(e.general_notes) + '</div>'
-    + '</div>'
-    : '';
-
-  var followupBadge = followupCount > 0
-    ? '<span style="font-size:9px;font-weight:700;background:#fef3c7;color:#92400e;border:1px solid #fde68a;padding:2px 8px;border-radius:99px;letter-spacing:0.04em">' + followupCount + ' FOLLOWUP' + (followupCount === 1 ? '' : 'S') + '</span>'
-    : '';
-  var partnerCount = (e.partner_notes || []).length;
-  var countBadge = partnerCount > 0
-    ? '<span style="font-size:10px;color:var(--ink-3);font-weight:600">' + partnerCount + ' partner' + (partnerCount === 1 ? '' : 's') + '</span>'
-    : '';
-
-  return '<div class="section-card" style="margin:0 0 8px;padding:14px 16px">'
-    + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">'
-      + '<div style="flex:1;min-width:0">'
-        + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
-          + '<span style="font-size:13px;font-weight:700;color:var(--ink);letter-spacing:-0.01em;line-height:1.3">' + esc(e.title || '(Untitled meeting)') + '</span>'
-          + countBadge
-          + followupBadge
-        + '</div>'
-        + '<div style="font-size:10px;color:var(--ink-4);margin-top:3px">' + esc(author) + ' · ' + esc(ts) + editedSuffix + '</div>'
-      + '</div>'
-      + '<button class="icon-btn" onclick="huddleOpenModal(\'' + esc(e.id) + '\')" title="Edit" style="width:26px;height:26px;flex-shrink:0"><i data-lucide="pencil" style="width:11px;height:11px"></i></button>'
-    + '</div>'
-    + partnerRowsHtml
-    + generalHtml
-  + '</div>';
-}
-
-function huddleWeekLabel_(weekIso) {
-  if (!weekIso) return 'Unknown week';
-  var d = new Date(weekIso);
-  if (isNaN(d.getTime())) return weekIso;
-  var monStr = d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' });
-  var end = new Date(d.getTime());
-  end.setDate(end.getDate() + 6);
-  var endStr = end.toLocaleDateString('en-IE', { day: 'numeric', month: 'short', year: 'numeric' });
-  var thisMon = huddleCurrentWeekStart_();
-  var isThisWeek = weekIso === thisMon.slice(0, 10);
-  var prefix = isThisWeek ? 'This week · ' : '';
-  return prefix + 'Week of ' + monStr + ' – ' + endStr;
-}
-
-function huddleDateStr_(iso) {
-  if (!iso) return '';
-  var d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short', year: 'numeric' }) + ' · ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function huddleAuthorShort_(email) {
-  return (email || '').split('@')[0].split('.').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ') || '—';
-}
-
-function huddleCurrentWeekStart_() {
-  var d = new Date();
-  var day = d.getDay();
-  var diff = (day === 0) ? -6 : (1 - day);
-  d.setDate(d.getDate() + diff);
-  d.setHours(0, 0, 0, 0);
-  return d.toISOString().slice(0, 10);
-}
-
-/* ── ADD/EDIT MODAL ─────────────────────────────────────────────────────── */
-
-function huddleOpenModal(editingId) {
-  huddleState.modalOpen = true;
-  huddleState.modalEditingId = editingId;
-  huddleState.pullForwardAvailable = null;
-
-  if (editingId) {
-    var entry = (huddleState.data.entries || []).find(function(e) { return e.id === editingId; });
-    if (!entry) { showToast('Entry not found', 'error'); return; }
-    huddleState.modalDraft = {
-      week_start: (entry.week_start || '').slice(0, 10),
-      title: entry.title || '',
-      partner_notes: (entry.partner_notes || []).map(function(p) {
-        return { partner: p.partner, note: p.note || '', followup: !!p.followup };
-      }),
-      general_notes: entry.general_notes || ''
-    };
-  } else {
-    huddleState.modalDraft = {
-      week_start: huddleCurrentWeekStart_(),
-      title: huddleSuggestedTitle_(),
-      partner_notes: [],
-      general_notes: ''
-    };
-  }
-  huddleRenderModal_();
-
-  // For new meetings, fetch last week's followups so we can offer "Pull forward".
-  if (!editingId) {
-    google.script.run
-      .withSuccessHandler(function(items) {
-        huddleState.pullForwardAvailable = { count: (items || []).length, items: items || [] };
-        huddleUpdatePullForwardBtn_();
-      })
-      .withFailureHandler(function() {
-        huddleState.pullForwardAvailable = { count: 0, items: [] };
-        huddleUpdatePullForwardBtn_();
-      })
-      .getLastWeekFollowups(_userTeam);
-  }
-}
-
-function huddleSuggestedTitle_() {
-  var d = new Date();
-  return d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' }) + ' Sync';
-}
-
-function huddleCloseModal() {
-  huddleState.modalOpen = false;
-  huddleState.modalEditingId = null;
-  var m = document.getElementById('huddleModal');
-  if (m) m.remove();
-}
-
-function huddleRenderModal_() {
-  var existing = document.getElementById('huddleModal');
-  if (existing) existing.remove();
-  var d = huddleState.modalDraft;
-  var titleText = huddleState.modalEditingId ? 'Edit Meeting' : 'New Meeting';
-  var modal = document.createElement('div');
-  modal.id = 'huddleModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(15,15,15,0.45);z-index:5000;display:flex;align-items:center;justify-content:center;padding:24px';
-  modal.innerHTML = ''
-    + '<div style="background:var(--surface);border-radius:14px;width:100%;max-width:760px;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 16px 40px rgba(0,0,0,0.16);overflow:hidden">'
-      + '<div style="padding:16px 22px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">'
-        + '<div>'
-          + '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4)">Huddle</div>'
-          + '<div style="font-size:18px;font-weight:700;letter-spacing:-0.01em;margin-top:2px">' + titleText + '</div>'
-        + '</div>'
-        + '<button class="icon-btn" onclick="huddleCloseModal()" style="width:30px;height:30px"><i data-lucide="x" style="width:14px;height:14px"></i></button>'
-      + '</div>'
-      + '<div style="padding:16px 22px;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:12px">'
-        + '<div style="display:grid;grid-template-columns:1fr 180px;gap:10px">'
-          + '<div>'
-            + '<label class="nx-field-label">Title</label>'
-            + '<input type="text" id="huddleTitleInput" value="' + esc(d.title) + '" placeholder="e.g. Apr 28 Sync" class="nx-field-input" style="font-size:13px">'
-          + '</div>'
-          + '<div>'
-            + '<label class="nx-field-label">Week</label>'
-            + '<input type="date" id="huddleWeekInput" value="' + esc(d.week_start) + '" class="nx-field-input" style="font-size:13px">'
-          + '</div>'
-        + '</div>'
-
-        + '<div>'
-          + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
-            + '<label class="nx-field-label" style="margin:0">Partners discussed</label>'
-            + '<button id="huddlePullFwdBtn" class="btn-ghost" onclick="huddlePullForward()" style="display:none;font-size:11px;padding:4px 10px"><i data-lucide="corner-down-right" style="width:11px;height:11px"></i> <span id="huddlePullFwdLabel">Pull forward</span></button>'
-          + '</div>'
-          + '<div id="huddlePartnerList" style="display:flex;flex-direction:column;gap:6px"></div>'
-          + '<div style="position:relative;margin-top:8px">'
-            + '<input type="text" id="huddlePartnerInput" placeholder="Add partner — type to search…" oninput="huddlePartnerSearch(this.value)" onkeydown="huddlePartnerKey(event)" autocomplete="off" class="nx-field-input" style="font-size:12px">'
-            + '<div id="huddlePartnerSuggest" style="display:none;position:absolute;left:0;right:0;top:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-top:4px;max-height:240px;overflow-y:auto;z-index:20;box-shadow:0 6px 18px rgba(0,0,0,0.08)"></div>'
-          + '</div>'
-        + '</div>'
-
-        + '<div>'
-          + '<label class="nx-field-label">General notes <span style="color:var(--ink-4);font-weight:500">(optional — for non-partner items)</span></label>'
-          + '<textarea id="huddleGeneralInput" placeholder="Process changes, scheduling, anything not tied to a specific partner…" class="nx-field-input" style="font-size:13px;min-height:80px;resize:vertical;font-family:inherit;line-height:1.5"></textarea>'
-        + '</div>'
-      + '</div>'
-      + '<div style="padding:14px 22px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px">'
-        + (huddleState.modalEditingId ? '<button class="btn-ghost" onclick="huddleShowHistory()"><i data-lucide="history" style="width:12px;height:12px"></i> History</button>' : '<span></span>')
-        + '<div style="display:flex;gap:8px">'
-          + '<button class="btn-ghost" onclick="huddleCloseModal()">Cancel</button>'
-          + '<button class="btn-primary" id="huddleSaveBtn" onclick="huddleSubmit()"><i data-lucide="check" style="width:12px;height:12px"></i> ' + (huddleState.modalEditingId ? 'Save Changes' : 'Save Meeting') + '</button>'
-        + '</div>'
-      + '</div>'
-    + '</div>';
-  document.body.appendChild(modal);
-  document.getElementById('huddleGeneralInput').value = d.general_notes || '';
-  huddleRenderPartnerList_();
-  refreshIcons();
-}
-
-function huddleRenderPartnerList_() {
-  var wrap = document.getElementById('huddlePartnerList');
-  if (!wrap) return;
-  var rows = huddleState.modalDraft.partner_notes;
-  if (!rows.length) {
-    wrap.innerHTML = '<div style="padding:14px;text-align:center;border:1px dashed var(--border);border-radius:8px;font-size:11px;color:var(--ink-4)">No partners yet — type below to add. Each partner gets a note + a "needs followup" checkbox.</div>';
-    return;
-  }
-  wrap.innerHTML = rows.map(function(p, idx) {
-    return '<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px">'
-      + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
-        + '<span style="font-weight:700;font-size:12px;color:var(--ink);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(p.partner) + '</span>'
-        + '<label style="display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--ink-3);cursor:pointer;user-select:none;font-weight:600">'
-          + '<input type="checkbox" ' + (p.followup ? 'checked' : '') + ' onchange="huddleTogglePartnerFollowup(' + idx + ',this.checked)" style="accent-color:#92400e;width:13px;height:13px">'
-          + ' Followup'
-        + '</label>'
-        + '<button class="icon-btn" onclick="huddleRemovePartner(' + idx + ')" title="Remove" style="width:24px;height:24px"><i data-lucide="x" style="width:11px;height:11px"></i></button>'
-      + '</div>'
-      + '<textarea oninput="huddleUpdatePartnerNote(' + idx + ',this.value)" placeholder="What was discussed? Or leave blank if all good." class="nx-field-input" style="font-size:12px;min-height:50px;resize:vertical;font-family:inherit;line-height:1.5;padding:6px 10px">' + esc(p.note) + '</textarea>'
-    + '</div>';
-  }).join('');
-  refreshIcons();
-}
-
-function huddleUpdatePartnerNote(idx, val) {
-  if (huddleState.modalDraft.partner_notes[idx]) {
-    huddleState.modalDraft.partner_notes[idx].note = val;
-  }
-}
-
-function huddleTogglePartnerFollowup(idx, val) {
-  if (huddleState.modalDraft.partner_notes[idx]) {
-    huddleState.modalDraft.partner_notes[idx].followup = !!val;
-  }
-}
-
-function huddleRemovePartner(idx) {
-  huddleState.modalDraft.partner_notes.splice(idx, 1);
-  huddleRenderPartnerList_();
-}
-
-function huddlePartnerSearch(query) {
-  var sug = document.getElementById('huddlePartnerSuggest');
-  if (!sug) return;
-  var q = String(query || '').toLowerCase().trim();
-  if (!q) { sug.style.display = 'none'; return; }
-  var existing = {};
-  huddleState.modalDraft.partner_notes.forEach(function(p) { existing[p.partner.toLowerCase()] = true; });
-  var matched = (typeof P !== 'undefined' ? P : []).filter(function(p) {
-    var n = String(p.company || '').toLowerCase();
-    return n.indexOf(q) > -1 && !existing[n];
-  }).slice(0, 8);
-  if (!matched.length) { sug.style.display = 'none'; return; }
-  sug.innerHTML = matched.map(function(p) {
-    return '<div onclick="huddleAddPartner(\'' + esc(p.company).replace(/'/g, "\\'") + '\')" style="padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border);color:var(--ink)" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'\'">'
-      + esc(p.company)
-      + '<span style="font-size:10px;color:var(--ink-4);margin-left:8px">' + esc(p.country || '') + '</span>'
-    + '</div>';
-  }).join('');
-  sug.style.display = 'block';
-}
-
-function huddlePartnerKey(e) {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    var v = e.target.value.trim();
-    if (v) huddleAddPartner(v);
-  }
-}
-
-function huddleAddPartner(name) {
-  if (!name) return;
-  var existing = huddleState.modalDraft.partner_notes.some(function(p) {
-    return p.partner.toLowerCase() === name.toLowerCase();
-  });
-  if (!existing) {
-    huddleState.modalDraft.partner_notes.push({ partner: name, note: '', followup: false });
-  }
-  document.getElementById('huddlePartnerInput').value = '';
-  document.getElementById('huddlePartnerSuggest').style.display = 'none';
-  huddleRenderPartnerList_();
-}
-
-function huddleUpdatePullForwardBtn_() {
-  var btn = document.getElementById('huddlePullFwdBtn');
-  var lbl = document.getElementById('huddlePullFwdLabel');
-  if (!btn) return;
-  var pf = huddleState.pullForwardAvailable;
-  if (!pf || pf.count <= 0) { btn.style.display = 'none'; return; }
-  btn.style.display = 'inline-flex';
-  if (lbl) lbl.textContent = 'Pull forward (' + pf.count + ')';
-  refreshIcons();
-}
-
-function huddlePullForward() {
-  var pf = huddleState.pullForwardAvailable;
-  if (!pf || !pf.items || !pf.items.length) return;
-  var existing = {};
-  huddleState.modalDraft.partner_notes.forEach(function(p) { existing[p.partner.toLowerCase()] = true; });
-  var added = 0;
-  pf.items.forEach(function(item) {
-    var k = (item.partner || '').toLowerCase();
-    if (!k || existing[k]) return;
-    existing[k] = true;
-    huddleState.modalDraft.partner_notes.push({
-      partner: item.partner,
-      note: item.note ? '[from prior meeting] ' + item.note : '',
-      followup: false  // don't auto-flag — fresh meeting, user re-decides
-    });
-    added++;
-  });
-  if (added > 0) {
-    huddleRenderPartnerList_();
-    showToast(added + ' partner' + (added === 1 ? '' : 's') + ' pulled forward', 'success');
-  }
-  // Hide the button after first use to avoid double-pull
-  var btn = document.getElementById('huddlePullFwdBtn');
-  if (btn) btn.style.display = 'none';
-}
-
-function huddleShowHistory() {
-  var entry = (huddleState.data.entries || []).find(function(e) { return e.id === huddleState.modalEditingId; });
-  if (!entry || !entry.edit_history || !entry.edit_history.length) {
-    showToast('No edit history yet', 'info');
-    return;
-  }
-  var lines = entry.edit_history.map(function(h) {
-    return huddleDateStr_(h.ts) + ' · ' + (h.by || '') + (h.prev_title ? ' · "' + h.prev_title + '"' : '');
-  });
-  alert('Edit History:\n\n' + lines.join('\n'));
-}
-
-function huddleSubmit() {
-  var weekIn = document.getElementById('huddleWeekInput').value;
-  var title = document.getElementById('huddleTitleInput').value.trim();
-  var generalNotes = document.getElementById('huddleGeneralInput').value.trim();
-  var partnerNotes = huddleState.modalDraft.partner_notes;
-
-  if (!title && !generalNotes && !partnerNotes.length) {
-    showToast('Add a title, partner, or general note', 'error');
-    return;
-  }
-  var weekIso = weekIn ? new Date(weekIn).toISOString() : new Date().toISOString();
-
-  var btn = document.getElementById('huddleSaveBtn');
-  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Saving…'; refreshIcons(); }
-
-  var payload = {
-    week_start: weekIso,
-    title: title,
-    partner_notes: partnerNotes,
-    general_notes: generalNotes
-  };
-
-  var fn = huddleState.modalEditingId ? 'editHuddleEntry' : 'addHuddleEntry';
-  var args = huddleState.modalEditingId ? [_userTeam, huddleState.modalEditingId, payload] : [_userTeam, payload];
+  el.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--ink-4);font-size:11px">Loading…</div>';
   google.script.run
-    .withSuccessHandler(function(res) { huddleAfterSubmit_(res); })
-    .withFailureHandler(function(e) { huddleAfterSubmit_({ success: false, error: (e && e.message) || e }); })
-    [fn].apply(null, args);
+    .withSuccessHandler(function(list) {
+      _ovOutreachCache[ck] = Array.isArray(list) ? list : [];
+      renderOvOutreach_(_ovOutreachCache[ck], days);
+    })
+    .withFailureHandler(function() {
+      el.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--ink-4);font-size:11px">No outreach data</div>';
+    })
+    .getCampaignsList(days, _userTeam);
 }
 
-function huddleAfterSubmit_(res) {
-  var btn = document.getElementById('huddleSaveBtn');
-  if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px"></i> ' + (huddleState.modalEditingId ? 'Save Changes' : 'Save Meeting'); refreshIcons(); }
-  if (!res || !res.success) {
-    showToast('Save failed: ' + (res && res.error ? res.error : 'unknown'), 'error');
+function renderOvOutreach_(list, days) {
+  var el = document.getElementById('ovOutreachWrap');
+  if (!el) return;
+
+  var totalCampaigns = list.length;
+  var totalSent = list.reduce(function(s, c) { return s + (c.sent || 0); }, 0);
+  var totalReplied = list.reduce(function(s, c) { return s + (c.replied || 0); }, 0);
+  var avgRate = totalSent > 0 ? Math.round((totalReplied / totalSent) * 100) : 0;
+  var rateColor = avgRate >= 20 ? '#15803d' : avgRate >= 10 ? '#b45309' : '#dc2626';
+
+  // Segmented control: 30 / 90 / All. Active pill styled like the wiz-step-pill active state.
+  function segBtn(label, val) {
+    var active = _ovOutreachWindow === val;
+    var style = active
+      ? 'background:var(--ink);color:#fff;border-color:var(--ink)'
+      : 'background:var(--surface);color:var(--ink-3);border-color:var(--border)';
+    return '<button onclick="setOvOutreachWindow(' + val + ')" style="' + style + ';border-width:1px;border-style:solid;padding:2px 8px;border-radius:6px;font-size:9px;font-weight:700;font-family:inherit;cursor:pointer;letter-spacing:0.04em;text-transform:uppercase">' + label + '</button>';
+  }
+  var switcher = '<div style="display:flex;gap:3px;padding:6px 12px;flex-shrink:0">'
+    + segBtn('30D', 30)
+    + segBtn('90D', 90)
+    + segBtn('All', 0)
+    + '</div>';
+
+  // KPI grid — 2×2 inside the bubble to match the height budget (~150px after header+switcher).
+  function kpi(label, value, sub) {
+    return '<div style="display:flex;flex-direction:column;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);min-width:0">'
+      + '<span style="font-size:8.5px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:2px">' + label + '</span>'
+      + '<span style="font-size:18px;font-weight:700;letter-spacing:-0.03em;line-height:1.1">' + value + '</span>'
+      + '<span style="font-size:9px;color:var(--ink-3);margin-top:2px">' + sub + '</span>'
+      + '</div>';
+  }
+
+  var periodLabel = days === 0 ? 'all time' : 'last ' + days + 'd';
+  var grid = '<div style="flex:1;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:6px;padding:0 12px 10px;min-height:0">'
+    + kpi('Campaigns', totalCampaigns.toLocaleString(), periodLabel)
+    + kpi('Sent',       totalSent.toLocaleString(),    totalCampaigns > 0 ? 'across ' + totalCampaigns + ' campaign' + (totalCampaigns === 1 ? '' : 's') : '—')
+    + kpi('Replied',    totalReplied.toLocaleString(), totalSent > 0 ? 'out of ' + totalSent : '—')
+    + '<div style="display:flex;flex-direction:column;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);min-width:0">'
+      + '<span style="font-size:8.5px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:2px">Reply Rate</span>'
+      + '<span style="font-size:18px;font-weight:700;letter-spacing:-0.03em;line-height:1.1;color:' + rateColor + '">' + avgRate + '%</span>'
+      + '<span style="font-size:9px;color:var(--ink-3);margin-top:2px">' + (avgRate >= 20 ? 'strong' : avgRate >= 10 ? 'ok' : totalSent > 0 ? 'low' : '—') + '</span>'
+    + '</div>'
+  + '</div>';
+
+  el.innerHTML = switcher + grid;
+}
+
+/* ── TOP MOVERS (V3.8) — merges Top Sales + Stock Alerts behind a 2-way lens
+   toggle. Same partner-row layout reused across lenses; only the metric +
+   right-side pill changes. V3.12 — At Risk lens removed (Sales Risk is already
+   reachable via the Cockpit insight filter, and the lens added more noise than
+   signal on the overview). Lens descriptions surfaced as subtext for clarity. */
+var _ovMoversLens = 'sales';  // 'sales' | 'stock'
+
+var _OV_MOVERS_SUBS = {
+  sales: 'Sales YTD — top GTV partners',
+  stock: 'Biggest stock drops, last 15d'
+};
+
+function setOvMoversLens(which) {
+  if (['sales','stock'].indexOf(which) < 0) return;
+  _ovMoversLens = which;
+  buildOvTopMovers();
+}
+
+function buildOvTopMovers() {
+  var lensEl = document.getElementById('ovMoversLens');
+  var subEl  = document.getElementById('ovMoversSub');
+  var wrap   = document.getElementById('ovMoversWrap');
+  if (lensEl) lensEl.innerHTML = _ovMoversLensBtn_('sales', 'Top Sales') + _ovMoversLensBtn_('stock', 'Stock Alerts');
+  if (subEl)  subEl.textContent = _OV_MOVERS_SUBS[_ovMoversLens] || '';
+  if (!wrap) return;
+
+  if (_ovMoversLens === 'sales') return _ovRenderTopSales_(wrap);
+  if (_ovMoversLens === 'stock') return _ovRenderStockAlerts_(wrap);
+}
+
+function _ovMoversLensBtn_(key, label) {
+  var active = _ovMoversLens === key;
+  var style = active
+    ? 'background:var(--ink);color:#fff;border-color:var(--ink)'
+    : 'background:var(--surface);color:var(--ink-3);border-color:var(--border)';
+  return '<button onclick="setOvMoversLens(\'' + key + '\')" style="' + style + ';border-width:1px;border-style:solid;padding:2px 8px;border-radius:6px;font-size:9px;font-weight:700;font-family:inherit;cursor:pointer;letter-spacing:0.04em;text-transform:uppercase">' + label + '</button>';
+}
+
+// Top Sales — YTD GTV ranking, unchanged behavior from prior buildOvSales.
+function _ovRenderTopSales_(el) {
+  var rows = P.filter(function(p) { return p.cockpit_matched && p.cy_ytd > 0; });
+  rows.sort(function(a, b) { return b.cy_ytd - a.cy_ytd; });
+  var top = rows.slice(0, 100);
+  if (!top.length) { el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:11px">No sales data</div>'; return; }
+
+  el.innerHTML = top.map(function(d, i) {
+    var rank = i + 1;
+    var isPos = d.ytd_pct >= 0;
+    var pctVal = Math.round(d.ytd_pct * 100);
+    var pctBg = isPos ? '#dcfce7' : '#fee2e2';
+    var pctColor = isPos ? '#15803d' : '#dc2626';
+    var pctBorder = isPos ? '#bbf7d0' : '#fecdd3';
+    return '<div onclick="openDealByStore(\'' + esc(d.company) + '\')" style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.12s" onmouseenter="this.style.background=\'var(--bg)\'" onmouseleave="this.style.background=\'\'">'
+      + '<span style="font-size:9px;font-weight:700;color:var(--ink-4);width:18px;text-align:center;flex-shrink:0">' + rank + '</span>'
+      + '<div style="flex:1;min-width:0"><div style="font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(d.company) + '</div></div>'
+      + '<span style="font-size:11px;font-weight:700;letter-spacing:-0.02em;flex-shrink:0;margin-right:6px">' + fGtv(d.cy_ytd) + '</span>'
+      + '<span style="background:' + pctBg + ';color:' + pctColor + ';border:1px solid ' + pctBorder + ';padding:2px 7px;border-radius:5px;font-size:8.5px;font-weight:700;white-space:nowrap;flex-shrink:0">' + (isPos ? '+' : '') + pctVal + '%</span>'
+      + '</div>';
+  }).join('');
+}
+
+// Stock Alerts — partners with 15-day stock decline, sorted by severity.
+function _ovRenderStockAlerts_(el) {
+  var all = stockPartners();
+  var alerts = all.filter(function(r) { return r.pct15 < -0.05; });
+  alerts.sort(function(a, b) { return a.pct15 - b.pct15; });
+  if (!alerts.length) { el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:11px">No significant declines</div>'; return; }
+
+  el.innerHTML = alerts.slice(0, 100).map(function(r, i) {
+    var rank = i + 1;
+    var dropPct = Math.abs(Math.round(r.pct15 * 100));
+    return '<div onclick="openDealByStore(\'' + esc(r.store) + '\')" style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.12s" onmouseenter="this.style.background=\'var(--bg)\'" onmouseleave="this.style.background=\'\'">'
+      + '<span style="font-size:9px;font-weight:700;color:var(--ink-4);width:18px;text-align:center;flex-shrink:0">' + rank + '</span>'
+      + '<div style="flex:1;min-width:0"><div style="font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(r.store) + '</div></div>'
+      + '<span style="font-size:10px;color:var(--ink-3);flex-shrink:0;margin-right:6px">' + r.today.toLocaleString() + '</span>'
+      + '<span style="background:#fee2e2;color:#dc2626;border:1px solid #fecdd3;padding:2px 7px;border-radius:5px;font-size:8.5px;font-weight:700;white-space:nowrap;flex-shrink:0">↓ ' + dropPct + '%</span>'
+      + '</div>';
+  }).join('');
+}
+
+/* ── BREAKDOWN MIX (V3.8) — dim-switchable + lens-switchable team pie.
+   Replaces the season-only SOH pie. Reads BREAKDOWNS[dim].totals.{sales,soh}
+   (already team-aggregated by the backend, so no re-aggregation needed).
+   Sales lens uses gtv; stock lens uses online units — both plotted as a pie.
+   Colors via seasonColor_/breakdownColor_ from cockpit (shared palette). ── */
+var _ovMixDim = 'season';   // 'season' | 'brand' | 'family'
+var _ovMixLens = 'sales';   // 'sales' | 'stock'
+
+function setOvMixDim(dim) {
+  if (['season','brand','family'].indexOf(dim) < 0) return;
+  _ovMixDim = dim;
+  buildOvBreakdownMix();
+}
+function setOvMixLens(lens) {
+  if (['sales','stock'].indexOf(lens) < 0) return;
+  _ovMixLens = lens;
+  buildOvBreakdownMix();
+}
+
+function buildOvBreakdownMix() {
+  // Header controls
+  var dimEl = document.getElementById('ovMixDim');
+  var lensEl = document.getElementById('ovMixLens');
+  var titleEl = document.getElementById('ovMixTitle');
+  var viewEl = document.getElementById('ovMixViewLink');
+  if (dimEl) dimEl.innerHTML = _ovMixSegBtn_('dim', 'season', 'Season') + _ovMixSegBtn_('dim', 'brand', 'Brand') + _ovMixSegBtn_('dim', 'family', 'Family');
+  if (lensEl) lensEl.innerHTML = _ovMixSegBtn_('lens', 'sales', 'Sales') + _ovMixSegBtn_('lens', 'stock', 'Stock');
+
+  var dimLabel = _ovMixDim === 'brand' ? 'Brand' : _ovMixDim === 'family' ? 'Family' : 'Season';
+  var lensLabel = _ovMixLens === 'sales' ? 'Sales' : 'Stock';
+  if (titleEl) titleEl.textContent = lensLabel + ' by ' + dimLabel;
+
+  // Click-through wiring: jump to cockpit with matching tab+lens+dim.
+  // Uses the setCkDim helper from nx_cockpit which resets ckSelectedSeason
+  // and forces the breakdown lens on — so user lands exactly on this view.
+  if (viewEl) {
+    viewEl.onclick = function() {
+      switchView('cockpit');
+      setTimeout(function() {
+        if (_ovMixLens === 'sales') switchCockpitTab('sales');
+        else switchCockpitTab('stock');
+        if (typeof setCkDim === 'function') setCkDim(_ovMixDim);
+      }, 100);
+    };
+  }
+
+  var el = document.getElementById('ovMixWrap');
+  if (!el) return;
+
+  // Pull active-dim subtree. Defensive fallback — BREAKDOWNS may be absent if
+  // running against a pre-V3.7 payload (shouldn't happen in production).
+  var subtree = null;
+  if (typeof BREAKDOWNS !== 'undefined' && BREAKDOWNS[_ovMixDim]) {
+    subtree = BREAKDOWNS[_ovMixDim];
+  } else if (_ovMixDim === 'season' && typeof SEASONS !== 'undefined' && SEASONS) {
+    // Legacy path — SEASONS has allSeasons rather than allValues
+    subtree = { allValues: SEASONS.allSeasons || [], totals: SEASONS.totals || { sales: {}, soh: {} } };
+  }
+  if (!subtree || !subtree.allValues || !subtree.allValues.length) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:11px">No ' + dimLabel.toLowerCase() + ' data</div>';
     return;
   }
-  showToast(huddleState.modalEditingId ? 'Meeting updated' : 'Meeting saved', 'success');
-  huddleCloseModal();
-  loadHuddle();
+
+  // Slices: values > 0 in the active lens metric. Sales uses gtv (commercial
+  // relevance — a brand with 100 cheap units matters less than 10 expensive);
+  // stock uses online units (what's sellable right now).
+  var isStockMode = _ovMixLens === 'stock';
+  var totalsSource = isStockMode ? (subtree.totals.soh || {}) : (subtree.totals.sales || {});
+  var slices = [];
+  subtree.allValues.forEach(function(name) {
+    var t = totalsSource[name];
+    if (!t) return;
+    var v = isStockMode ? (t.online || 0) : (t.gtv || 0);
+    if (v > 0) slices.push({ name: name, value: v, partners: t.partners || 0 });
+  });
+  if (!slices.length) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:11px">No ' + lensLabel.toLowerCase() + ' data for ' + dimLabel.toLowerCase() + '</div>';
+    return;
+  }
+
+  slices.sort(function(a, b) { return b.value - a.value; });
+  var total = slices.reduce(function(s, x) { return s + x.value; }, 0);
+
+  // V3.8 — Top-N + 'Other' bucket. Cap at 10 for the wider overview card;
+  // anything past that collapses into a synthetic 'Other' so the chart
+  // stays readable without dropping data.
+  var MAX_BARS = 10;
+  var bars;
+  if (slices.length > MAX_BARS) {
+    var top = slices.slice(0, MAX_BARS - 1);
+    var rest = slices.slice(MAX_BARS - 1);
+    var otherVal = 0;
+    rest.forEach(function(s) { otherVal += s.value; });
+    top.push({ name: 'Other', value: otherVal, partners: 0, _synthetic: true });
+    bars = top;
+  } else {
+    bars = slices.slice();
+  }
+  // Pin literal-or-synthetic 'Other' to last for visual consistency.
+  bars.sort(function(a, b) {
+    if (a.name === 'Other' && b.name !== 'Other') return 1;
+    if (b.name === 'Other' && a.name !== 'Other') return -1;
+    return b.value - a.value;
+  });
+
+  // Value formatter: GTV for sales, plain number for units
+  var fmtVal = function(v) { return isStockMode ? v.toLocaleString() : fGtv(v); };
+
+  el.innerHTML =
+    '<div style="padding:6px 14px 10px;height:100%;box-sizing:border-box;display:flex;flex-direction:column">'
+      + '<div style="flex:1;min-height:0;display:flex;align-items:stretch;justify-content:center">'
+        + ovBarChartSvg_(bars, total, fmtVal)
+      + '</div>'
+      + (slices.length > MAX_BARS - 1
+          ? '<div style="font-size:9px;color:var(--ink-4);text-align:center;margin-top:4px">Top ' + (MAX_BARS - 1) + ' shown · ' + (slices.length - (MAX_BARS - 1)) + ' folded into Other</div>'
+          : '')
+    + '</div>';
 }
-</script>
+
+function _ovMixSegBtn_(kind, val, label) {
+  var active = (kind === 'dim' ? _ovMixDim : _ovMixLens) === val;
+  var style = active
+    ? 'background:var(--ink);color:#fff;border-color:var(--ink)'
+    : 'background:var(--surface);color:var(--ink-3);border-color:var(--border)';
+  var fn = kind === 'dim' ? 'setOvMixDim' : 'setOvMixLens';
+  return '<button onclick="' + fn + '(\'' + val + '\')" style="' + style + ';border-width:1px;border-style:solid;padding:2px 8px;border-radius:6px;font-size:9px;font-weight:700;font-family:inherit;cursor:pointer;letter-spacing:0.04em;text-transform:uppercase">' + label + '</button>';
+}
+
+// Dim-aware color helper. Routes through cockpit's breakdownColor_ when
+// available (V3.7+ — supports hash-based brand palette); falls back to
+// seasonColor_ (which always resolves against the active dim in cockpit,
+// so passing _ovMixDim != cockpit's ckActiveDim could mis-color).
+// Using breakdownColor_ directly avoids that coupling.
+function _ovColorFor_(name) {
+  if (typeof breakdownColor_ === 'function') return breakdownColor_(_ovMixDim, name);
+  if (typeof seasonColor_ === 'function') return seasonColor_(name);
+  return { fg: '#64748b', bg: '#f1f5f9' };
+}
+
+// V3.8 — Vertical column chart for the overview Breakdown Mix card. Replaces
+// the old pie + side-legend layout. Wider plot area than the drawer chart
+// because the overview card is meaningfully bigger.
+// fmtVal lets the caller pass a unit formatter (GTV vs plain units).
+function ovBarChartSvg_(bars, total, fmtVal) {
+  if (!bars || !bars.length) return '<div style="padding:20px;text-align:center;font-size:11px;color:var(--ink-4)">No data</div>';
+  fmtVal = fmtVal || function(v) { return v.toLocaleString(); };
+  var W = 460, H = 220;
+  var padTop = 26, padBot = 56, padLeft = 8, padRight = 8;
+  var plotW = W - padLeft - padRight;
+  var plotH = H - padTop - padBot;
+  var n = bars.length;
+  var gap = 8;
+  var barW = (plotW - gap * (n - 1)) / n;
+  if (barW < 18) barW = 18;
+  var maxV = bars.reduce(function(m, b) { return b.value > m ? b.value : m; }, 0) || 1;
+
+  var items = bars.map(function(b, i) {
+    var h = Math.max(2, Math.round((b.value / maxV) * plotH));
+    var x = padLeft + i * (barW + gap);
+    var y = padTop + (plotH - h);
+    var pct = total > 0 ? Math.round((b.value / total) * 100) : 0;
+    var fill = b.name === 'Other' ? '#9ca3af' : 'var(--ink)';
+    var topLabel = fmtVal(b.value);
+    var xLabel = (b.name && b.name.length > 13) ? b.name.slice(0, 12) + '…' : (b.name || '');
+    return ''
+      + '<rect x="' + x + '" y="' + y + '" width="' + barW + '" height="' + h + '" fill="' + fill + '" rx="3">'
+        + '<title>' + esc(b.name || '') + ': ' + fmtVal(b.value) + ' (' + pct + '%)</title>'
+      + '</rect>'
+      + '<text x="' + (x + barW / 2) + '" y="' + (y - 6) + '" text-anchor="middle" '
+        + 'style="font-size:10px;font-weight:700;fill:var(--ink);font-variant-numeric:tabular-nums">' + esc(topLabel) + '</text>'
+      + '<text x="' + (x + barW / 2) + '" y="' + (padTop + plotH + 14) + '" text-anchor="end" '
+        + 'transform="rotate(-30 ' + (x + barW / 2) + ' ' + (padTop + plotH + 14) + ')" '
+        + 'style="font-size:10px;fill:var(--ink-3);font-weight:600">' + esc(xLabel) + '</text>';
+  }).join('');
+
+  var baseline = '<line x1="' + padLeft + '" y1="' + (padTop + plotH) + '" x2="' + (W - padRight) + '" y2="' + (padTop + plotH) + '" stroke="var(--border)" stroke-width="1"/>';
+
+  return '<svg width="100%" height="100%" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="display:block;width:100%;height:100%">'
+    + baseline + items
+    + '</svg>';
+}
+
+// Legacy ovPieSvg_ alias — V3.8 routes any stray caller to the bar renderer.
+function ovPieSvg_(slices, total, size) {
+  // Legacy callers passed slices in DESC order; preserve that contract.
+  return ovBarChartSvg_(slices.slice(0, 10), total, function(v) { return v.toLocaleString(); });
+}
+
+/* ── Helper: open drawer directly on Activity tab ───────────────────── */  
+function openDealActivity(row) {  
+  openDeal(row);  
+  setTimeout(function() { switchDrawerTab('correspondence'); }, 150);  
+}
+
+/* ── LIVE EMAIL FEED (with snippet from latestEmail JSON) ─────────────── */  
+function buildOvEmailFeed() {  
+  var el = document.getElementById('ovEmailFeedList');  
+  if (!el) return;
+
+  var feed = [];  
+  P.filter(function(p) { return p.cockpit_matched; }).forEach(function(p) {  
+    var le = null;  
+    try { le = typeof p.latestEmail === 'string' ? JSON.parse(p.latestEmail) : p.latestEmail; } catch(ex) {}  
+    if (le) {  
+      if (le.sent && le.sent.length) {  
+        le.sent.forEach(function(s) {  
+          var ts = s.timestamp ? new Date(s.timestamp).toISOString() : (s.date || '');  
+          feed.push({ dir: 'out', partner: p.company, row: p.row, subject: s.subject || '(No Subject)', snippet: s.snippet || '', date: ts, email: '' });  
+        });  
+      }  
+      if (le.received && le.received.length) {  
+        le.received.forEach(function(r) {  
+          var ts = r.timestamp ? new Date(r.timestamp).toISOString() : (r.date || '');  
+          feed.push({ dir: 'in', partner: p.company, row: p.row, subject: r.subject || 'Email received', snippet: r.snippet || '', date: ts, email: '' });  
+        });  
+      }  
+    }  
+    if ((!le || (!le.sent || !le.sent.length)) && p.recent_campaigns && p.recent_campaigns.length) {  
+      p.recent_campaigns.forEach(function(c) {  
+        feed.push({ dir: 'out', partner: p.company, row: p.row, subject: c.subject || '(No Subject)', snippet: '', date: c.timestamp || '', email: c.email || '' });  
+      });  
+    }  
+    if ((!le || !le.received || !le.received.length) && p.lastReceived && p.lastReceived !== '-' && p.lastReceived !== '') {  
+      feed.push({ dir: 'in', partner: p.company, row: p.row, subject: 'Email received', snippet: '', date: p.lastReceived || '', email: p.email || '' });  
+    }  
+  });
+
+  feed.sort(function(a, b) { return (b.date || '').localeCompare(a.date || ''); });  
+  var latest = feed.slice(0, 30);
+
+  if (!latest.length) {  
+    el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--ink-4);font-size:11px">No recent email activity</div>';  
+    return;  
+  }
+
+  el.innerHTML = latest.map(function(e) {  
+    var isIn = e.dir === 'in';  
+    var arrow = isIn  
+      ? '<span style="background:#e8e8e6;color:#4a4a48;width:18px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">↙</span>'  
+      : '<span style="background:#dcdcda;color:#686866;width:18px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">↗</span>';  
+    var dateStr = e.date;  
+    if (e.date && e.date.length > 10) {  
+      try { var d = new Date(e.date); if (!isNaN(d.getTime())) { var isToday = d.toDateString() === new Date().toDateString(); dateStr = isToday ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' }); } } catch(ex) {}  
+    }  
+    var snippetText = e.snippet ? (e.snippet.length > 80 ? e.snippet.substring(0, 80) + '…' : e.snippet) : '';
+
+    return '<div style="display:flex;align-items:flex-start;gap:10px;padding:7px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.1s" onmouseenter="this.style.background=\'var(--bg)\'" onmouseleave="this.style.background=\'\'" onclick="openDealActivity(' + e.row + ')">'  
+      + '<div style="padding-top:2px">' + arrow + '</div>'  
+      + '<div style="flex:1;min-width:0">'  
+      + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(e.partner) + '</span><span style="font-size:9px;color:var(--ink-4);flex-shrink:0;white-space:nowrap;margin-left:auto">' + esc(dateStr) + '</span></div>'  
+      + '<div style="font-size:10.5px;font-weight:500;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:2px">' + esc(e.subject) + '</div>'  
+      + (snippetText ? '<div style="font-size:10px;color:var(--ink-4);line-height:1.4;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden">' + esc(snippetText) + '</div>' : '')  
+      + '</div></div>';  
+  }).join('');  
+}  
+</script>  

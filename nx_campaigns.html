@@ -1,388 +1,306 @@
 <script>
-/* ═══════════════════════════════════════
-   CALENDAR
-═══════════════════════════════════════ */
-function getMonday(d) { d = new Date(d); var day = d.getDay(), diff = d.getDate() - day + (day === 0 ? -6 : 1); return new Date(d.setDate(diff)); }
-function changeWeek(offset) { if (offset === 0) currentViewMonday = getMonday(new Date()); else currentViewMonday.setDate(currentViewMonday.getDate() + (offset * 7)); renderCalendar(); }
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAMPAIGNS DASHBOARD — V3.1 (CRM-style sortable table)
+     Top:    KPI strip (campaigns, emails sent, avg reply rate, top campaign)
+     Main:   Sortable table (Date, Campaign, Template, Sent, Replied, Rate,
+             Errors, Sent By, Action). Click a row → drill-in drawer.
+     Drawer: Per-recipient table + Scan Replies. Auto-scan on open if last
+             scan >1h ago.
+═══════════════════════════════════════════════════════════════════════════ */
 
-function renderCalendar() {
-  var calGrid = document.getElementById('calGrid'); if (!calGrid) return;
-  var today = new Date(), days = ['Mon','Tue','Wed','Thu','Fri'], html = '';
-  window._calEventsFlat = [];
-  for (var i = 0; i < 5; i++) {
-    var day = new Date(currentViewMonday); day.setDate(day.getDate() + i); var isToday = day.toDateString() === today.toDateString();
-    var events = unifiedSchedule.filter(function(e) { return e.date && e.date.toDateString() === day.toDateString(); }); events.sort(function(a, b) { return a.date - b.date; });
-    var evHtml = events.map(function(e) {
-      var idx = window._calEventsFlat.length;
-      window._calEventsFlat.push(e);
-      var cls = e.isGCal ? 'cal-event-gcal' : (e.isInternal ? 'cal-event-int' : 'cal-event-crm');
-      return '<div class="cal-event ' + cls + '" onclick="showCalEventDetail(' + idx + ',event)"><div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px">' + esc(e.time) + '</div><div style="font-size:10px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(e.title) + '</div></div>';
-    }).join('');
-    if (!events.length) evHtml = '<div style="text-align:center;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-4);border:1px dashed var(--border);border-radius:7px;padding:12px">Clear</div>';
-    html += '<div class="cal-day ' + (isToday ? 'today' : '') + '" style="min-height:160px"><div style="text-align:center;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:10px"><div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:' + (isToday ? 'var(--ink)' : 'var(--ink-4)') + '">' + days[i] + '</div><div style="font-size:20px;font-weight:700;color:' + (isToday ? 'var(--ink)' : 'var(--ink-2)') + '">' + day.getDate() + '</div></div><div style="overflow-y:auto;flex:1">' + evHtml + '</div></div>';
-  }
-  calGrid.innerHTML = html;
-  var end = new Date(currentViewMonday); end.setDate(end.getDate() + 4);
-  document.getElementById('weekLabel').textContent = currentViewMonday.toLocaleDateString('default', { month: 'short', day: 'numeric' }) + ' – ' + end.toLocaleDateString('default', { month: 'short', day: 'numeric' });
+var campState = {
+  list: [],
+  days: 90,
+  lastAutoScan: {},
+  activeDetail: null,
+  loading: false,
+  sortCol: 'lastSent',
+  sortAsc: false,         // default: most recent first
+  filterQuery: ''
+};
+
+function initCampaignsView() {
+  var host = document.getElementById('view-campaigns');
+  host.style.flexDirection = 'column';
+  host.innerHTML = campShellHtml_();
+  loadCampaignsList();
   refreshIcons();
 }
 
-/* ═══════════════════════════════════════
-   CALENDAR EVENT DETAIL POPUP
-═══════════════════════════════════════ */
-function showCalEventDetail(idx, evt) {
-  evt.stopPropagation();
-  var e = window._calEventsFlat[idx]; if (!e) return;
-  closeCalEventDetail();
-  var popup = document.createElement('div');
-  popup.className = 'cal-event-detail';
-  popup.id = 'calEventPopup';
-  var typeBadge = e.isGCal ? '<span style="background:#dbeafe;color:#1d4ed8;padding:2px 7px;border-radius:5px;font-size:8px;font-weight:700;text-transform:uppercase">GCal</span>'
-    : e.isInternal ? '<span style="background:#faf5ff;color:#7c3aed;padding:2px 7px;border-radius:5px;font-size:8px;font-weight:700;text-transform:uppercase">Internal</span>'
-    : '<span style="background:#fee2e2;color:#dc2626;padding:2px 7px;border-radius:5px;font-size:8px;font-weight:700;text-transform:uppercase">CRM Action</span>';
-  var dateStr = e.date ? e.date.toLocaleDateString('en-IE', { weekday: 'short', day: 'numeric', month: 'short' }) : '';
-  popup.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
-    + typeBadge
-    + '<div onclick="closeCalEventDetail()" style="cursor:pointer;color:var(--ink-4);font-size:16px;line-height:1;padding:2px">✕</div></div>'
-    + '<div style="font-size:14px;font-weight:700;color:var(--ink);margin-bottom:6px;line-height:1.3">' + esc(e.title) + '</div>'
-    + '<div style="font-size:11px;color:var(--ink-3);margin-bottom:4px;display:flex;align-items:center;gap:6px"><span style="font-weight:600">' + esc(e.time || 'All Day') + '</span><span>·</span><span>' + esc(dateStr) + '</span></div>'
-    + (e.desc ? '<div style="font-size:11px;color:var(--ink-2);line-height:1.5;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);white-space:pre-wrap">' + esc(e.desc) + '</div>' : '');
-  document.body.appendChild(popup);
-  var rect = evt.target.closest('.cal-event').getBoundingClientRect();
-  popup.style.top = Math.min(rect.bottom + 6, window.innerHeight - 220) + 'px';
-  popup.style.left = Math.min(rect.left, window.innerWidth - 300) + 'px';
-  popup.style.display = 'block';
-}
-
-function closeCalEventDetail() {
-  var p = document.getElementById('calEventPopup'); if (p) p.remove();
-}
-document.addEventListener('click', function(e) {
-  if (!e.target.closest('.cal-event-detail') && !e.target.closest('.cal-event')) closeCalEventDetail();
-});
-
-/* ═══════════════════════════════════════
-   CREATE EVENT MODAL
-═══════════════════════════════════════ */
-function openCreateEventModal(prefillDate, prefillRow) {
-  document.getElementById('newEventTitle').value = ''; document.getElementById('newEventDate').value = prefillDate || TODAY; document.getElementById('newEventTime').value = ''; document.getElementById('newEventType').value = 'Meeting'; document.getElementById('newEventDesc').value = ''; document.getElementById('newEventSyncGCal').checked = false;
-  selectedEventPartners = prefillRow ? [String(prefillRow)] : []; renderEventChips();
-  selectedEventGuests = []; renderGuestChips();
-  document.getElementById('newEventGuestEmail').value = '';
-  hideGuestSuggestions();
-  var sel = document.getElementById('newEventPartnerAdd'); sel.innerHTML = '<option value="">+ Add partner…</option>';
-  P.forEach(function(d) { sel.appendChild(new Option(d.company + (d.country ? ' (' + d.country + ')' : ''), String(d.row))); });
-  document.getElementById('createEventModal').style.display = 'flex'; setTimeout(function() { document.getElementById('newEventTitle').focus(); }, 100); refreshIcons();
-}
-function closeCreateEventModal() { document.getElementById('createEventModal').style.display = 'none'; hideGuestSuggestions(); }
-function addEventPartner(v) { if (!v || selectedEventPartners.indexOf(v) > -1) return; selectedEventPartners.push(v); renderEventChips(); }
-function removeEventPartner(v) { selectedEventPartners = selectedEventPartners.filter(function(x) { return x !== v; }); renderEventChips(); }
-function renderEventChips() { var c = document.getElementById('eventPartnersChips'); if (!selectedEventPartners.length) { c.innerHTML = '<span style="font-size:11px;color:var(--ink-4);font-style:italic">None selected</span>'; return; } c.innerHTML = selectedEventPartners.map(function(v) { var d = P.find(function(x) { return String(x.row) === v; }); if (!d) return ''; return '<span style="display:inline-flex;align-items:center;gap:5px;background:var(--ink);color:#fff;padding:3px 9px;border-radius:7px;font-size:10px;font-weight:600">' + esc(d.company) + '<button onclick="removeEventPartner(\'' + v + '\')" style="background:none;border:none;color:rgba(255,255,255,0.5);cursor:pointer;font-size:11px;line-height:1">×</button></span>'; }).join(''); }
-
-var selectedEventGuests = [];
-function addEventGuest(email) {
-  var inp = document.getElementById('newEventGuestEmail');
-  email = (email || inp.value || '').trim().toLowerCase();
-  if (!email || !email.includes('@')) { if (!email) return; showToast('Enter a valid email', 'error'); return; }
-  if (selectedEventGuests.indexOf(email) > -1) return;
-  selectedEventGuests.push(email);
-  inp.value = '';
-  hideGuestSuggestions();
-  renderGuestChips();
-}
-function removeEventGuest(email) { selectedEventGuests = selectedEventGuests.filter(function(e) { return e !== email; }); renderGuestChips(); }
-function renderGuestChips() {
-  var c = document.getElementById('eventGuestsChips');
-  if (!selectedEventGuests.length) { c.innerHTML = ''; return; }
-  c.innerHTML = selectedEventGuests.map(function(e) {
-    return '<span style="display:inline-flex;align-items:center;gap:5px;background:#dbeafe;color:#1d4ed8;padding:3px 9px;border-radius:7px;font-size:10px;font-weight:600">' + esc(e) + '<button onclick="removeEventGuest(\'' + esc(e) + '\')" style="background:none;border:none;color:#1d4ed8;cursor:pointer;font-size:11px;line-height:1;opacity:0.5">×</button></span>';
-  }).join('');
-}
-
-/* ═══════════════════════════════════════
-   GUEST AUTOCOMPLETE
-═══════════════════════════════════════ */
-function buildGuestSuggestionPool() {
-  var pool = {}; // key = email, value = { email, name, source }
-
-  // 1. Org members: collect from contacts' added_by field
-  if (allContacts && allContacts.length) {
-    allContacts.forEach(function(c) {
-      if (c.added_by && c.added_by.includes('@')) {
-        var e = c.added_by.toLowerCase().trim();
-        if (!pool[e]) pool[e] = { email: e, name: e.split('@')[0].split('.').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' '), source: 'org' };
-      }
-    });
-  }
-
-  // 2. Current user
-  if (_userEmail) {
-    var ue = _userEmail.toLowerCase();
-    if (!pool[ue]) pool[ue] = { email: ue, name: ue.split('@')[0].split('.').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' '), source: 'org' };
-  }
-
-  // 3. Partner contacts (useful if inviting partner contacts to events)
-  if (allContacts && allContacts.length) {
-    allContacts.forEach(function(c) {
-      if (c.contact_email) {
-        var e = c.contact_email.toLowerCase().trim();
-        if (!pool[e]) pool[e] = { email: e, name: c.contact_name || '', source: c.merchant_name || 'contact' };
-      }
-    });
-  }
-
-  return Object.keys(pool).map(function(k) { return pool[k]; });
-}
-
-function filterGuestSuggestions() {
-  var inp = document.getElementById('newEventGuestEmail');
-  var q = (inp.value || '').toLowerCase().trim();
-  var dropdown = document.getElementById('guestSuggestionsDropdown');
-  if (!q || q.length < 2) { hideGuestSuggestions(); return; }
-
-  var pool = buildGuestSuggestionPool();
-  var matches = pool.filter(function(s) {
-    if (selectedEventGuests.indexOf(s.email) > -1) return false; // already added
-    return s.email.includes(q) || s.name.toLowerCase().includes(q);
-  }).slice(0, 8);
-
-  if (!matches.length) { hideGuestSuggestions(); return; }
-
-  dropdown.innerHTML = matches.map(function(s) {
-    var isOrg = s.source === 'org';
-    return '<div onclick="selectGuestSuggestion(\'' + esc(s.email) + '\')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);transition:background 0.1s" onmouseenter="this.style.background=\'var(--bg)\'" onmouseleave="this.style.background=\'\'">'
-      + '<div style="width:24px;height:24px;border-radius:50%;background:' + (isOrg ? '#dbeafe' : 'var(--bg)') + ';display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:10px;font-weight:700;color:' + (isOrg ? '#1d4ed8' : 'var(--ink-3)') + '">' + (s.name ? s.name.charAt(0).toUpperCase() : '@') + '</div>'
-      + '<div style="flex:1;min-width:0">'
-      + '<div style="font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(s.name) + '</div>'
-      + '<div style="font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(s.email) + '</div>'
+function campShellHtml_() {
+  return ''
+    + '<div class="filter-bar" style="justify-content:space-between;padding:10px 14px">'
+      + '<div style="display:flex;align-items:center;gap:10px">'
+        + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Window</span>'
+        + '<select id="campDays" class="nx-select" onchange="campState.days=parseInt(this.value,10);loadCampaignsList()">'
+          + '<option value="30">Last 30 days</option>'
+          + '<option value="90" selected>Last 90 days</option>'
+          + '<option value="180">Last 180 days</option>'
+          + '<option value="365">Last 365 days</option>'
+        + '</select>'
+        + '<input class="nx-input" id="campSearchInput" placeholder="Search campaigns…" oninput="campState.filterQuery=this.value.toLowerCase();renderCampaignsTable()" style="width:220px;font-size:11px;padding:5px 10px">'
+        + '<span style="font-size:10px;color:var(--ink-4)" id="campCount">—</span>'
       + '</div>'
-      + '<span style="font-size:8px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:' + (isOrg ? '#1d4ed8' : 'var(--ink-4)') + ';background:' + (isOrg ? '#eff6ff' : 'var(--bg)') + ';padding:1px 5px;border-radius:3px;flex-shrink:0">' + esc(isOrg ? 'Org' : s.source) + '</span>'
-      + '</div>';
-  }).join('');
-  dropdown.style.display = 'block';
+      + '<div style="display:flex;align-items:center;gap:8px">'
+        + '<button class="btn-ghost" onclick="loadCampaignsList()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>'
+        + '<button class="btn-primary" onclick="switchView(\'email\')"><i data-lucide="plus" style="width:12px;height:12px"></i> New Campaign</button>'
+      + '</div>'
+    + '</div>'
+    + '<div style="flex:1;overflow-y:auto;padding:18px 24px;background:var(--bg)">'
+      + '<div id="campKpiStrip" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px"></div>'
+      + '<div class="section-card" style="padding:0;overflow:hidden">'
+        + '<div style="overflow:auto">'
+          + '<table class="nx-table" id="campTable">'
+            + '<thead><tr>'
+              + '<th onclick="campSort(\'lastSent\')" style="white-space:nowrap">Last Sent</th>'
+              + '<th onclick="campSort(\'name\')">Campaign</th>'
+              + '<th onclick="campSort(\'templateKey\')">Template</th>'
+              + '<th onclick="campSort(\'sent\')" style="text-align:right">Sent</th>'
+              + '<th onclick="campSort(\'replied\')" style="text-align:right">Replied</th>'
+              + '<th onclick="campSort(\'replyRate\')" style="text-align:right">Reply Rate</th>'
+              + '<th onclick="campSort(\'errors\')" style="text-align:right">Errors</th>'
+              + '<th onclick="campSort(\'sentBy\')">Sent By</th>'
+              + '<th style="text-align:center">Action</th>'
+            + '</tr></thead>'
+            + '<tbody id="campTableBody"></tbody>'
+          + '</table>'
+        + '</div>'
+      + '</div>'
+    + '</div>'
+    + '<div id="campDetailOverlay" onclick="closeCampDetail()" style="display:none;position:fixed;inset:0;background:rgba(13,13,12,0.45);backdrop-filter:blur(6px);z-index:85"></div>'
+    + '<div id="campDetailDrawer" style="display:none;position:fixed;top:0;right:0;width:min(760px,92vw);height:100vh;background:var(--surface);border-left:1px solid var(--border);box-shadow:-20px 0 60px -10px rgba(13,13,12,0.25);z-index:86;flex-direction:column"></div>';
 }
 
-function selectGuestSuggestion(email) {
-  addEventGuest(email);
+function loadCampaignsList() {
+  campState.loading = true;
+  document.getElementById('campTableBody').innerHTML = '<tr><td colspan="9" style="padding:40px;text-align:center;color:var(--ink-4);font-size:12px">Loading campaigns…</td></tr>';
+  document.getElementById('campKpiStrip').innerHTML = '';
+  google.script.run
+    .withSuccessHandler(function(list) {
+      campState.loading = false;
+      campState.list = Array.isArray(list) ? list : [];
+      renderCampaignsKpiStrip();
+      renderCampaignsTable();
+      if (window.__highlightCampaignId) {
+        var id = window.__highlightCampaignId;
+        window.__highlightCampaignId = null;
+        setTimeout(function() { openCampDetail(id); }, 150);
+      }
+    })
+    .withFailureHandler(function(e) {
+      campState.loading = false;
+      document.getElementById('campTableBody').innerHTML = '<tr><td colspan="9" style="padding:40px;text-align:center;color:#be123c;font-size:12px">Failed to load: ' + esc(e.message || e) + '</td></tr>';
+    })
+    .getCampaignsList(campState.days, _userTeam);
 }
 
-function hideGuestSuggestions() {
-  var dd = document.getElementById('guestSuggestionsDropdown');
-  if (dd) dd.style.display = 'none';
-}
+function renderCampaignsKpiStrip() {
+  var list = campState.list;
+  var totalCampaigns = list.length;
+  var totalSent = list.reduce(function(s, c) { return s + (c.sent || 0); }, 0);
+  var totalReplied = list.reduce(function(s, c) { return s + (c.replied || 0); }, 0);
+  var avgRate = totalSent > 0 ? Math.round((totalReplied / totalSent) * 100) : 0;
+  var top = list.slice().sort(function(a, b) { return (b.replyRate || 0) - (a.replyRate || 0); })[0];
+  var topName = top ? top.name : '—';
+  var topRate = top ? Math.round((top.replyRate || 0) * 100) : 0;
 
-function handleGuestKeydown(event) {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    // If dropdown is showing, pick first result
-    var dd = document.getElementById('guestSuggestionsDropdown');
-    if (dd && dd.style.display === 'block' && dd.children.length) {
-      dd.children[0].click();
-    } else {
-      addEventGuest();
-    }
-  } else if (event.key === 'Escape') {
-    hideGuestSuggestions();
+  function card(label, value, sub) {
+    return '<div class="kpi-card" style="padding:12px 16px"><div class="kpi-label">' + label + '</div><div class="kpi-value">' + value + '</div><div class="kpi-sub">' + sub + '</div></div>';
   }
+  document.getElementById('campKpiStrip').innerHTML =
+    card('Campaigns',        totalCampaigns.toLocaleString(),                  'in last ' + campState.days + ' days')
+    + card('Emails Sent',    totalSent.toLocaleString(),                       totalReplied + ' replies')
+    + card('Avg Reply Rate', avgRate + '%',                                    avgRate >= 20 ? 'strong' : avgRate >= 10 ? 'ok' : 'low')
+    + card('Top Campaign',   topRate + '%',                                    esc((topName || '—').slice(0, 32)));
 }
 
-// Close dropdown when clicking outside
-document.addEventListener('click', function(e) {
-  var inp = document.getElementById('newEventGuestEmail');
-  var dd = document.getElementById('guestSuggestionsDropdown');
-  if (dd && inp && !inp.contains(e.target) && !dd.contains(e.target)) {
-    hideGuestSuggestions();
-  }
-});
+function campRateClass_(rate) {
+  if (rate >= 0.20) return 'camp-rate-high';
+  if (rate >= 0.10) return 'camp-rate-mid';
+  return 'camp-rate-low';
+}
 
-function submitCreateEvent() {
-  var title = document.getElementById('newEventTitle').value.trim(), date = document.getElementById('newEventDate').value;
-  if (!title) { showToast('Please add a title', 'error'); return; } if (!date) { showToast('Please pick a date', 'error'); return; }
-  var partners = selectedEventPartners.map(function(v) { var d = P.find(function(x) { return String(x.row) === v; }); return d ? d.company : ''; }).filter(Boolean);
-  var pts = date.split('-').map(Number), timeVal = document.getElementById('newEventTime').value;
-  var ed = timeVal ? new Date(pts[0], pts[1]-1, pts[2], ...timeVal.split(':').map(Number)) : new Date(pts[0], pts[1]-1, pts[2]);
-  var payload = { title: title, date: date, time: timeVal, type: document.getElementById('newEventType').value, desc: document.getElementById('newEventDesc').value, partners: partners, guests: selectedEventGuests, syncGCal: document.getElementById('newEventSyncGCal').checked };
-  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
-  var eventLabel = partners.length ? partners.length + ' partner(s)' : 'no partners';
-  if (selectedEventGuests.length) eventLabel += ', ' + selectedEventGuests.length + ' guest(s)';
+function campSort(col) {
+  if (campState.sortCol === col) campState.sortAsc = !campState.sortAsc;
+  else { campState.sortCol = col; campState.sortAsc = false; }
+  renderCampaignsTable();
+}
 
-  // V3.2 Phase 5 (flow #4) — OPTIMISTIC EVENT CREATE
-  // Push entries immediately, tag with a batch ID so we can splice them out
-  // on failure. Server may sync to GCal; we'll patch isGCal/isInternal flags
-  // on the success response. Until then, show as Internal.
-  var batchId   = 'evb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-  var labelList = (partners.length ? partners : [title]);
-  labelList.forEach(function(p) {
-    unifiedSchedule.push({
-      title: (partners.length ? p + ' — ' : '') + title,
-      desc: payload.desc,
-      date: ed,
-      isGCal: false,        // assume internal until server confirms GCal sync
-      isInternal: true,
-      time: timeVal || 'All Day',
-      _batchId: batchId,
-      _pending: true
+function renderCampaignsTable() {
+  var list = campState.list.slice();
+  if (campState.filterQuery) {
+    var q = campState.filterQuery;
+    list = list.filter(function(c) {
+      return ((c.name || '').toLowerCase().indexOf(q) > -1)
+        || ((c.templateKey || '').toLowerCase().indexOf(q) > -1)
+        || ((c.sentBy || '').toLowerCase().indexOf(q) > -1);
     });
+  }
+  var col = campState.sortCol, asc = campState.sortAsc;
+  list.sort(function(a, b) {
+    var va = a[col], vb = b[col];
+    if (va == null) va = '';
+    if (vb == null) vb = '';
+    if (typeof va === 'string' || typeof vb === 'string') {
+      va = String(va); vb = String(vb);
+      return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+    }
+    return asc ? (va - vb) : (vb - va);
   });
-  renderCalendar();
-  closeCreateEventModal();
 
-  if (!useGAS) {
-    showToast('Event created (demo) — ' + eventLabel, 'success');
-    // Strip pending markers so demo entries look final
-    unifiedSchedule.forEach(function(e) { if (e._batchId === batchId) { delete e._batchId; delete e._pending; } });
+  document.getElementById('campCount').textContent = list.length + ' of ' + campState.list.length + ' campaign' + (campState.list.length === 1 ? '' : 's');
+
+  if (!list.length) {
+    document.getElementById('campTableBody').innerHTML = '<tr><td colspan="9" style="padding:48px;text-align:center;color:var(--ink-4);font-size:12px">' + (campState.filterQuery ? 'No campaigns match your search.' : 'No campaigns in this window yet. Start your first from <b>Outreach</b>.') + '</td></tr>';
+    refreshIcons();
     return;
   }
 
+  document.getElementById('campTableBody').innerHTML = list.map(function(c) {
+    var rate = c.replyRate || 0;
+    var ratePct = Math.round(rate * 100);
+    var lastSent = c.lastSent ? new Date(c.lastSent).toLocaleDateString('en-IE', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+    var errors = c.errors || 0;
+    var errCell = errors > 0
+      ? '<span style="color:#be123c;font-weight:700">' + errors + '</span>'
+      : '<span style="color:var(--ink-4)">0</span>';
+    return '<tr onclick="openCampDetail(\'' + esc(c.id) + '\')" style="cursor:pointer">'
+      + '<td style="font-size:11px;color:var(--ink-2);white-space:nowrap">' + lastSent + '</td>'
+      + '<td style="font-weight:500;color:var(--ink)">' + esc(c.name || '(untitled)') + '</td>'
+      + '<td style="font-size:11px;color:var(--ink-3)">' + esc(c.templateKey || '—') + '</td>'
+      + '<td style="text-align:right;font-weight:600">' + (c.sent || 0) + '</td>'
+      + '<td style="text-align:right;font-weight:600">' + (c.replied || 0) + '</td>'
+      + '<td style="text-align:right;font-weight:700" class="' + campRateClass_(rate) + '">' + ratePct + '%</td>'
+      + '<td style="text-align:right">' + errCell + '</td>'
+      + '<td style="font-size:10px;color:var(--ink-4);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(c.sentBy || '') + '">' + esc(c.sentBy || '—') + '</td>'
+      + '<td style="text-align:center" onclick="event.stopPropagation()"><button class="icon-btn" style="width:26px;height:26px;margin:0 auto" onclick="openCampDetail(\'' + esc(c.id) + '\')" title="Open details"><i data-lucide="arrow-right" style="width:11px;height:11px"></i></button></td>'
+      + '</tr>';
+  }).join('');
+  refreshIcons();
+}
+
+/* ── Drill-in drawer ─────────────────────────────────────────────────────── */
+function openCampDetail(campaignId) {
+  campState.activeDetail = { campaignId: campaignId, loading: true };
+  document.getElementById('campDetailOverlay').style.display = 'block';
+  var dr = document.getElementById('campDetailDrawer');
+  dr.style.display = 'flex';
+  dr.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:12px">Loading campaign…</div>';
+
   google.script.run
-    .withSuccessHandler(function(res) {
-      // Patch GCal flag if server synced; clear pending markers either way.
-      if (res && res.success === false) {
-        _rollbackEventCreate_(batchId, title);
-        showToast('Event create failed: ' + (res.error || 'Unknown') + ' — reverted', 'error');
+    .withSuccessHandler(function(detail) {
+      if (!detail) {
+        dr.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:12px">Campaign not found.</div>';
         return;
       }
-      var synced = !!(res && res.gcalSynced);
-      unifiedSchedule.forEach(function(e) {
-        if (e._batchId !== batchId) return;
-        e.isGCal     = synced;
-        e.isInternal = !synced;
-        delete e._batchId; delete e._pending;
-      });
-      renderCalendar();
-      showToast('Event created — ' + eventLabel, 'success');
-    })
-    .withFailureHandler(function(err) {
-      _rollbackEventCreate_(batchId, title);
-      showToast('Event create failed: ' + ((err && err.message) || err || 'Unknown') + ' — reverted', 'error');
-    })
-    .createEvent(payload);
-}
-
-/* V3.2 Phase 5 — splice out the optimistic event entries by batchId,
-   re-render the calendar, and re-open the modal so the user can fix and retry.
-   The modal's field values are preserved (we never cleared them on submit). */
-function _rollbackEventCreate_(batchId, attemptedTitle) {
-  unifiedSchedule = unifiedSchedule.filter(function(e) { return e._batchId !== batchId; });
-  if (typeof renderCalendar === 'function') renderCalendar();
-  // Re-open modal in error state so the user can correct + retry
-  var modal = document.getElementById('createEventModal');
-  if (modal) {
-    modal.style.display = 'flex';
-    var titleEl = document.getElementById('newEventTitle');
-    if (titleEl && typeof flashField_ === 'function') flashField_(titleEl);
-  }
-}
-
-/* ═══════════════════════════════════════
-   LOG CALL MODAL
-═══════════════════════════════════════ */
-function openLogCallModal(deal) {
-  document.getElementById('logCallDate').value = TODAY; document.getElementById('logCallNotes').value = ''; document.getElementById('logCallOutcome').value = 'Positive'; document.getElementById('logCallFollowUp').checked = false; document.getElementById('logCallDuration').value = '45 min';
-  document.getElementById('logCallLabel').textContent = deal ? deal.company + (deal.country ? ' · ' + deal.country : '') : '—';
-  document.getElementById('logCallRow').value = deal ? deal.row : '';
-  document.getElementById('logCallModal').style.display = 'flex'; setTimeout(function() { document.getElementById('logCallNotes').focus(); }, 100);
-}
-function closeLogCallModal() { document.getElementById('logCallModal').style.display = 'none'; }
-function submitLogCall() {
-  var row = document.getElementById('logCallRow').value, notes = document.getElementById('logCallNotes').value.trim();
-  var contactName = '';
-  var contactSel = document.getElementById('logCallContact');
-  if (contactSel) contactName = contactSel.value || '';
-
-  var payload = {
-    date: document.getElementById('logCallDate').value,
-    duration: document.getElementById('logCallDuration').value,
-    outcome: document.getElementById('logCallOutcome').value,
-    notes: notes,
-    partnerRow: row,
-    createFollowUp: document.getElementById('logCallFollowUp').checked,
-    contactName: contactName
-  };
-
-  if (!row || !notes) return;  // silent guard, matches prior behavior
-
-  // V3.2 Phase 5 (flow #3) — OPTIMISTIC CALL LOG with rollback
-  // Snapshot prevRecord before patching so we can revert on failure.
-  var idx = P.findIndex(function(d) { return d.row == row; });
-  var prevRecord = (idx > -1) ? Object.assign({}, P[idx]) : null;
-
-  if (idx > -1) {
-    var ts = new Date().toLocaleDateString();
-    var entry = '[' + ts + ' · Call · ' + payload.duration + ' · ' + payload.outcome + ']: ' + notes;
-    P[idx].notes = P[idx].notes ? P[idx].notes + '\n' + entry : entry;
-    if (payload.createFollowUp) {
-      P[idx].nextAction = 'Follow Up';
-      var tmr = new Date(); tmr.setDate(tmr.getDate() + 1);
-      P[idx].actionDate = tmr.toISOString().split('T')[0];
-    }
-    // V3.2 Phase 5 — also sync drawer DOM so a subsequent saveDeal doesn't
-    // overwrite the just-logged call with the stale pre-call textarea value.
-    if (currentDeal && String(currentDeal.row) === String(row)) {
-      currentDeal = P[idx];
-      var notesEl = document.getElementById('editNotes');
-      if (notesEl) notesEl.value = P[idx].notes || '';
-      if (payload.createFollowUp) {
-        var actEl  = document.getElementById('editAction');
-        var dateEl = document.getElementById('editDate');
-        if (actEl)  actEl.value  = 'Follow Up';
-        if (dateEl) dateEl.value = P[idx].actionDate;
+      campState.activeDetail = Object.assign({}, detail, { loading: false });
+      renderCampDetail();
+      var now = Date.now();
+      var last = campState.lastAutoScan[campaignId] || 0;
+      if (now - last > 3600000) {
+        campState.lastAutoScan[campaignId] = now;
+        scanCampReplies(true);
       }
-    }
-  }
-
-  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
-
-  if (useGAS && parseInt(row) > 0) {
-    google.script.run
-      .withSuccessHandler(function(result) {
-        // logCall returns { success: true } or { success: false, error }
-        if (result && result.success === false) {
-          _rollbackLogCall_(row, prevRecord, payload);
-          closeLogCallModal();
-          showToast('Call log failed: ' + (result.error || 'Unknown') + ' — reverted', 'error');
-          return;
-        }
-        closeLogCallModal();
-        showToast('Call logged', 'success');
-        if (currentDeal) switchDrawerTab('timeline');
-      })
-      .withFailureHandler(function(err) {
-        _rollbackLogCall_(row, prevRecord, payload);
-        closeLogCallModal();
-        showToast('Call log failed: ' + ((err && err.message) || 'Unknown') + ' — reverted', 'error');
-      })
-      .logCall(payload);
-  } else {
-    closeLogCallModal();
-    showToast('Call logged (demo)', 'success');
-  }
+    })
+    .withFailureHandler(function(e) {
+      dr.innerHTML = '<div style="padding:40px;text-align:center;color:#be123c;font-size:12px">Failed: ' + esc(e.message || e) + '</div>';
+    })
+    .getCampaignDetail(campaignId, _userTeam);
 }
 
-/* V3.2 Phase 5 — rollback the optimistic call-log patch on server failure.
-   Reverts P[row] to prevRecord, and if the drawer is still on this partner,
-   restores + flashes the fields we touched. */
-function _rollbackLogCall_(row, prevRecord, payload) {
-  if (!prevRecord) return;
-  var curIdx = P.findIndex(function(d) { return d.row == row; });
-  if (curIdx > -1) {
-    P[curIdx] = prevRecord;
-    if (typeof filterPartners === 'function') filterPartners();
-  }
-  if (currentDeal && String(currentDeal.row) === String(row)) {
-    currentDeal = prevRecord;
-    var notesEl = document.getElementById('editNotes');
-    if (notesEl) {
-      notesEl.value = prevRecord.notes || '';
-      if (typeof flashField_ === 'function') flashField_(notesEl);
-    }
-    if (payload && payload.createFollowUp) {
-      var actEl  = document.getElementById('editAction');
-      var dateEl = document.getElementById('editDate');
-      if (actEl)  { actEl.value  = prevRecord.nextAction || 'None'; if (typeof flashField_ === 'function') flashField_(actEl); }
-      if (dateEl) { dateEl.value = prevRecord.actionDate || '';     if (typeof flashField_ === 'function') flashField_(dateEl); }
-    }
-  }
+function closeCampDetail() {
+  document.getElementById('campDetailOverlay').style.display = 'none';
+  document.getElementById('campDetailDrawer').style.display = 'none';
+  campState.activeDetail = null;
 }
 
+function renderCampDetail() {
+  var d = campState.activeDetail;
+  if (!d) return;
+  var dr = document.getElementById('campDetailDrawer');
+  var recips = d.recipients || [];
+  var sentCount = recips.filter(function(r) { var s = String(r.status || '').toUpperCase(); return s.indexOf('SENT') === 0 || s === 'OK'; }).length;
+  var replied = recips.filter(function(r) { return r.replied; }).length;
+  var rate = sentCount > 0 ? Math.round((replied / sentCount) * 100) : 0;
+  dr.innerHTML = ''
+    + '<div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-shrink:0">'
+      + '<div style="min-width:0;flex:1">'
+        + '<div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:3px">Campaign</div>'
+        + '<div style="font-size:18px;font-weight:700;letter-spacing:-0.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(d.name || '(untitled)') + '</div>'
+        + '<div style="font-size:11px;color:var(--ink-3);margin-top:4px">Template: ' + esc(d.templateKey || '—') + ' · ID: <span style="font-family:monospace;font-size:10px">' + esc(d.campaignId) + '</span></div>'
+      + '</div>'
+      + '<div style="display:flex;gap:8px;flex-shrink:0">'
+        + '<button class="btn-ghost" onclick="scanCampReplies(false)" id="campScanBtn"><i data-lucide="search" style="width:12px;height:12px"></i> Scan replies</button>'
+        + '<div class="icon-btn" onclick="closeCampDetail()"><i data-lucide="x" style="width:13px;height:13px"></i></div>'
+      + '</div>'
+    + '</div>'
+    + '<div style="padding:14px 22px;background:var(--bg);border-bottom:1px solid var(--border);display:grid;grid-template-columns:repeat(3,1fr);gap:12px;flex-shrink:0">'
+      + '<div><div style="font-size:9px;color:var(--ink-4);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px">Sent</div><div style="font-size:18px;font-weight:700">' + sentCount + '</div></div>'
+      + '<div><div style="font-size:9px;color:var(--ink-4);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px">Replied</div><div style="font-size:18px;font-weight:700">' + replied + '</div></div>'
+      + '<div><div style="font-size:9px;color:var(--ink-4);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px">Reply Rate</div><div class="' + campRateClass_(sentCount > 0 ? replied / sentCount : 0) + '" style="font-size:18px;font-weight:700">' + rate + '%</div></div>'
+    + '</div>'
+    + '<div style="padding:10px 22px 6px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:160px 1fr 70px 90px auto;gap:10px;font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);flex-shrink:0">'
+      + '<div>Partner</div><div>Email / Subject</div><div style="text-align:center">Status</div><div style="text-align:center">Reply</div><div></div>'
+    + '</div>'
+    + '<div id="campRecipList" style="flex:1;overflow-y:auto"></div>';
+  renderCampRecipList();
+  refreshIcons();
+}
+
+function renderCampRecipList() {
+  var d = campState.activeDetail;
+  if (!d) return;
+  var recips = d.recipients || [];
+  document.getElementById('campRecipList').innerHTML = recips.map(function(r) {
+    var st = String(r.status || '').toUpperCase();
+    var statusPill;
+    if (st.indexOf('SENT') === 0 || st === 'OK') statusPill = '<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700">Sent</span>';
+    else if (st.indexOf('ERROR') === 0) statusPill = '<span style="background:#fff1f2;color:#be123c;border:1px solid #fecdd3;padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700" title="' + esc(r.status) + '">Error</span>';
+    else if (st.indexOf('SKIP') === 0) statusPill = '<span style="background:#fffbeb;color:#b45309;border:1px solid #fde68a;padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700" title="' + esc(r.status) + '">Skip</span>';
+    else statusPill = '<span style="background:var(--bg);color:var(--ink-4);border:1px solid var(--border);padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700">' + esc(r.status || '—') + '</span>';
+
+    var replyCell = r.replied
+      ? '<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700" title="' + esc(r.replyDate || '') + '">Yes</span>'
+      : '<span style="color:var(--ink-4);font-size:10px">—</span>';
+
+    var threadBtn = r.threadId
+      ? '<button class="icon-btn" style="width:24px;height:24px" onclick="event.stopPropagation();window.open(\'https://mail.google.com/mail/u/0/#inbox/' + esc(r.threadId) + '\',\'_blank\')" title="Open in Gmail"><i data-lucide="external-link" style="width:11px;height:11px"></i></button>'
+      : '<span style="color:var(--ink-4);font-size:10px">—</span>';
+
+    return '<div class="camp-detail-row">'
+      + '<div style="min-width:0;overflow:hidden"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)">' + esc(r.partnerName || '—') + '</div><div style="font-size:10px;color:var(--ink-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(r.email || '—') + '</div></div>'
+      + '<div style="min-width:0;overflow:hidden"><div style="font-size:11.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(r.subject || '—') + '</div><div style="font-size:10px;color:var(--ink-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(r.bodySnippet || '') + '</div></div>'
+      + '<div style="text-align:center">' + statusPill + '</div>'
+      + '<div style="text-align:center">' + replyCell + '</div>'
+      + '<div>' + threadBtn + '</div>'
+      + '</div>';
+  }).join('') || '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:11px">No recipients.</div>';
+  refreshIcons();
+}
+
+function scanCampReplies(silent) {
+  if (!campState.activeDetail) return;
+  var campaignId = campState.activeDetail.campaignId;
+  var btn = document.getElementById('campScanBtn');
+  if (btn && !silent) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Scanning…'; refreshIcons(); }
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="search" style="width:12px;height:12px"></i> Scan replies'; refreshIcons(); }
+      if (!silent) showToast('Scanned ' + (res.scanned || 0) + ' · detected ' + (res.detected || 0) + ' new ' + ((res.detected || 0) === 1 ? 'reply' : 'replies'), 'success');
+      google.script.run
+        .withSuccessHandler(function(detail) {
+          if (detail) {
+            campState.activeDetail = Object.assign({}, detail, { loading: false });
+            renderCampDetail();
+          }
+          loadCampaignsList();
+        })
+        .getCampaignDetail(campaignId, _userTeam);
+    })
+    .withFailureHandler(function(e) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="search" style="width:12px;height:12px"></i> Scan replies'; refreshIcons(); }
+      if (!silent) showToast('Scan failed: ' + (e.message || e), 'error');
+    })
+    .scanRepliesForCampaign(campaignId, _userTeam);
+}
 </script>

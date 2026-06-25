@@ -1,239 +1,359 @@
 <script>
 /* ═══════════════════════════════════════════════════════════════════════════
-   HEAD DASHBOARD (V3.9) — manager-only cross-team view
+   HOLIDAYS — team time-off planning (V3.11)
 
-   Lazy-loaded on first nav. Read-only — no writes from here. Two regions:
-     1. Combined KPI strip (top)
-     2. Per-team grid + recent huddles feed (below, two columns on wide)
-
-   Per-team rows show condensed KPIs and an "Enter team" button that pipes
-   into the existing handleTeamSwitch() — same behavior as the team picker
-   dropdown in topbar, just a different entry point.
-
-   Recent huddles feed: cross-team, last 4-8 weeks. Click jumps into team
-   then opens Huddle view at that week.
+   Dead simple:
+     - Future-only entries (backend filters past)
+     - Two types: 'Off' (one member) or 'Public Holiday' (whole team)
+     - Add / edit. No delete from UI (audit trail).
+     - Default view: month grid (a "map") showing who's out when over the
+       next ~12 weeks. Click a cell or "Add" button to create an entry.
+   No GCalendar integration. No HR-system pretense.
 ═══════════════════════════════════════════════════════════════════════════ */
 
-var headState = {
+var holidaysState = {
   loading: false,
-  data: null,                  // { teams, combined, recentHuddles }
-  weeks: 4
+  data: null,                  // { team, entries: [...] }
+  lastFetchTeam: null,
+  modalOpen: false,
+  modalEditingId: null,
+  modalDraft: { member: '', type: 'Off', start_date: '', end_date: '' }
 };
 
-function initHeadView() {
-  var host = document.getElementById('view-head');
+var HOL_TYPES = ['Off', 'Public Holiday'];
+
+function initHolidaysView() {
+  var host = document.getElementById('view-holidays');
   if (!host) return;
-  if (headState.data) {
-    headRenderShell_();
+  if (holidaysState.data && holidaysState.lastFetchTeam === _userTeam) {
+    holRenderBody_();
     return;
   }
-  host.innerHTML = headShellHtml_();
-  loadHeadDashboard();
+  host.innerHTML = holShellHtml_();
+  loadHolidays();
   refreshIcons();
 }
 
-function headShellHtml_() {
+function holShellHtml_() {
   return ''
     + '<div class="filter-bar" style="justify-content:space-between;padding:10px 14px">'
       + '<div style="display:flex;align-items:center;gap:10px">'
-        + '<span style="font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4)">Cross-team rollup</span>'
+        + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Upcoming time off</span>'
+        + '<span id="holCount" style="font-size:10px;color:var(--ink-4)">—</span>'
       + '</div>'
       + '<div style="display:flex;align-items:center;gap:8px">'
-        + '<button class="btn-ghost" onclick="loadHeadDashboard()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>'
+        + '<button class="btn-ghost" onclick="loadHolidays()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>'
+        + '<button class="btn-primary" onclick="holOpenModal(null)"><i data-lucide="plus" style="width:12px;height:12px"></i> Add</button>'
       + '</div>'
     + '</div>'
-    + '<div id="headBody" style="flex:1;overflow-y:auto;background:var(--bg);padding:18px 24px"></div>';
+    + '<div id="holBody" style="flex:1;overflow-y:auto;background:var(--bg);padding:16px 22px"></div>';
 }
 
-function loadHeadDashboard() {
-  headState.loading = true;
-  headRenderBody_();
+function loadHolidays() {
+  holidaysState.loading = true;
+  holRenderBody_();
   google.script.run
     .withSuccessHandler(function(d) {
-      headState.loading = false;
-      headState.data = d || { teams: [], combined: {}, recentHuddles: [] };
-      headRenderBody_();
+      holidaysState.loading = false;
+      holidaysState.data = d || { team: _userTeam, entries: [] };
+      holidaysState.lastFetchTeam = _userTeam;
+      holRenderBody_();
     })
-    .withFailureHandler(function(e) {
-      headState.loading = false;
-      headState.data = { teams: [], combined: {}, recentHuddles: [], _error: (e && e.message) || String(e) };
-      headRenderBody_();
+    .withFailureHandler(function() {
+      holidaysState.loading = false;
+      holidaysState.data = { team: _userTeam, entries: [] };
+      holRenderBody_();
     })
-    .getHeadDashboardData(headState.weeks);
+    .getHolidays(_userTeam);
 }
 
-function headRenderShell_() { headRenderBody_(); }
-
-function headRenderBody_() {
-  var el = document.getElementById('headBody');
+function holRenderBody_() {
+  var el = document.getElementById('holBody');
+  var countEl = document.getElementById('holCount');
   if (!el) return;
-  if (headState.loading) {
-    el.innerHTML = '<div style="padding:60px;text-align:center;color:var(--ink-4);font-size:12px"><i data-lucide="loader-2" class="spin" style="width:14px;height:14px;vertical-align:middle"></i> Loading head dashboard…</div>';
+
+  if (holidaysState.loading) {
+    el.innerHTML = '<div style="padding:60px;text-align:center;color:var(--ink-4);font-size:12px"><i data-lucide="loader-2" class="spin" style="width:14px;height:14px;vertical-align:middle"></i> Loading…</div>';
+    if (countEl) countEl.textContent = '—';
     refreshIcons();
     return;
   }
-  var d = headState.data;
-  if (!d) { el.innerHTML = ''; return; }
-  if (d._error) {
-    el.innerHTML = '<div style="padding:40px;text-align:center;color:#be123c;font-size:12px">Failed to load: ' + esc(d._error) + '</div>';
-    return;
-  }
 
-  el.innerHTML = ''
-    + headCombinedStripHtml_(d.combined || {})
-    + '<div style="display:grid;grid-template-columns:1fr 380px;gap:16px;align-items:start;margin-top:16px">'
-      + '<div>' + headTeamsGridHtml_(d.teams || []) + '</div>'
-      + '<div>' + headRecentHuddlesHtml_(d.recentHuddles || []) + '</div>'
-    + '</div>';
+  var entries = (holidaysState.data && holidaysState.data.entries) || [];
+  if (countEl) countEl.textContent = entries.length + (entries.length === 1 ? ' entry' : ' entries');
+
+  el.innerHTML = holMapHtml_(entries) + holListHtml_(entries);
   refreshIcons();
 }
 
-function headCombinedStripHtml_(c) {
-  var ytd = headFGtv_(c.ytdGtv || 0);
-  var fw = headFGtv_(c.fwGtv || 0);
-  var yoyPct = (c.fwGrowthYoY || 0) * 100;
-  var yoyColor = yoyPct >= 0 ? '#16a34a' : '#dc2626';
-  var yoySign = yoyPct >= 0 ? '+' : '';
-  var rrPct = Math.round((c.replyRate90d || 0) * 100);
-  var partners = (c.partners || 0).toLocaleString();
-  var sent = (c.sent90d || 0).toLocaleString();
-  var replied = (c.replied90d || 0).toLocaleString();
+/* ── MAP VIEW (the primary view) ───────────────────────────────────────── */
+// Calendar-like grid: rows are weeks, cols are days. Cells show entries
+// touching that day. Renders ~12 weeks ahead from this Monday.
 
-  var kpi = function(label, value, sub) {
-    return '<div class="section-card" style="margin:0;padding:14px 16px;flex:1;min-width:0">'
-      + '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:6px">' + label + '</div>'
-      + '<div style="font-size:22px;font-weight:700;color:var(--ink);letter-spacing:-0.02em;font-variant-numeric:tabular-nums;line-height:1.1">' + value + '</div>'
-      + (sub ? '<div style="font-size:10px;color:var(--ink-4);margin-top:4px">' + sub + '</div>' : '')
-    + '</div>';
-  };
+function holMapHtml_(entries) {
+  var WEEKS_AHEAD = 12;
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  // Monday of current week
+  var mon = new Date(today.getTime());
+  var dow = mon.getDay();
+  var diff = dow === 0 ? -6 : 1 - dow;
+  mon.setDate(mon.getDate() + diff);
 
-  return '<div>'
-    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
-      + '<span style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4)">Direct teams · combined</span>'
-      + '<span style="font-size:9px;color:var(--ink-4)">(translucid teams below not included)</span>'
-    + '</div>'
-    + '<div style="display:flex;gap:10px;flex-wrap:wrap">'
-      + kpi('Partners', partners, 'across direct teams')
-      + kpi('YTD GTV', ytd, '')
-      + kpi('4W GTV', fw, '<span style="color:' + yoyColor + ';font-weight:700">' + yoySign + yoyPct.toFixed(1) + '%</span> vs PY')
-      + kpi('Sent · 90d', sent, replied + ' replied · ' + rrPct + '% rate')
-    + '</div>'
-  + '</div>';
-}
+  var dayHeader = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  var headerRow = '<tr>'
+    + '<th style="text-align:left;font-size:9px;font-weight:700;letter-spacing:0.06em;color:var(--ink-4);padding:6px 8px;text-transform:uppercase;border-bottom:1px solid var(--border)">Week</th>'
+    + dayHeader.map(function(d) {
+        return '<th style="font-size:9px;font-weight:700;letter-spacing:0.06em;color:var(--ink-4);padding:6px 8px;text-transform:uppercase;border-bottom:1px solid var(--border);width:13.5%">' + d + '</th>';
+      }).join('')
+  + '</tr>';
 
-function headTeamsGridHtml_(teams) {
-  if (!teams.length) {
-    return '<div class="section-card" style="padding:32px;text-align:center;color:var(--ink-4);font-size:12px">No teams configured.</div>';
-  }
-  return '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px;padding-left:2px">Teams</div>'
-    + teams.map(headTeamRowHtml_).join('');
-}
+  var rows = '';
+  for (var w = 0; w < WEEKS_AHEAD; w++) {
+    var weekStart = new Date(mon.getTime());
+    weekStart.setDate(weekStart.getDate() + (w * 7));
+    var weekLabel = weekStart.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' });
+    var cells = '';
+    for (var d = 0; d < 7; d++) {
+      var day = new Date(weekStart.getTime());
+      day.setDate(day.getDate() + d);
+      var dayIso = holDateIso_(day);
+      var dayEntries = entries.filter(function(e) {
+        return dayIso >= e.start_date && dayIso <= e.end_date;
+      });
+      var isToday = dayIso === holDateIso_(today);
+      var isPast = day < today;
+      var isWeekend = (d === 5 || d === 6);
+      var bg = isPast ? 'background:transparent' : (isWeekend ? 'background:var(--bg)' : 'background:var(--surface)');
+      var todayRing = isToday ? 'box-shadow:inset 0 0 0 2px var(--ink)' : '';
+      var dayNum = day.getDate();
 
-function headTeamRowHtml_(t) {
-  var ytdStr = headFGtv_(t.ytdGtv || 0);
-  var fwStr = headFGtv_(t.fwGtv || 0);
-  var yoyPct = t.pyFwGtv > 0 ? ((t.fwGtv - t.pyFwGtv) / t.pyFwGtv) * 100 : 0;
-  var yoyColor = yoyPct >= 0 ? '#16a34a' : '#dc2626';
-  var yoySign = yoyPct >= 0 ? '+' : '';
-  var partners = (t.partners || 0).toLocaleString();
-  var huddleBadge = t.huddlesThisWeek > 0
-    ? '<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em;margin-left:6px">' + t.huddlesThisWeek + ' THIS WK</span>'
-    : '';
-  var emptyBadge = !t.hasData
-    ? '<span style="background:var(--bg);color:var(--ink-4);border:1px solid var(--border);padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em;margin-left:6px">NO DATA</span>'
-    : '';
-  // V3.9.1 — Indirect (non-direct-ownership) teams render translucid: muted
-  // colors and a small INDIRECT pill so the head can see the data without
-  // mistaking it for their own team's responsibility.
-  var isDirect = t.direct !== false;  // default to direct if missing
-  var rowOpacity = isDirect ? '1' : '0.55';
-  var rowBg = isDirect ? '' : 'background:repeating-linear-gradient(45deg,var(--surface),var(--surface) 6px,var(--bg) 6px,var(--bg) 12px);';
-  var indirectBadge = !isDirect
-    ? '<span style="background:var(--bg);color:var(--ink-4);border:1px dashed var(--border);padding:2px 8px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:0.04em;margin-left:6px">INDIRECT</span>'
-    : '';
-  var teamSafe = esc(t.name).replace(/'/g, "\\'");
-
-  return '<div class="section-card" style="margin:0 0 8px;padding:14px 16px;display:flex;align-items:center;gap:14px;opacity:' + rowOpacity + ';' + rowBg + '">'
-    + '<div style="flex-shrink:0;min-width:140px">'
-      + '<div style="font-size:14px;font-weight:700;color:var(--ink);letter-spacing:-0.01em">' + esc(t.label || t.name) + indirectBadge + huddleBadge + emptyBadge + '</div>'
-      + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">' + partners + ' partner' + (t.partners === 1 ? '' : 's') + (isDirect ? '' : ' · awareness only') + '</div>'
-    + '</div>'
-    + '<div style="flex:1;display:grid;grid-template-columns:repeat(4, 1fr);gap:10px">'
-      + headTeamMiniKpi_('YTD GTV', ytdStr)
-      + headTeamMiniKpi_('4W GTV', fwStr, yoyPct, yoyColor, yoySign)
-      + headTeamMiniKpi_('Sent · 90d', (t.sent90d || 0).toLocaleString())
-      + headTeamMiniKpi_('Replies', (t.replied90d || 0).toLocaleString())
-    + '</div>'
-    + '<div style="flex-shrink:0;display:flex;gap:6px">'
-      + '<button class="btn-ghost" onclick="headEnterTeam(\'' + teamSafe + '\', \'huddle\')" title="Open team huddles"><i data-lucide="users-round" style="width:12px;height:12px"></i></button>'
-      + '<button class="btn-primary" onclick="headEnterTeam(\'' + teamSafe + '\', \'overview\')" style="padding:6px 12px;font-size:11px"><i data-lucide="arrow-right" style="width:12px;height:12px"></i> Enter</button>'
-    + '</div>'
-  + '</div>';
-}
-
-function headTeamMiniKpi_(label, value, pct, pctColor, pctSign) {
-  return '<div>'
-    + '<div style="font-size:8.5px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:2px">' + label + '</div>'
-    + '<div style="font-size:13px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums">' + value + '</div>'
-    + (pct !== undefined ? '<div style="font-size:9px;color:' + pctColor + ';font-weight:700;font-variant-numeric:tabular-nums">' + pctSign + pct.toFixed(1) + '%</div>' : '')
-  + '</div>';
-}
-
-function headRecentHuddlesHtml_(huddles) {
-  if (!huddles.length) {
-    return '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px;padding-left:2px">Recent Huddles</div>'
-      + '<div class="section-card" style="padding:32px 16px;text-align:center;color:var(--ink-4);font-size:11px"><i data-lucide="users-round" style="width:24px;height:24px;opacity:0.4;display:block;margin:0 auto 8px"></i>No huddle entries yet.</div>';
-  }
-  return '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px;padding-left:2px">Recent Huddles</div>'
-    + huddles.slice(0, 12).map(function(h) {
-        var author = (h.created_by || '').split('@')[0].split('.').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ') || '—';
-        var teamSafe = esc(h.team).replace(/'/g, "\\'");
-        var refsHtml = h.partner_refs && h.partner_refs.length
-          ? '<div style="font-size:9.5px;color:var(--ink-4);margin-top:3px">' + esc(h.partner_refs.slice(0, 3).join(', ')) + (h.partner_refs.length > 3 ? ' +' + (h.partner_refs.length - 3) : '') + '</div>'
-          : '';
-        return '<div class="section-card" onclick="headEnterTeam(\'' + teamSafe + '\', \'huddle\')" style="margin:0 0 6px;padding:10px 12px;cursor:pointer">'
-          + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
-            + '<span style="font-size:9px;font-weight:700;color:var(--ink-3);background:var(--bg);border:1px solid var(--border);padding:1px 6px;border-radius:99px;letter-spacing:0.04em">' + esc(h.teamLabel || h.team) + '</span>'
-            + '<span style="font-size:9px;color:var(--ink-4)">' + esc(headWeekShort_(h.week_start)) + '</span>'
-          + '</div>'
-          + '<div style="font-size:11.5px;font-weight:600;color:var(--ink);line-height:1.3">' + esc(h.topic || '(No topic)') + '</div>'
-          + refsHtml
-          + '<div style="font-size:9.5px;color:var(--ink-4);margin-top:4px">' + esc(author) + '</div>'
-        + '</div>';
+      var pillsHtml = dayEntries.map(function(e) {
+        var isPub = e.type === 'Public Holiday';
+        var bgPill = isPub ? '#fef3c7' : '#e0e7ff';
+        var fgPill = isPub ? '#92400e' : '#3730a3';
+        var brPill = isPub ? '#fde68a' : '#c7d2fe';
+        var label = isPub ? 'Public' : (e.member || '—');
+        // Trim to first name only when long
+        var short = label.length > 10 ? label.split(/\s+/)[0] : label;
+        return '<div onclick="event.stopPropagation();holOpenModal(\'' + esc(e.id) + '\')" '
+          + 'title="' + esc(label) + (isPub ? ' (whole team)' : '') + ' · ' + esc(e.start_date) + '→' + esc(e.end_date) + '" '
+          + 'style="font-size:9.5px;font-weight:700;background:' + bgPill + ';color:' + fgPill + ';border:1px solid ' + brPill + ';border-radius:4px;padding:1px 5px;margin-top:2px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%">' + esc(short) + '</div>';
       }).join('');
-}
 
-function headWeekShort_(iso) {
-  if (!iso) return '';
-  var d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-IE', { day: 'numeric', month: 'short' });
-}
-
-function headFGtv_(v) {
-  v = +v || 0;
-  if (v >= 1e6) return '$' + (v / 1e6).toFixed(1) + 'M';
-  if (v >= 1e3) return '$' + Math.round(v / 1e3) + 'k';
-  return '$' + Math.round(v).toLocaleString();
-}
-
-function headEnterTeam(team, view) {
-  if (!team) return;
-  // Trigger the existing team-switch flow, then route to requested view after data loads.
-  window.__headPendingView = view || 'overview';
-  if (typeof handleTeamSwitch === 'function' && team !== _userTeam) {
-    handleTeamSwitch(team);
-    // After data loads, handleUnifiedData will land on overview by default.
-    // We hijack: after the next handleUnifiedData completes, switchView to view.
-    setTimeout(function() {
-      if (window.__headPendingView) {
-        switchView(window.__headPendingView);
-        window.__headPendingView = null;
-      }
-    }, 1500);  // belt-and-braces; team data load typically ~600-1200ms warm
-  } else {
-    // Same team — just switch view
-    switchView(view || 'overview');
+      cells += '<td onclick="holQuickAdd_(\'' + dayIso + '\')" '
+        + 'style="' + bg + ';' + todayRing + ';vertical-align:top;padding:5px 6px;border:1px solid var(--border);height:64px;cursor:pointer;position:relative">'
+        + '<div style="font-size:10px;font-weight:600;color:' + (isToday ? 'var(--ink)' : (isWeekend ? 'var(--ink-4)' : 'var(--ink-3)')) + '">' + dayNum + '</div>'
+        + pillsHtml
+      + '</td>';
+    }
+    rows += '<tr>'
+      + '<td style="font-size:10px;font-weight:600;color:var(--ink-3);padding:5px 8px;border:1px solid var(--border);background:var(--bg);white-space:nowrap">' + weekLabel + '</td>'
+      + cells
+    + '</tr>';
   }
+
+  return '<div class="section-card" style="padding:0;overflow:hidden;margin-bottom:14px">'
+    + '<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--surface);display:flex;align-items:center;justify-content:space-between">'
+      + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Next ' + WEEKS_AHEAD + ' weeks</span>'
+      + '<span style="font-size:9.5px;color:var(--ink-4)">Click any day to add · click a pill to edit</span>'
+    + '</div>'
+    + '<div style="padding:0 6px 6px"><table style="width:100%;border-collapse:separate;border-spacing:2px;table-layout:fixed">'
+      + '<thead>' + headerRow + '</thead>'
+      + '<tbody>' + rows + '</tbody>'
+    + '</table></div>'
+  + '</div>';
+}
+
+/* ── LIST VIEW (compact, below the map) ────────────────────────────────── */
+function holListHtml_(entries) {
+  if (!entries.length) {
+    return '<div class="section-card" style="padding:32px;text-align:center;color:var(--ink-4);font-size:11.5px">'
+      + '<i data-lucide="calendar-clock" style="width:24px;height:24px;opacity:0.4;display:block;margin:0 auto 10px"></i>'
+      + 'No upcoming time off logged. Click a day above or hit <b>Add</b> to log one.'
+    + '</div>';
+  }
+  return '<div class="section-card" style="padding:0;overflow:hidden">'
+    + '<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--surface)">'
+      + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">All upcoming</span>'
+    + '</div>'
+    + entries.map(holListRowHtml_).join('')
+  + '</div>';
+}
+
+function holListRowHtml_(e) {
+  var isPub = e.type === 'Public Holiday';
+  var range = (e.start_date === e.end_date)
+    ? holDateLabel_(e.start_date)
+    : holDateLabel_(e.start_date) + ' → ' + holDateLabel_(e.end_date);
+  var days = holDayCount_(e.start_date, e.end_date);
+  var typeBadge = isPub
+    ? '<span style="font-size:8.5px;font-weight:700;background:#fef3c7;color:#92400e;border:1px solid #fde68a;padding:1px 6px;border-radius:99px;letter-spacing:0.04em">PUBLIC</span>'
+    : '<span style="font-size:8.5px;font-weight:700;background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe;padding:1px 6px;border-radius:99px;letter-spacing:0.04em">OFF</span>';
+  var who = isPub ? 'Whole team' : (e.member || '—');
+  return '<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--border)">'
+    + typeBadge
+    + '<div style="flex:1;min-width:0">'
+      + '<div style="font-size:12.5px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(who) + '</div>'
+      + '<div style="font-size:10.5px;color:var(--ink-3);margin-top:2px">' + esc(range) + ' · ' + days + (days === 1 ? ' day' : ' days') + '</div>'
+    + '</div>'
+    + '<button class="icon-btn" onclick="holOpenModal(\'' + esc(e.id) + '\')" title="Edit" style="width:26px;height:26px;flex-shrink:0"><i data-lucide="pencil" style="width:11px;height:11px"></i></button>'
+  + '</div>';
+}
+
+function holDateLabel_(iso) {
+  if (!iso) return '';
+  var d = new Date(iso + 'T00:00:00');
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-IE', { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+function holDayCount_(startIso, endIso) {
+  if (!startIso || !endIso) return 1;
+  var s = new Date(startIso + 'T00:00:00');
+  var e = new Date(endIso + 'T00:00:00');
+  return Math.round((e - s) / 86400000) + 1;
+}
+
+function holDateIso_(d) {
+  // YYYY-MM-DD in local time. Used to align day-cell math with stored dates.
+  var y = d.getFullYear();
+  var m = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+
+/* ── ADD / EDIT MODAL ─────────────────────────────────────────────────── */
+
+function holQuickAdd_(dayIso) {
+  // Cell-click → open modal pre-seeded with that day on both ends.
+  holidaysState.modalDraft = { member: '', type: 'Off', start_date: dayIso, end_date: dayIso };
+  holidaysState.modalEditingId = null;
+  holidaysState.modalOpen = true;
+  holRenderModal_();
+}
+
+function holOpenModal(editingId) {
+  holidaysState.modalEditingId = editingId;
+  holidaysState.modalOpen = true;
+  if (editingId) {
+    var entry = (holidaysState.data.entries || []).find(function(x) { return x.id === editingId; });
+    if (!entry) { showToast('Entry not found', 'error'); return; }
+    holidaysState.modalDraft = {
+      member: entry.member || '',
+      type: entry.type || 'Off',
+      start_date: entry.start_date,
+      end_date: entry.end_date
+    };
+  } else {
+    var today = holDateIso_(new Date());
+    holidaysState.modalDraft = { member: '', type: 'Off', start_date: today, end_date: today };
+  }
+  holRenderModal_();
+}
+
+function holCloseModal() {
+  holidaysState.modalOpen = false;
+  holidaysState.modalEditingId = null;
+  var m = document.getElementById('holModal');
+  if (m) m.remove();
+}
+
+function holRenderModal_() {
+  var existing = document.getElementById('holModal');
+  if (existing) existing.remove();
+  var d = holidaysState.modalDraft;
+  var titleText = holidaysState.modalEditingId ? 'Edit Time Off' : 'New Time Off';
+  var modal = document.createElement('div');
+  modal.id = 'holModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(15,15,15,0.45);z-index:5000;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML = ''
+    + '<div style="background:var(--surface);border-radius:14px;width:100%;max-width:480px;display:flex;flex-direction:column;box-shadow:0 16px 40px rgba(0,0,0,0.16);overflow:hidden">'
+      + '<div style="padding:16px 22px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">'
+        + '<div>'
+          + '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4)">Holidays</div>'
+          + '<div style="font-size:18px;font-weight:700;letter-spacing:-0.01em;margin-top:2px">' + titleText + '</div>'
+        + '</div>'
+        + '<button class="icon-btn" onclick="holCloseModal()" style="width:30px;height:30px"><i data-lucide="x" style="width:14px;height:14px"></i></button>'
+      + '</div>'
+      + '<div style="padding:16px 22px;display:flex;flex-direction:column;gap:12px">'
+        + '<div>'
+          + '<label class="nx-field-label">Type</label>'
+          + '<div style="display:flex;gap:6px">'
+            + HOL_TYPES.map(function(tt) {
+                var active = d.type === tt;
+                return '<button onclick="holSetType(\'' + tt + '\')" class="filter-tag-btn' + (active ? ' active' : '') + '" style="font-size:11px;padding:6px 12px">' + tt + '</button>';
+              }).join('')
+          + '</div>'
+        + '</div>'
+        + '<div id="holMemberRow" style="' + (d.type === 'Public Holiday' ? 'display:none' : '') + '">'
+          + '<label class="nx-field-label">Member</label>'
+          + '<input type="text" id="holMemberInput" value="' + esc(d.member) + '" placeholder="e.g. Carlos Araújo" class="nx-field-input" style="font-size:13px">'
+        + '</div>'
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
+          + '<div>'
+            + '<label class="nx-field-label">Start</label>'
+            + '<input type="date" id="holStartInput" value="' + esc(d.start_date) + '" class="nx-field-input" style="font-size:13px">'
+          + '</div>'
+          + '<div>'
+            + '<label class="nx-field-label">End</label>'
+            + '<input type="date" id="holEndInput" value="' + esc(d.end_date) + '" class="nx-field-input" style="font-size:13px">'
+          + '</div>'
+        + '</div>'
+      + '</div>'
+      + '<div style="padding:14px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">'
+        + '<button class="btn-ghost" onclick="holCloseModal()">Cancel</button>'
+        + '<button class="btn-primary" id="holSaveBtn" onclick="holSubmit()"><i data-lucide="check" style="width:12px;height:12px"></i> ' + (holidaysState.modalEditingId ? 'Save' : 'Add') + '</button>'
+      + '</div>'
+    + '</div>';
+  document.body.appendChild(modal);
+  refreshIcons();
+}
+
+function holSetType(t) {
+  holidaysState.modalDraft.type = t;
+  // Cache current input values so re-render doesn't drop them
+  var memEl = document.getElementById('holMemberInput');
+  if (memEl) holidaysState.modalDraft.member = memEl.value;
+  var sEl = document.getElementById('holStartInput');
+  if (sEl) holidaysState.modalDraft.start_date = sEl.value;
+  var eEl = document.getElementById('holEndInput');
+  if (eEl) holidaysState.modalDraft.end_date = eEl.value;
+  holRenderModal_();
+}
+
+function holSubmit() {
+  var d = holidaysState.modalDraft;
+  var type = d.type;
+  var member = (type === 'Public Holiday') ? '' : (document.getElementById('holMemberInput') || {}).value || '';
+  var start = (document.getElementById('holStartInput') || {}).value || '';
+  var end = (document.getElementById('holEndInput') || {}).value || start;
+
+  if (type === 'Off' && !member.trim()) { showToast('Member name required', 'error'); return; }
+  if (!start) { showToast('Start date required', 'error'); return; }
+  if (end < start) { showToast('End date must be on or after start', 'error'); return; }
+
+  var btn = document.getElementById('holSaveBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Saving…'; refreshIcons(); }
+
+  var payload = { member: member, type: type, start_date: start, end_date: end };
+  var fn = holidaysState.modalEditingId ? 'editHoliday' : 'addHoliday';
+  var args = holidaysState.modalEditingId ? [_userTeam, holidaysState.modalEditingId, payload] : [_userTeam, payload];
+  google.script.run
+    .withSuccessHandler(function(res) { holAfterSubmit_(res); })
+    .withFailureHandler(function(e) { holAfterSubmit_({ success: false, error: (e && e.message) || e }); })
+    [fn].apply(null, args);
+}
+
+function holAfterSubmit_(res) {
+  var btn = document.getElementById('holSaveBtn');
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px"></i> ' + (holidaysState.modalEditingId ? 'Save' : 'Add'); refreshIcons(); }
+  if (!res || !res.success) {
+    showToast('Save failed: ' + (res && res.error ? res.error : 'unknown'), 'error');
+    return;
+  }
+  showToast(holidaysState.modalEditingId ? 'Updated' : 'Added', 'success');
+  holCloseModal();
+  loadHolidays();
 }
 </script>
