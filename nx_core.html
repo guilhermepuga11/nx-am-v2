@@ -54,6 +54,12 @@ var _proxyWindow = null;
 // true after handleUnifiedData has run its one-time init (views, listeners,
 // downstream fetches). Subsequent updates route through refreshUnifiedData.
 var _bootCompleted = false;
+// true once bootstrapAM's permissions have been applied (role/teams/nav). The
+// deep-link (?team=/?view=) needs BOTH this AND _bootCompleted (app visible) —
+// the early IndexedDB-hydrate path can finalize the boot BEFORE perms arrive, so
+// a deep-link applied there would fail the Head/Admin/team gate. See
+// _maybeApplyDeepLink_, which fires once when both are ready.
+var _permsApplied = false;
 
 /* ═══════════════════════════════════════════════════════════════════════════
    V3.10 — Multi-language template registry (frontend cache)
@@ -339,10 +345,15 @@ window.onload = function() {
         // fallback in EMAIL_TEMPLATES stays in place.
         loadTemplatesFromSheet_();
 
-        // Build team dropdown    
+        // Build team dropdown
         buildTeamSelector();
 
         if (typeof buildOverviewGreeting === 'function') buildOverviewGreeting();
+
+        // Permissions + nav are now applied → a deferred deep-link can run (the
+        // early-hydrate path may have already finalized the boot before this).
+        _permsApplied = true;
+        if (typeof _maybeApplyDeepLink_ === 'function') _maybeApplyDeepLink_();
 
         // V3.2 — cache team for next reload's early hydrate
         try { if (_userTeam) localStorage.setItem('nx_last_team', _userTeam); } catch(e) { /* ignore */ }
@@ -468,6 +479,9 @@ function buildTeamSelector() {
 function handleTeamSwitch(newTeam) {
   if (!newTeam || newTeam === _userTeam) return;
   _userTeam = newTeam;
+  // Keep the team picker in sync for PROGRAMMATIC switches (deep-link, launcher);
+  // for a manual change the select already holds newTeam, so this is a no-op.
+  try { var _sel = document.getElementById('ctxTeam'); if (_sel && _sel.value !== newTeam) _sel.value = newTeam; } catch (e) {}
   _syncPriorityNav_();
 
   // V3.8 — Clear all view-local caches that hold per-team data. Without this,
@@ -502,6 +516,14 @@ function handleTeamSwitch(newTeam) {
   }
   applySendFromRestriction();
   adminLoaded = false;  // V11: force admin panel reload for new team
+  // If the Admin panel is open when the team changes, refresh it now so the
+  // Send Log / logs / accounts reflect the newly selected team (otherwise the
+  // admin sees the previous team's data until they navigate away and back).
+  if (typeof adminAccounts !== 'undefined') adminAccounts = [];
+  try {
+    var _av = document.getElementById('view-admin');
+    if (_av && _av.style.display !== 'none' && typeof initAdminView === 'function') initAdminView();
+  } catch (e) { console.error('NEXUS admin refresh on team switch:', e); }
 
   // Re-fetch mail config for the new team so sharedEmail / From label update.
   google.script.run
@@ -905,12 +927,22 @@ function handleUnifiedData(result) {
   updatePendingBadge();
   document.getElementById('syncLabel').textContent = (_userTeam ? _userTeam + ' · ' : '') + P.length + ' Partners';
   _bootCompleted = true;
-  // Deep-link entry (?team=/?view=): apply once after the normal boot completes.
-  // Null it first so a team-switch reboot (which re-runs this handler) won't re-fire.
+  // Deep-link entry (?team=/?view=): apply once when BOTH the app is visible
+  // (here) AND permissions are applied (Step 2). Whichever happens second fires
+  // it — this guards against the early-hydrate path finalizing before perms, the
+  // case where an admin's ?view=head link was wrongly hitting "no permission".
+  _maybeApplyDeepLink_();
+}
+
+// Apply the ?team=/?view= deep-link exactly once, and only when permissions are
+// loaded AND the app is shown. Called from both the perms step and boot finalize.
+function _maybeApplyDeepLink_() {
   try {
-    if (typeof NX_DEEP !== 'undefined' && NX_DEEP && (NX_DEEP.team || NX_DEEP.view) && typeof nxApplyDeepLink_ === 'function') {
-      var _deep = NX_DEEP; NX_DEEP = null; nxApplyDeepLink_(_deep);
-    }
+    if (typeof NX_DEEP === 'undefined' || !NX_DEEP || !(NX_DEEP.team || NX_DEEP.view)) return;
+    if (!_permsApplied || !_bootCompleted) return;   // need perms AND visible app
+    if (typeof nxApplyDeepLink_ !== 'function') return;
+    var _deep = NX_DEEP; NX_DEEP = null;              // null first so it can't re-fire
+    nxApplyDeepLink_(_deep);
   } catch (e) { console.error('NEXUS deep-link:', e); }
 }
 

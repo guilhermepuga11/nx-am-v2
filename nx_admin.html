@@ -33,6 +33,7 @@ function switchAdminTab(tab) {
     if (b) b.classList.toggle('active', t === tab);
   });
   if (tab === 'pending') renderAdminPending();
+  if (tab === 'sends') loadAdminSends();   // load Send Log for the CURRENT team on tab entry
   if (tab === 'accounts' && !adminAccounts.length) loadAdminAccounts();
 }
 
@@ -327,7 +328,7 @@ function adminRebuildSpine() {
       <div style="display:flex;align-items:center;gap:10px">
         <button class="drawer-tab active" id="atab-pending" onclick="switchAdminTab('pending')" style="padding:8px 14px">Pending Contacts <span id="adminPendingBadge" style="display:none;background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px;margin-left:4px">0</span></button>
         <button class="drawer-tab" id="atab-logs" onclick="switchAdminTab('logs')" style="padding:8px 14px">System Logs</button>
-        <button class="drawer-tab" id="atab-sends" onclick="switchAdminTab('sends');loadAdminSends()" style="padding:8px 14px">Send Log</button>
+        <button class="drawer-tab" id="atab-sends" onclick="switchAdminTab('sends')" style="padding:8px 14px">Send Log</button>
         <button class="drawer-tab" id="atab-accounts" onclick="switchAdminTab('accounts')" style="padding:8px 14px">Accounts</button>
         <span id="adminTeamLabel" style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:var(--bg);border:1px solid var(--border);padding:3px 10px;border-radius:6px;color:var(--ink-3);margin-left:8px"></span>
       </div>
