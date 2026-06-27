@@ -10,8 +10,19 @@
 var HUB = 'AM';
 
 // ── Web App ─────────────────────────────────────────────────────────────────
-function doGet() {
-  return HtmlService.createTemplateFromFile('nexus').evaluate()
+function doGet(e) {
+  // TEMP probe (am2 detection validation). Safe + additive: only fires when the
+  // URL carries ?whoami=1. Remove once detection is confirmed.
+  if (e && e.parameter && e.parameter.whoami) {
+    return ContentService.createTextOutput(ScriptApp.getService().getUrl());
+  }
+  // Deep-link: ?team=<name> and/or ?view=<head|admin|…> boots NEXUS into that
+  // team/view. The client applies it after load, gated by the same permissions
+  // (a forbidden link shows the no-permission card / the user's own team).
+  var p = (e && e.parameter) || {};
+  var tpl = HtmlService.createTemplateFromFile('nexus');
+  tpl.deepJson = JSON.stringify({ team: String(p.team || ''), view: String(p.view || '') }).replace(/</g, '\\u003c');
+  return tpl.evaluate()
     .setTitle('NEXUS').setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 function include(f) { return HtmlService.createHtmlOutputFromFile(f).getContent(); }
@@ -26,6 +37,23 @@ function getActiveUserEmail() { return Session.getActiveUser().getEmail(); }
 // ── Permissions & Config ────────────────────────────────────────────────────
 function getUserPermissions()       { return NX.getUserPermissions(HUB); }
 function getMailConfig(team)        { return NX.getMailConfig(HUB, team); }
+
+// AI-01 — one-shot boot. Bundles the serial startup reads (email → permissions →
+// mail config → team lead) into a SINGLE execution that shares one NX sheet
+// handle, so the app paints after one round-trip instead of four. Every sub-read
+// is isolated in its own try/catch so a single failure can't blank the boot —
+// the frontend degrades per-field (and falls back to the legacy calls if needed).
+function bootstrapAM() {
+  var out = { email: '', perms: null, mailConfig: null, teamLead: '' };
+  try { out.email = Session.getActiveUser().getEmail(); } catch (e) {}
+  try { out.perms = NX.getUserPermissions(HUB); } catch (e) { out.permsError = String(e && e.message || e); }
+  var team = (out.perms && out.perms.team) || '';
+  if (team) {
+    try { out.mailConfig = NX.getMailConfig(HUB, team); } catch (e) {}
+    try { out.teamLead = NX.getTeamLeadEmail(HUB, team) || ''; } catch (e) {}
+  }
+  return out;
+}
 
 // ── Data Loading ────────────────────────────────────────────────────────────
 function getUnifiedPartnerData(team){ return NX.getUnifiedPartnerData(HUB, team); }
@@ -211,10 +239,12 @@ function proposeDeleteContact(rowIdx)  { return NX.proposeDeleteContact(HUB, row
 function approveContact(rowIdx, team)  { return NX.approveContact(HUB, rowIdx, team); }
 function rejectContact(rowIdx, team)   { return NX.rejectContact(HUB, rowIdx, team); }
 function importCleanedContacts(team)   { return NX.importCleanedContacts(HUB, team); }
+function toggleContactCRM(email, merchant, include) { return NX.toggleContactCRM(HUB, email, merchant, include); }
 
 // ── Accounts ────────────────────────────────────────────────────────────────
 function getAccountsList(team)                      { return NX.getAccountsList(HUB, team); }
 function setAccountStatus(name, status, team)       { return NX.setAccountStatus(HUB, name, status, team); }
+function setPartnerRank(name, rank, team)           { return NX.setPartnerRank(HUB, name, rank, team); }
 function proposeNewPartner(payload)                  { return NX.proposeNewPartner(HUB, payload); }
 
 // ── Gmail ───────────────────────────────────────────────────────────────────
@@ -297,6 +327,14 @@ function initHolidaysTab(team)                    { return NX.initHolidaysTab(HU
 function getHolidays(team)                        { return NX.getHolidays(HUB, team); }
 function addHoliday(team, payload)                { return NX.addHoliday(HUB, team, payload); }
 function editHoliday(team, id, payload)           { return NX.editHoliday(HUB, team, id, payload); }
+
+// ── Priorities (team directives — Mgr/Head/Admin write-gated in the library) ──
+function initPrioritiesTab(team)                  { return NX.initPrioritiesTab(HUB, team); }
+function getPriorities(team)                      { return NX.getPriorities(HUB, team); }
+function addPriority(team, payload)               { return NX.addPriority(HUB, team, payload); }
+function editPriority(team, id, payload)          { return NX.editPriority(HUB, team, id, payload); }
+function setPriorityStatus(team, id, status)      { return NX.setPriorityStatus(HUB, team, id, status); }
+function deletePriority(team, id)                 { return NX.deletePriority(HUB, team, id); }
 
 // ── Head dashboard (V3.9 — manager-only cross-team view) ───────────────────
 function getHeadDashboardData(weeks)              { return NX.getHeadDashboardData(HUB, weeks); }

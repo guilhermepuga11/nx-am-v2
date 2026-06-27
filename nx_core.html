@@ -34,8 +34,11 @@ var emailMode = 'quick', mproMode = 'standard', mproPreviews = [], mproStep = 1,
 var allContacts = [], pendingContacts = [];      
 var _userEmail = '', _isManager = false;
 
-// ── V11: Team & permissions state ───────────────────────────────────────────    
-var _userTeam = '', _userRole = '', _userTeams = [];    
+// ── V11: Team & permissions state ───────────────────────────────────────────
+var _userTeam = '', _userRole = '', _userTeams = [];
+// AM v2 (isolated deployment) — Head role + manager scoping. Both default false
+// so the live v1 path is unchanged.
+var _isV2 = false, _isHead = false, _manageTeams = [];
 // V3.9 — Lead email for the active team. Resolved via getTeamLeadEmail after
 // perms load; refetched on team switch. Drives the "CC Team Lead" outreach
 // checkbox visibility/enablement.
@@ -269,20 +272,23 @@ window.onload = function() {
 
   if (useGAS) {
 
-    // ── Step 1: Get user email ──────────────────────────────────────────────    
-    setLoadMsg('Identifying user…');    
-    google.script.run.withSuccessHandler(function(email) {    
-      _userEmail = email || '';    
+    // ── Step 1: One-shot boot (AI-01) — email + permissions + mail config +
+    // team lead in a single round-trip via bootstrapAM(). ───────────────────
+    setLoadMsg('Starting NEXUS…');
+    google.script.run.withSuccessHandler(function(boot) {
+      var email = (boot && boot.email) || '';
+      _userEmail = email || '';
       var _displayName = email ? email.split('@')[0].split('.').map(function(w){ return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ') : email;    
       document.getElementById('ctxUser').innerHTML = '<option value="' + esc(email) + '">' + esc(_displayName) + '</option>';
       if (_displayName === 'Commercialsupport') _displayName = 'Commercial Support';    
       var personalOpt = document.querySelector('#sendFromSelect option[value="personal"]');    
       if (personalOpt) personalOpt.textContent = '\ud83d\udc64 ' + (email ? email.split('@')[0] : 'My Account');
 
-      // ── Step 2: Get permissions ─────────────────────────────────────────    
-      setLoadMsg('Loading permissions…');    
-      google.script.run.withSuccessHandler(function(perms) {    
-        _userPerms = perms;    
+      // ── Step 2: Apply permissions (already bundled by bootstrapAM — no 2nd
+      // round-trip). ────────────────────────────────────────────────────────
+      setLoadMsg('Loading permissions…');
+      (function(perms) {
+        _userPerms = perms;
         if (!perms || !perms.authorized) {    
           setLoadMsg('Access denied');    
           document.getElementById('loadingOverlay').innerHTML =    
@@ -292,17 +298,24 @@ window.onload = function() {
           return;    
         }
 
-        _userRole = perms.role || 'User';    
-        _userTeam = perms.team || '';    
-        _userTeams = perms.teams || [];    
-        _isManager = (_userRole === 'Admin' || _userRole === 'Manager');    
+        _userRole = perms.role || 'User';
+        _userTeam = perms.team || '';
+        _userTeams = perms.teams || [];
+        _isManager = (_userRole === 'Admin' || _userRole === 'Manager');
         _canSendShared = perms.canSendShared || false;
+        // AM v2 flags (false/empty on v1 → all the old gates below are unchanged).
+        _isV2 = perms.v2 === true;
+        _isHead = perms.isHead === true || _userRole === 'Admin';
+        _manageTeams = perms.manageTeams || [];
 
-        // Show admin nav + test send for managers    
-        if (_isManager) { var n = document.getElementById('nav-admin'); if (n) n.style.display = 'flex'; }    
+        // Admin page: v1 = managers+admin; v2 = admin + head + manager.
+        var showAdmin = _isManager || (_isV2 && _isHead);
+        if (showAdmin) { var n = document.getElementById('nav-admin'); if (n) n.style.display = 'flex'; }
+        // Test send stays a manager/admin tool (Head is view-only).
         if (_isManager) { var tb = document.getElementById('btnTestSend'); if (tb) tb.style.display = 'inline-flex'; }
-        // V3.9 — Head nav: managers and above only. Same gate as admin.
-        if (_isManager) { var hN = document.getElementById('nav-head'); if (hN) hN.style.display = 'flex'; }
+        // Head nav: v1 = managers+admin (unchanged); v2 = admin + head only.
+        var showHead = _isV2 ? _isHead : _isManager;
+        if (showHead) { var hN = document.getElementById('nav-head'); if (hN) hN.style.display = 'flex'; }
         // V3.9 — Huddle nav: visible to everyone. No gate; just unhide.
         // V3.11 — Huddle moved under Team; subs are hidden until user clicks
         // Team. No boot-time visibility change needed.
@@ -311,10 +324,14 @@ window.onload = function() {
         // Async, fire-and-forget — UI hides the lead-CC option until this resolves
         // (or shows it disabled if the call comes back empty).
         if (_userTeam) {
-          google.script.run
-            .withSuccessHandler(function(email) { _userTeamLeadEmail = email || ''; })
-            .withFailureHandler(function() { _userTeamLeadEmail = ''; })
-            .getTeamLeadEmail(_userTeam);
+          if (boot && boot.teamLead !== undefined && boot.teamLead !== null) {
+            _userTeamLeadEmail = boot.teamLead || '';        // bundled by bootstrapAM
+          } else {
+            google.script.run
+              .withSuccessHandler(function(email) { _userTeamLeadEmail = email || ''; })
+              .withFailureHandler(function() { _userTeamLeadEmail = ''; })
+              .getTeamLeadEmail(_userTeam);
+          }
         }
 
         // V3.10 — Pull the multi-language templates registry from the sheet.
@@ -369,32 +386,30 @@ window.onload = function() {
           }
         }
 
-        // ── Step 4: Mail proxy config ───────────────────────────────────    
-        google.script.run.withSuccessHandler(function(cfg) {    
-          _mailConfig = cfg || _mailConfig;    
-          if (_mailConfig.proxyUrl) {    
-            var btn = document.getElementById('btnConnectGmail');    
-            if (btn) btn.style.display = 'inline-flex';    
-            var info = document.getElementById('gmailInfoWrap');    
-            if (info) info.style.display = 'inline-flex';    
-            var dd = document.getElementById('sendFromSelect');    
-            if (dd) {    
-              dd.style.display = '';    
-              // V11: hide Shared option if team can't use shared mailbox    
-              applySendFromRestriction();    
-            }    
-          }    
-        }).getMailConfig(_userTeam);
+        // ── Step 4: Mail proxy config (bundled by bootstrapAM when available) ──
+        var _applyMailCfg = function(cfg) {
+          _mailConfig = cfg || _mailConfig;
+          if (_mailConfig.proxyUrl) {
+            var btn = document.getElementById('btnConnectGmail');
+            if (btn) btn.style.display = 'inline-flex';
+            var info = document.getElementById('gmailInfoWrap');
+            if (info) info.style.display = 'inline-flex';
+            var dd = document.getElementById('sendFromSelect');
+            if (dd) { dd.style.display = ''; applySendFromRestriction(); }
+          }
+        };
+        if (boot && boot.mailConfig) { _applyMailCfg(boot.mailConfig); }
+        else { google.script.run.withSuccessHandler(_applyMailCfg).getMailConfig(_userTeam); }
 
         // V3.2 — removed obsolete `getDrafts()` / `populateMproDrafts` call
         // (dead since Gen 3; was throwing ReferenceError on every boot).
 
-      }).withFailureHandler(function(e) {    
-        console.error('Permissions:', e);    
-        setLoadMsg('Error loading permissions');    
-      }).getUserPermissions();
+      })((boot && boot.perms) || null);
 
-    }).getActiveUserEmail();
+    }).withFailureHandler(function(e) {
+      console.error('NEXUS bootstrap failed:', e);
+      setLoadMsg('Error starting NEXUS');
+    }).bootstrapAM();
 
   } else {    
     setLoadMsg('Running in demo mode');    
@@ -414,8 +429,8 @@ function buildTeamSelector() {
   var topBadge = document.getElementById('topbarTeamBadge');    
   if (!dd) return;
 
-  if (_isManager && _userTeams.length > 0) {    
-    // Managers get a live dropdown    
+  if ((_isManager || _userTeams.length > 1) && _userTeams.length > 0) {
+    // Managers (and multi-team users) get a live dropdown
     var opts = '';    
     _userTeams.forEach(function(t) {    
       var sel = (t.name === _userTeam) ? ' selected' : '';    
@@ -434,8 +449,8 @@ function buildTeamSelector() {
 
   // Role badge — now inline next to "User" header    
   if (badge) {    
-    var roleColors = { 'Admin': '#534AB7', 'Manager': '#854F0B', 'User': '#5F5E5A' };    
-    var roleBgs = { 'Admin': '#EEEDFE', 'Manager': '#FAEEDA', 'User': '#F1EFE8' };    
+    var roleColors = { 'Admin': '#534AB7', 'Head': '#0B6B5A', 'Manager': '#854F0B', 'User': '#5F5E5A' };
+    var roleBgs = { 'Admin': '#EEEDFE', 'Head': '#DCF3EE', 'Manager': '#FAEEDA', 'User': '#F1EFE8' };
     badge.innerHTML = '<span style="font-size:7px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:1px 5px;border-radius:3px;background:' +    
       (roleBgs[_userRole] || '#F1EFE8') + ';border:1px solid ' + (roleColors[_userRole] || '#5F5E5A') + ';color:' +    
       (roleColors[_userRole] || '#5F5E5A') + '">' + esc(_userRole) + '</span>';    
@@ -450,9 +465,10 @@ function buildTeamSelector() {
 }
 
 /** Called when manager changes team dropdown. Reloads all data. */    
-function handleTeamSwitch(newTeam) {    
-  if (!newTeam || newTeam === _userTeam) return;    
+function handleTeamSwitch(newTeam) {
+  if (!newTeam || newTeam === _userTeam) return;
   _userTeam = newTeam;
+  _syncPriorityNav_();
 
   // V3.8 — Clear all view-local caches that hold per-team data. Without this,
   // overview outreach, bidask, and reply center hand back the previous team's
@@ -475,7 +491,15 @@ function handleTeamSwitch(newTeam) {
 
   // V11: update canSendShared based on new team's config
   var teamCfg = _userTeams.find(function(t) { return t.name === newTeam; });
-  _canSendShared = (_userRole === 'Admin') || (teamCfg ? teamCfg.sharedSend : false);
+  if (_userRole === 'Admin') {
+    _canSendShared = true;
+  } else if (_isV2 && _userRole === 'Head') {
+    _canSendShared = false;                                  // Head is view-only
+  } else if (_isV2 && _userRole === 'Manager') {
+    _canSendShared = (_manageTeams.indexOf(newTeam) > -1) && !!(teamCfg && teamCfg.sharedSend);
+  } else {
+    _canSendShared = !!(teamCfg && teamCfg.sharedSend);
+  }
   applySendFromRestriction();
   adminLoaded = false;  // V11: force admin panel reload for new team
 
@@ -836,6 +860,7 @@ function buildStateFromResult_(result) {
       nextAction: p.nextAction || 'None', actionDate: p.actionDate || '',
       lastSent: p.lastSent || '', lastReceived: p.lastReceived || '',
       latestEmail: p.latestEmail || '{}', tags: p.tags || '', partnerValue: p.partnerValue || '',
+      rank: p.rank || 0,
       cy_ytd: p.cy_ytd, py_ytd: p.py_ytd, cy_fp: p.cy_fp, py_fp: p.py_fp,
       cy_4w: p.cy_4w, py_4w: p.py_4w, cy_7d: p.cy_7d, py_7d: p.py_7d,
       cy_units_on: p.cy_units_on, py_units_on: p.py_units_on,
@@ -870,13 +895,23 @@ function handleUnifiedData(result) {
   try { renderCalendar(); } catch(e) { console.error('NEXUS renderCalendar:', e); }
   try { initEmailView(); } catch(e) { console.error('NEXUS initEmailView:', e); }
   try { loadAllContacts(); } catch(e) { console.error('NEXUS loadAllContacts:', e); }
-  switchView('overview');
+  // Landing = the priority board "AM - {team}" (Overview is now its child).
+  // Heads/Admins (v2) land on the all-teams "Head" rollup instead.
+  _syncPriorityNav_();
+  switchView((_isV2 && _isHead) ? 'head' : 'priority');
   document.getElementById('loadingOverlay').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
   refreshIcons();
   updatePendingBadge();
   document.getElementById('syncLabel').textContent = (_userTeam ? _userTeam + ' · ' : '') + P.length + ' Partners';
   _bootCompleted = true;
+  // Deep-link entry (?team=/?view=): apply once after the normal boot completes.
+  // Null it first so a team-switch reboot (which re-runs this handler) won't re-fire.
+  try {
+    if (typeof NX_DEEP !== 'undefined' && NX_DEEP && (NX_DEEP.team || NX_DEEP.view) && typeof nxApplyDeepLink_ === 'function') {
+      var _deep = NX_DEEP; NX_DEEP = null; nxApplyDeepLink_(_deep);
+    }
+  } catch (e) { console.error('NEXUS deep-link:', e); }
 }
 
 /**
@@ -891,6 +926,7 @@ function refreshUnifiedData(result) {
   try { buildCockpitView(); } catch(e) { console.error('NEXUS refresh cockpit:', e); }
   try { renderPartnersTable(); } catch(e) { console.error('NEXUS refresh partners:', e); }
   try { renderCalendar(); } catch(e) { console.error('NEXUS refresh calendar:', e); }
+  try { var pv = document.getElementById('view-priority'); if (pv && pv.style.display !== 'none') initPriorityView(); } catch(e) { console.error('NEXUS refresh priority:', e); }
   refreshIcons();
   document.getElementById('syncLabel').textContent = (_userTeam ? _userTeam + ' · ' : '') + P.length + ' Partners';
 }
@@ -1006,26 +1042,22 @@ function refreshIcons() { clearTimeout(_iconTimer); _iconTimer = setTimeout(func
    VIEW SWITCHING      
 ═══════════════════════════════════════ */      
 function switchView(v) {      
-  // V3.11 — 'team' is a parent-only nav item with no view of its own. Click
-  // toggles its subs visible (option 1: pure expand). Subs: huddle, calendar,
-  // holidays. We let the user re-click 'team' to collapse the group.
+  // 'team' is now a REAL composite view (priorities + huddle/holiday summaries).
+  // Decision: keep the accordion AND add the view — clicking Team expands the
+  // Huddles/Calendar/Holidays subs AND opens view-team (fall through below).
   if (v === 'team') {
-    var anySubOpen = teamGroupVisible_();
-    setTeamGroupVisible_(!anySubOpen);
-    // Mark the parent as active for visual feedback
-    document.querySelectorAll('.nav-item').forEach(function(n) { n.classList.remove('active'); });
-    var teamNav = document.getElementById('nav-team'); if (teamNav) teamNav.classList.add('active');
-    refreshIcons();
-    return;
+    setTeamGroupVisible_(true);
   }
 
-  var views = ['overview', 'cockpit', 'bidask', 'partners', 'calendar', 'email', 'campaigns', 'replies', 'contacts', 'admin', 'huddle', 'holidays', 'head'];
-  views.forEach(function(id) { var el = document.getElementById('view-' + id); if (el) el.style.display = 'none'; });      
-  var flexViews = ['partners', 'email', 'campaigns', 'replies', 'contacts', 'admin', 'huddle', 'holidays', 'head', 'bidask'];
+  var views = ['priority', 'overview', 'cockpit', 'bidask', 'partners', 'calendar', 'email', 'campaigns', 'replies', 'contacts', 'admin', 'huddle', 'holidays', 'head', 'team'];
+  views.forEach(function(id) { var el = document.getElementById('view-' + id); if (el) el.style.display = 'none'; });
+  var flexViews = ['priority', 'partners', 'email', 'campaigns', 'replies', 'contacts', 'admin', 'huddle', 'holidays', 'head', 'bidask', 'team'];
   var el = document.getElementById('view-' + v);      
   if (el) el.style.display = flexViews.indexOf(v) > -1 ? 'flex' : 'block';      
   document.querySelectorAll('.nav-item').forEach(function(n) { n.classList.remove('active'); });      
   var navEl = document.getElementById('nav-' + v); if (navEl) navEl.classList.add('active');
+  // Replies is a tab inside the merged Campaigns view — keep nav-campaigns lit for it
+  if (v === 'replies') { var cNav2 = document.getElementById('nav-campaigns'); if (cNav2) cNav2.classList.add('active'); }
   // Team parent stays "active-ish" while any sub is open — gives visual continuity
   var teamSubs = ['huddle', 'calendar', 'holidays'];
   var teamNav = document.getElementById('nav-team');
@@ -1040,16 +1072,17 @@ function switchView(v) {
   var baNav = document.getElementById('nav-bidask'); if (baNav) baNav.style.display = (v === 'cockpit' || v === 'bidask') ? 'flex' : 'none';
   // V3.8 — Reply Center sibling of Campaigns under Outreach
   var campNav = document.getElementById('nav-campaigns'); if (campNav) campNav.style.display = (v === 'email' || v === 'campaigns' || v === 'replies') ? 'flex' : 'none';
-  var replyNav = document.getElementById('nav-replies'); if (replyNav) replyNav.style.display = (v === 'email' || v === 'campaigns' || v === 'replies') ? 'flex' : 'none';
-  var titles = { overview: 'Overview', cockpit: 'Cockpit', bidask: 'Bid-Ask', partners: 'Partners', calendar: 'Calendar', email: 'Outreach', campaigns: 'Campaigns', replies: 'Reply Center', contacts: 'Contacts', admin: 'Admin', huddle: 'Huddles', holidays: 'Holidays', head: 'Head', team: 'Team' };
-  var titleEl = document.getElementById('pageTitle');      
-  titleEl.textContent = titles[v] || v;      
+  // (Reply Center is now the "Replies" tab inside the Campaigns view — no nav-replies item.)
+  var titles = { priority: 'Priority', overview: 'Overview', cockpit: 'Cockpit', bidask: 'Bid-Ask', partners: 'Partners', calendar: 'Calendar', email: 'Outreach', campaigns: 'Campaigns', replies: 'Campaigns', contacts: 'Contacts', admin: 'Admin', huddle: 'Huddles', holidays: 'Holidays', head: 'Head', team: 'Team' };
+  var titleEl = document.getElementById('pageTitle');
+  titleEl.textContent = (v === 'priority') ? _amLandingLabel_() : (titles[v] || v);
   var ckToggle = document.getElementById('ckTabToggle'); if (ckToggle) ckToggle.style.display = v === 'cockpit' ? 'flex' : 'none';    
   // Topbar view badge kept hidden (OPS Projects view removed / descoped).
   var viewBadge = document.getElementById('topbarViewBadge');    
   if (viewBadge) { viewBadge.textContent = ''; viewBadge.style.display = 'none'; }    
-  if (v === 'overview') { buildOverviewGreeting(); buildOverview(); }      
-  if (v === 'cockpit') buildCockpitView();      
+  if (v === 'priority') { try { initPriorityView(); } catch(e) { console.error('NEXUS initPriorityView:', e); } }
+  if (v === 'overview') { buildOverviewGreeting(); buildOverview(); }
+  if (v === 'cockpit') buildCockpitView();
   if (v === 'bidask') initBidAskView();
   if (v === 'email') initEmailView();      
   if (v === 'campaigns') initCampaignsView();      
@@ -1059,6 +1092,7 @@ function switchView(v) {
   if (v === 'huddle') initHuddleView();
   if (v === 'holidays') initHolidaysView();
   if (v === 'head') initHeadView();
+  if (v === 'team') { try { initTeamView(); } catch(e) { console.error('NEXUS initTeamView:', e); } }
   refreshIcons();      
 }
 
@@ -1075,22 +1109,27 @@ function setTeamGroupVisible_(visible) {
   });
 }
 
-function buildOverviewGreeting() {      
-  var h = new Date().getHours();      
-  var greeting = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';      
-  var firstName = '';      
-  if (_userEmail) {      
-    var local = _userEmail.split('@')[0] || '';      
-    var parts = local.split('.');      
-    if (parts.length > 0 && parts[0]) {      
-      firstName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1).toLowerCase();      
-    }      
-  }      
-  var el = document.getElementById('ovGreeting');      
-  if (el) el.textContent = firstName ? greeting + ', ' + firstName : greeting;      
-  var dateEl = document.getElementById('ovDate');      
-  if (dateEl) dateEl.textContent = new Date().toLocaleDateString('en-IE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });      
-  var countEl = document.getElementById('ovPartnerCount');      
+// Landing naming: the priority board is titled after the active team, "AM - {team}".
+function _amTeamName_() {
+  if (_userTeams && _userTeams.length) {
+    var t = _userTeams.find(function(x) { return x.name === _userTeam; });
+    if (t) return t.label || t.name || _userTeam;
+  }
+  return _userTeam || '';
+}
+function _amLandingLabel_() {
+  var n = _amTeamName_();
+  return n || 'Priority';
+}
+function _syncPriorityNav_() {
+  var el = document.getElementById('navPriorityLabel');
+  if (el) el.textContent = _amLandingLabel_();
+}
+
+function buildOverviewGreeting() {
+  var el = document.getElementById('ovTitle');
+  if (el) el.textContent = (typeof _userTeam !== 'undefined' && _userTeam) ? ('Overview · ' + _userTeam) : 'Overview';
+  var countEl = document.getElementById('ovPartnerCount');
   if (countEl) countEl.textContent = P.length + ' Partners';      
 }
 

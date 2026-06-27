@@ -81,6 +81,7 @@ function _drawerResolveEmail_(deal) {
 
 function openDrawer(deal) {
   currentDeal = deal;
+  if (typeof _editingContactRow !== 'undefined') _editingContactRow = null;  // clear any stale contact editor
   document.getElementById('detailName').textContent = deal.company || '—';
   // V3.8 — Email fallback chain. CRM 'email' field is sometimes empty even
   // when the partner has perfectly good contacts in the pool — fall through
@@ -211,12 +212,12 @@ function renderOvFeed() {
 
   // ── Compact KPI row in single bubble + tags ──
   function miniStat(label, value, sub, isLast) {
-    return '<div style="flex:1;min-width:0;padding:0 10px;' + (isLast ? '' : 'border-right:1px solid var(--border);') + '">'
-      + '<div style="font-size:7px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:1px">' + label + '</div>'
-      + '<div style="font-size:15px;font-weight:700;letter-spacing:-0.02em;line-height:1.1">' + value + '</div>'
-      + '<div style="font-size:8px;color:var(--ink-3);margin-top:1px">' + sub + '</div></div>';
+    return '<div style="flex:1;min-width:0;padding:2px 14px;' + (isLast ? '' : 'border-right:1px solid var(--border);') + '">'
+      + '<div style="font-size:9px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-3);margin-bottom:3px">' + label + '</div>'
+      + '<div style="font-size:19px;font-weight:800;letter-spacing:-0.03em;line-height:1.05;font-variant-numeric:tabular-nums">' + value + '</div>'
+      + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">' + sub + '</div></div>';
   }
-  html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 0;display:flex;align-items:center;margin-bottom:10px">'
+  html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:13px 0;display:flex;align-items:center;margin-bottom:12px;box-shadow:var(--sh-1)">'
     + miniStat('YTD GTV', fGtv(d.cy_ytd), fPctStr(d.ytd_pct, true) + ' vs PY', false)
     + miniStat('7D GTV', fGtv(d.cy_7d), fPctStr(d.d7_pct, true) + ' vs PY', false)
     + miniStat('Units Online', (d.cy_units_on || 0).toLocaleString(), fPctStr(d.units_pct, true) + ' vs PY', false)
@@ -245,9 +246,9 @@ function renderOvFeed() {
       var stockDelta = today - d15ago;
       var stockPct = d15ago > 0 ? (today - d15ago) / d15ago : 0;
       var stockColor = stockDelta >= 0 ? '#16a34a' : '#dc2626';
-      html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:5px 8px;display:flex;flex-direction:column">'
-        + '<div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;margin-bottom:2px">'
-        + '<span style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Stock \u2014 15 Day</span>'
+      html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 11px;display:flex;flex-direction:column">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;margin-bottom:3px">'
+        + '<span style="font-size:9px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-3)">Stock \u2014 15 day</span>'
         + '<span style="font-size:13px;font-weight:600;color:' + stockColor + '">' + (stockDelta >= 0 ? '+' : '') + stockDelta.toLocaleString() + ' (' + (stockPct >= 0 ? '+' : '') + Math.round(stockPct * 100) + '%)</span>'
         + '</div>'
         + '<div style="display:flex;align-items:baseline;justify-content:flex-end;flex-shrink:0;margin-bottom:1px">'
@@ -271,14 +272,14 @@ function renderOvFeed() {
       var perfColor = perfVal >= 90 ? '#16a34a' : perfVal >= 85 ? '#d97706' : '#dc2626';
       function kpiStat(label, val, isPerf, isLast) {
         var mc = isPerf ? (val >= 90 ? '#16a34a' : val >= 85 ? '#d97706' : '#dc2626') : (val > 5 ? '#dc2626' : val > 2 ? '#d97706' : '#16a34a');
-        return '<div style="flex:1;text-align:center;padding:0 4px;' + (isLast ? '' : 'border-right:1px solid var(--border);') + '">'
-          + '<div style="font-size:6px;font-weight:600;color:var(--ink-4);text-transform:uppercase;letter-spacing:0.04em">' + label + '</div>'
-          + '<div style="font-size:' + (isPerf ? '14' : '11') + 'px;font-weight:700;color:' + mc + ';line-height:1.2;letter-spacing:-0.02em">' + val.toFixed(1) + '%</div></div>';
+        return '<div style="flex:1;text-align:center;padding:2px 6px;' + (isLast ? '' : 'border-right:1px solid var(--border);') + '">'
+          + '<div style="font-size:8.5px;font-weight:600;color:var(--ink-4);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px">' + label + '</div>'
+          + '<div style="font-size:' + (isPerf ? '17' : '13') + 'px;font-weight:800;color:' + mc + ';line-height:1.1;letter-spacing:-0.02em;font-variant-numeric:tabular-nums">' + val.toFixed(1) + '%</div></div>';
       }
-      html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:5px 2px;display:flex;flex-direction:column">'
-        + '<div style="display:flex;align-items:center;justify-content:space-between;padding:0 6px;flex-shrink:0">'
-        + '<span style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">KPI</span>'
-        + (kr.currentMonthLabel ? '<span style="font-size:8px;color:var(--ink-4)">' + esc(kr.currentMonthLabel) + '</span>' : '') + '</div>'
+      html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 4px;display:flex;flex-direction:column">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;padding:0 8px 4px;flex-shrink:0">'
+        + '<span style="font-size:9px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-3)">Order quality</span>'
+        + (kr.currentMonthLabel ? '<span style="font-size:9px;color:var(--ink-4)">' + esc(kr.currentMonthLabel) + '</span>' : '') + '</div>'
         + '<div style="display:flex;align-items:center;flex:1">'
         + kpiStat('Perfect', kr.perfect_now, true, false)
         + kpiStat('No Stock', kr.ns_now, false, false)
@@ -873,62 +874,31 @@ function seasonColor_(name) {
 /* ═══════════════════════════════════════
    DRAWER — CONTACTS TAB (with CRM toggle)
 ═══════════════════════════════════════ */
+// Drawer Contacts tab — renders the SAME shared cards as the Contacts subtab
+// (_nxCCard in nx_contacts.html), scoped to this partner. First paint can use
+// deal.contacts (email + CRM only, no sheet row); the shared cache load that
+// follows re-renders with full edit / delete / set-primary actions.
 function renderDrawerContacts(deal) {
-  var contacts = deal.contacts || [];
-  if (!contacts.length) { document.getElementById('drawerContactsList').innerHTML = '<div style="text-align:center;padding:24px;font-size:11px;color:var(--ink-4)">No contacts found.</div>'; return; }
-  document.getElementById('drawerContactsList').innerHTML = contacts.map(function(c) {
-    var isPrim = c.is_primary === true || c.is_primary === 'TRUE';
-    var inCrm = c.include_in_crm !== false;
-    var crmBadgeStyle = inCrm
-      ? 'background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0'
-      : 'background:var(--bg);color:var(--ink-4);border:1px solid var(--border);text-decoration:line-through';
-    return '<div class="section-card" style="margin:0;padding:12px 16px"><div style="display:flex;align-items:center;justify-content:space-between"><div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600">' + esc(c.contact_name) + (isPrim ? ' <span style="font-size:9px;font-weight:700;background:var(--ink);color:#fff;padding:1px 6px;border-radius:4px">PRIMARY</span>' : '') + '</div><div style="font-size:11px;color:var(--ink-3);margin-top:2px">' + esc(c.contact_email) + ' · ' + esc(c.contact_role || 'No role') + '</div></div>'
-      + '<span onclick="toggleCRMFromDrawer(\'' + esc(c.contact_email).replace(/'/g, "\\'") + '\',' + !inCrm + ')" style="cursor:pointer;font-size:8px;font-weight:700;letter-spacing:0.06em;padding:2px 7px;border-radius:5px;flex-shrink:0;margin-right:8px;' + crmBadgeStyle + '" title="' + (inCrm ? 'Included in CRM scanning — click to exclude' : 'Excluded from CRM scanning — click to include') + '">CRM</span></div></div>';
-  }).join('');
-}
-
-function toggleCRMFromDrawer(email, newValue) {
-  if (!currentDeal) return;
-  var merchant = currentDeal.company;
-  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
-  if (!useGAS) { showToast('Not available in demo', 'error'); return; }
-
-  // V3.2 Phase 5 — OPTIMISTIC CRM TOGGLE
-  // Patch currentDeal + matching P[] entries immediately so the badge flips
-  // without waiting for the round-trip. Capture prevValue so we can revert.
-  var prevValue = !newValue;  // boolean inverse — caller passes the target state
-  var _patch = function(val) {
-    if (currentDeal && currentDeal.contacts) {
-      currentDeal.contacts.forEach(function(c) {
-        if ((c.contact_email || '').toLowerCase() === email.toLowerCase()) c.include_in_crm = val;
-      });
-    }
-    P.forEach(function(p) {
-      if ((p.company || '').toLowerCase() !== merchant.toLowerCase()) return;
-      if (!p.contacts) return;
-      p.contacts.forEach(function(c) {
-        if ((c.contact_email || '').toLowerCase() === email.toLowerCase()) c.include_in_crm = val;
-      });
+  var host = document.getElementById('drawerContactsList');
+  if (!host) return;
+  var merchant = deal.company;
+  var loaded = (typeof _nxContactsLoaded !== 'undefined' && _nxContactsLoaded);  // authoritative cache flag (allContacts.length is falsy for teams with 0 contacts → would recurse)
+  if (!loaded && typeof nxEnsureContactsLoaded === 'function') {
+    nxEnsureContactsLoaded(function() {
+      if (typeof currentDeal !== 'undefined' && currentDeal && currentDeal.company === merchant) renderDrawerContacts(currentDeal);
     });
-    if (currentDeal) renderDrawerContacts(currentDeal);
-  };
-  _patch(newValue);
-
-  google.script.run
-    .withSuccessHandler(function(res) {
-      if (res && res.success === false) {
-        _patch(prevValue);
-        showToast('CRM toggle failed: ' + (res.error || 'Unknown') + ' — reverted', 'error');
-        return;
-      }
-      // Already patched optimistically; just confirm.
-      showToast(email + ' CRM scanning ' + (newValue ? 'enabled' : 'disabled'), 'success');
-    })
-    .withFailureHandler(function(e) {
-      _patch(prevValue);
-      showToast('CRM toggle failed: ' + ((e && e.message) || e || 'Unknown') + ' — reverted', 'error');
-    })
-    .toggleContactCRM(email, merchant, newValue);
+  }
+  // Prefer the sheet-backed cache (has rowIndex → full edit/delete/primary); fall back to the
+  // partner's own contacts when the cache has none for this merchant (covers the synthetic
+  // CRM-email fallback contact, which the rowIndex>0 guard renders as view + CRM only).
+  var cached = (loaded && typeof _nxCForMerchant === 'function') ? _nxCForMerchant(merchant) : [];
+  var list = cached.length ? cached : (deal.contacts || []);
+  if (!list.length) { host.innerHTML = '<div style="text-align:center;padding:24px;font-size:11px;color:var(--ink-4)">No contacts found.</div>'; return; }
+  host.innerHTML = list.map(function(c) {
+    var inCrm = (typeof _nxCInCrm === 'function') ? _nxCInCrm(merchant, c.contact_email) : (c.include_in_crm !== false);
+    return _nxCCard(c, 'drawer', merchant, inCrm);
+  }).join('');
+  if (typeof refreshIcons === 'function') refreshIcons();
 }
 
 function toggleDrawerProposeForm() { var f = document.getElementById('drawerProposeForm'); if (f) f.style.display = f.style.display === 'none' ? 'block' : 'none'; }

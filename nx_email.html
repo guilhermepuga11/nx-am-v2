@@ -156,10 +156,12 @@ function renderStepIndicator() {
     var tabbable = !wiz.sending;
     var clickAttr = tabbable ? ' onclick="wizJumpToStep_(' + s.n + ')"' : '';
     var cursor = tabbable ? 'cursor:pointer' : 'cursor:default';
-    html += '<div class="wiz-step-pill ' + cls + '" style="' + cursor + '" role="button" tabindex="0"' + clickAttr + '><span class="wiz-pill-num">' + s.n + '</span>' + s.label + '</div>';
-    if (i < steps.length - 1) html += '<div class="wiz-step-sep"></div>';
+    var num = isDone ? '<i data-lucide="check" style="width:12px;height:12px"></i>' : s.n;
+    html += '<div class="wiz-step-pill ' + cls + '" style="' + cursor + '" role="button" tabindex="0"' + clickAttr + '><span class="wiz-pill-num">' + num + '</span>' + s.label + '</div>';
+    if (i < steps.length - 1) html += '<div class="wiz-step-sep' + (isDone ? ' done' : '') + '"></div>';
   });
   el.innerHTML = html;
+  if (typeof refreshIcons === 'function') refreshIcons();
 }
 
 // V3.3 — phase pills are clickable. Backward jumps are free; forward jumps run

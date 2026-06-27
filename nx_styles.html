@@ -30,13 +30,48 @@
   .section-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:8px;}
   .section-label{font-size:9px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);display:flex;align-items:center;gap:8px;margin-bottom:8px;}
   .section-label::after{content:'';flex:1;height:1px;background:var(--border);}
-  .nx-table{width:100%;border-collapse:collapse;font-size:11.5px;}
-  .nx-table th{text-align:left;font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-2);padding:10px 12px 8px;border-bottom:2px solid var(--ink);position:sticky;top:0;background:#e8e8e5;z-index:2;cursor:pointer;white-space:nowrap;}
-  .nx-table th:hover{color:var(--ink-3);}
-  .nx-table td{padding:3px 12px;border-bottom:1px solid var(--border);color:var(--ink-2);}
+  /* ── REVAMP TABLE ENGINE (Phase 2) — one row engine. Borders/tints only:
+     zero drop-shadow/blur/filter on rows (the only box-shadow is the flat
+     inset accent on a selected row — no blur, no GPU/perf cost). Density via
+     --row-y (from the .is-dense/.is-airy shell, or a per-table tier class). ── */
+  .nx-table{width:100%;border-collapse:collapse;font-size:var(--fs-data);font-variant-numeric:tabular-nums lining-nums;}
+  /* header — calm: 9/600 uppercase ink-3, hairline rule (not 2px ink), sticky */
+  .nx-table th{text-align:left;font-size:var(--fs-th);font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-3);background:var(--surface-2);padding:11px 12px 9px;border-bottom:1px solid var(--border-2);position:sticky;top:0;z-index:2;white-space:nowrap;}
+  .nx-table th[onclick]{cursor:pointer;}
+  .nx-table th[onclick]:hover{color:var(--ink-2);}
+  .nx-table th.is-sorted{color:var(--ink);}
+  /* sort caret — CSS-only triangle on sortable (onclick) headers; no SVG/Lucide per th, zero DOM cost */
+  .nx-table th[onclick]::after{content:"";display:inline-block;margin-left:6px;vertical-align:middle;border-left:3px solid transparent;border-right:3px solid transparent;border-bottom:4px solid var(--ink-4);opacity:0.35;}
+  .nx-table th.sort-asc::after{opacity:1;border-bottom-color:var(--ink);}
+  .nx-table th.sort-desc::after{border-bottom:none;border-top:4px solid var(--ink);opacity:1;}
+  /* rows — hairline dividers, NO zebra; single hover tint */
+  .nx-table td{padding:var(--row-y) 12px;border-bottom:1px solid var(--border);color:var(--ink-2);vertical-align:middle;}
   .nx-table tr:last-child td{border-bottom:none;}
   .nx-table tbody tr:hover td{background:var(--bg);cursor:pointer;}
   .nx-table tbody tr.overdue td{background:#fff5f5;}
+  .nx-table tbody tr.is-selected td{background:#eef6ff;box-shadow:inset 2px 0 0 var(--ink);}
+  /* density tiers (override --row-y locally): dense~26 / comfortable~34 / roomy~44 px rows */
+  .nx-table.nx-dense{--row-y:3px;}
+  .nx-table.nx-comfortable{--row-y:7px;}
+  .nx-table.nx-roomy{--row-y:11px;}
+  /* sticky first column (opt-in for wide grids) */
+  .nx-table.nx-stickcol td:first-child,.nx-table.nx-stickcol th:first-child{position:sticky;left:0;background:inherit;z-index:1;}
+  /* cell atoms — inline-style strings → utility classes (shrinks the innerHTML rebuilt on every sort/filter) */
+  .num{text-align:right;font-variant-numeric:tabular-nums lining-nums;white-space:nowrap;}
+  .num-pos{color:#15803d;} .num-neg{color:#be123c;} .num-flat{color:var(--ink-3);}
+  .cell-name{font-weight:600;color:var(--ink);line-height:1.15;}
+  .cell-sub{font-size:var(--fs-sub);color:var(--ink-4);margin-top:2px;}
+  .rank{color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums;}
+  /* compact list row — one idiom for worklists / stacked lists (borders/tints only) */
+  .nx-listrow{display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:12px;min-height:48px;padding:8px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background var(--t-fast) var(--ease);}
+  .nx-listrow:last-child{border-bottom:none;}
+  .nx-listrow:hover{background:var(--bg);}
+  .nx-empty{padding:40px;text-align:center;color:var(--ink-4);font-size:var(--fs-data);}
+  .nx-count{font-size:var(--fs-sub);font-weight:700;color:var(--ink-3);letter-spacing:.04em;}
+  /* Value-direction cell colors (defines the previously-undefined reply-rate classes at nx_reply_center.html:145) */
+  .val-positive{color:#15803d;}
+  .val-neutral{color:var(--ink-3);}
+  .val-negative{color:#be123c;}
   .pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:99px;font-size:9px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;}
   .pill-stable{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;}
   .pill-attention{background:#fffbeb;color:#b45309;border:1px solid #fde68a;}
@@ -58,7 +93,7 @@
   .ck-dim-opt{display:block;width:100%;text-align:left;background:transparent;border:0;border-radius:5px;padding:6px 10px;font-size:11px;font-weight:600;color:var(--ink-2);cursor:pointer;font-family:'Barlow',sans-serif;letter-spacing:0.02em;transition:background 0.12s,color 0.12s;}
   .ck-dim-opt:hover{background:var(--bg);color:var(--ink);}
   .ck-dim-opt.active{background:var(--ink);color:#fff;}
-  #detailOverlay{position:fixed;inset:0;z-index:40;background:rgba(13,13,12,0.5);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;}
+  #detailOverlay{position:fixed;inset:0;z-index:40;background:rgba(13,13,12,0.5);display:none;}
   #detailDrawer{position:fixed;top:0;right:0;height:100%;width:100%;max-width:1200px;background:var(--surface);z-index:50;display:flex;flex-direction:column;border-left:1px solid var(--border);box-shadow:-20px 0 60px -10px rgba(13,13,12,0.2);transform:translateX(100%);transition:transform 0.3s cubic-bezier(0.16,1,0.3,1);}
   #detailDrawer.open{transform:translateX(0);}
   .drawer-header{padding:10px 22px 0;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
@@ -66,7 +101,7 @@
   .drawer-tab{padding:7px 12px;font-size:12px;font-weight:600;color:var(--ink-3);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:color 0.15s,border-color 0.15s;font-family:'Barlow',sans-serif;}
   .drawer-tab.active{color:var(--ink);border-bottom-color:var(--ink);}
   .ribbon-label{font-size:9px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:3px;}
-  .modal-overlay{position:fixed;inset:0;z-index:60;background:rgba(13,13,12,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:20px;}
+  .modal-overlay{position:fixed;inset:0;z-index:60;background:rgba(13,13,12,0.55);display:none;align-items:center;justify-content:center;padding:20px;}
   .modal-box{background:var(--bg);border:1px solid var(--border-2);border-radius:20px;width:100%;max-width:500px;box-shadow:0 40px 80px -20px rgba(13,13,12,0.4);overflow:hidden;}
   .modal-header{padding:16px 20px;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:space-between;}
   .modal-body{padding:20px;overflow-y:auto;max-height:calc(100vh - 200px);}
@@ -100,8 +135,6 @@
   .perf-tab{background:transparent;color:var(--ink-3);border:none;cursor:pointer;font-family:'Barlow',sans-serif;transition:all 0.15s;}
   .perf-tab.active{background:var(--ink);color:#fff;}
   .perf-tab:hover:not(.active){background:var(--bg);color:var(--ink);}
-  .sparkbar{display:inline-flex;align-items:flex-end;gap:1px;height:24px;vertical-align:middle;}
-  .sparkbar-bar{width:4px;border-radius:1px 1px 0 0;}
   .btn-approve{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:5px 12px;border-radius:8px;font-size:10px;font-weight:700;font-family:'Barlow',sans-serif;cursor:pointer;transition:all 0.15s;}
   .btn-approve:hover{background:#15803d;color:#fff;}
   .btn-reject{background:#fff1f2;color:#be123c;border:1px solid #fecdd3;padding:5px 12px;border-radius:8px;font-size:10px;font-weight:700;font-family:'Barlow',sans-serif;cursor:pointer;transition:all 0.15s;}
@@ -211,6 +244,9 @@
   .logo-mark svg{width:18px;height:18px;display:block;}
   .logo-text{display:flex;flex-direction:column;line-height:1;}
   .logo-name{font-weight:800;font-size:21px;letter-spacing:-.03em;color:var(--ink);text-transform:uppercase;}
+  /* small "v2" badge on the wordmark — scales with the NEXUS text, subtle */
+  .logo-v2{font-size:.4em;font-weight:700;line-height:0;vertical-align:super;margin-left:2px;
+    letter-spacing:0;text-transform:none;opacity:.5;}
   .logo-sub{display:flex;align-items:center;gap:5px;font-size:8px;font-weight:700;letter-spacing:.2em;
     text-transform:uppercase;color:var(--ink-4);margin-top:4px;}
   .logo-sub i{font-style:normal;color:#fff;background:var(--ink);border-radius:4px;padding:1px 4px;
@@ -251,11 +287,9 @@
   .topbar{background:var(--surface);border-bottom:1px solid var(--border);}
   .topbar-title{font-size:15px;font-weight:800;letter-spacing:-.02em;}
 
-  /* ── tables: bold header + zebra (borders/tints, not shadows) ───────── */
-  .nx-table th{background:#ebebe7;border-bottom:2px solid var(--ink);font-weight:800;
-    padding-top:11px;padding-bottom:9px;}
-  .nx-table tbody tr:nth-child(even) td{background:var(--surface-2);}
-  .nx-table tbody tr:hover td{background:var(--bg);}
+  /* ── tables: superseded by the REVAMP TABLE ENGINE (Phase 2) above —
+     heavy 2px-ink header + zebra removed in favour of a calm hairline header
+     and zebra-free hairline rows. Engine is the single source of truth. ── */
 
   /* ── buttons / icon buttons ─────────────────────────────────────────── */
   .btn-primary{background:var(--ink-grad);border-radius:10px;font-weight:700;box-shadow:var(--sh-1);
@@ -282,5 +316,118 @@
 
   /* ── loading overlay glow ───────────────────────────────────────────── */
   #loadingOverlay{background:radial-gradient(640px 380px at 50% 38%,rgba(255,255,255,.6),transparent 70%),var(--bg);}
+
+  /* ══════════════════════════════════════════════════════════════════════
+     REVAMP FOUNDATION (Phase 1) — tokens + utilities. Palette + N logo
+     FROZEN; this is the only styling channel. Purely additive in Phase 1
+     (nothing consumes these yet → visually neutral); wired up in later phases.
+     Density model = decision C (two-mode): base defaults are DENSE (the
+     operational default); .is-airy relaxes summary surfaces.
+     ══════════════════════════════════════════════════════════════════════ */
+  :root{
+    /* type scale (Barlow) — one token per role; kills inline font-size + fractional sizes */
+    --fs-display:25px;   /* THE single KPI numeral (kills the 22/23/25 split) */
+    --fs-title:15px;     /* topbar title, drawer/panel partner-name title */
+    --fs-h:13px;         /* card/section titles, store-group headers */
+    --fs-body:12.5px;    /* default reading text, nav items, list primary */
+    --fs-data:11.5px;    /* table td + worklist rows — the workhorse */
+    --fs-sub:10px;       /* cell sub-lines, kpi delta line, secondary meta */
+    --fs-label:9px;      /* THE single .nx-label */
+    --fs-th:9px;         /* table headers */
+    /* spacing (4pt base) */
+    --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:20px; --s6:24px; --s8:32px;
+    /* radii — extend the kept --r-sm:10 / --r:14 / --r-lg:16 */
+    --r-pill:999px; --r-xs:6px;
+    /* motion */
+    --t-fast:120ms; --t-base:180ms; --t-slow:300ms;
+    /* density vars (decision C) — base = dense; .is-airy relaxes */
+    --pad-card:8px 12px; --row-y:5px; --grid-gap:8px; --content-pad:16px 20px;
+  }
+  .is-dense{--pad-card:8px 12px;  --row-y:5px; --grid-gap:8px;  --content-pad:16px 20px;}
+  .is-airy {--pad-card:14px 16px; --row-y:9px; --grid-gap:12px; --content-pad:20px 24px;}
+
+  /* one label atom — folds kpi-label/nav-section-label/section-label/module-label/
+     nx-field-label/ribbon-label/tl-badge (applied in later phases) */
+  .nx-label{font-size:var(--fs-label);font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);}
+
+  /* one content shell — replaces the four page-padding regimes (applied in Phase 4/5) */
+  .content-shell{padding:var(--content-pad);}
+
+  /* accessibility: honor reduced-motion — calm transitions, keep status keyframes
+     (.spin/.pulse failsafe indicators) intact */
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{transition-duration:.01ms !important;}
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════
+     REVAMP COMPONENTS (Phase 3) — one spec per primitive. Canonical classes
+     (.card/.kpi/.seg/.chip/.nav-badge) are additive (adopted per-view in
+     Phase 5); plus light, class-based unification so KPI numerals are one
+     size (25) and the parallel toggle/chip systems share one radius + look.
+     Status-pill colors untouched. ══════════════════════════════════════════ */
+
+  /* ── ONE card ── collapses section-card/kpi-card/tdv-card/contact-card/email-card/tl-card/mpro-card */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--pad-card);box-shadow:var(--sh-1);}
+  .card--clickable{cursor:pointer;transition:box-shadow var(--t-base) var(--ease),border-color var(--t-base) var(--ease);}
+  .card--clickable:hover{box-shadow:var(--sh-2);border-color:var(--border-2);}
+  .card--accent{position:relative;padding-left:18px;}
+  .card--accent::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:4px;border-radius:0 3px 3px 0;background:var(--ink);}
+
+  /* ── ONE KPI tile ── value = --fs-display (25); collapses all 4 KPI systems */
+  .kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 14px 10px 18px;box-shadow:var(--sh-1);position:relative;min-height:64px;}
+  .kpi::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:4px;border-radius:0 3px 3px 0;background:var(--ink);}
+  .kpi--up::before{background:#15803d;} .kpi--down::before{background:#be123c;}
+  .kpi-v{font-size:var(--fs-display);font-weight:800;letter-spacing:-.04em;line-height:1;color:var(--ink);font-variant-numeric:tabular-nums;}
+  .kpi-d{font-size:var(--fs-sub);color:var(--ink-3);margin-top:4px;}
+  /* fold the existing class-based KPI numerals onto one size */
+  .kpi-value{font-size:var(--fs-display);}
+  .tdv-kpi-v{font-size:var(--fs-display);}
+
+  /* ── ONE neutral chip ── */
+  .chip{display:inline-block;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-xs);padding:2px 7px;font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);}
+  .tag-chip{border-radius:var(--r-xs);}
+
+  /* ── ONE nav badge (variants) — consumed by the shell in Phase 4 ── */
+  .nav-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 5px;border-radius:var(--r-pill);font-size:8.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;line-height:1;}
+  .nav-badge--count{background:#ef4444;color:#fff;}
+  .nav-badge--mgr{background:#fef3c7;color:#b45309;border:1px solid #fde68a;}
+  .nav-badge--role{background:var(--bg);color:var(--ink-3);border:1px solid var(--border);}
+  .nav-badge--draft{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;}
+
+  /* ── ONE segmented control ── unifies filter-tag-btn/perf-tab/ck-dim-opt/drawer-tab/segBtn */
+  .seg{display:inline-flex;align-items:center;gap:2px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-xs);padding:2px;}
+  .seg-opt{border:none;background:transparent;border-radius:4px;padding:4px 10px;font-size:9px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);cursor:pointer;font-family:'Barlow',sans-serif;transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease);white-space:nowrap;}
+  .seg-opt:hover{color:var(--ink);}
+  .seg-opt.active{background:var(--ink);color:#fff;}
+  .seg--underline{background:none;border:none;border-radius:0;padding:0;gap:0;}
+  .seg--underline .seg-opt{border-radius:0;border-bottom:2px solid transparent;}
+  .seg--underline .seg-opt.active{background:none;color:var(--ink);border-bottom-color:var(--ink);}
+  /* light unification of the EXISTING toggle systems (radius only — text/layout untouched) */
+  .filter-tag-btn,.perf-tab,.ck-dim-opt{border-radius:var(--r-xs);}
+
+  /* ── buttons / inputs to spec ── icon-btn 30px/--r-xs; approve/reject --r-xs */
+  .icon-btn{width:30px;height:30px;border-radius:var(--r-xs);}
+  .btn-approve,.btn-reject{border-radius:var(--r-xs);}
+
+  /* ══════════════════════════════════════════════════════════════════════
+     REVAMP SHELL & NAV (Phase 4) — cosmetic only. The sub-items are a
+     CONTEXTUAL ACCORDION (JS toggles display per active view) — that is
+     behaviour, kept intact. We only move the inline faux-hierarchy into a
+     class and consolidate the context selects + badges. ══════════════════ */
+  /* sub-item indent → class (was inline padding-left:34px;font-size:12px on each) */
+  .nav-sub{padding-left:34px;font-size:12px;}
+  /* consolidated context card (folds the two stacked User/Team select blocks) */
+  .ctx-card{margin:2px 4px 10px;padding:9px 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm);}
+  .ctx-row + .ctx-row{margin-top:9px;}
+  .ctx-row-label{font-size:8px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px;padding:0 2px;display:flex;align-items:center;gap:6px;}
+
+  /* ══ REVAMP R2 — partner drawer chrome polish (more air, calmer ribbon, seg tabs) ══ */
+  .drawer-header{padding:15px 24px 0;}
+  .drawer-ribbon{padding:12px 24px;gap:38px;background:var(--surface-2);}
+  .ribbon-label{font-size:9px;font-weight:600;letter-spacing:.1em;color:var(--ink-3);margin-bottom:4px;}
+  .drawer-tabs{gap:4px;padding:4px 4px 0;}
+  .drawer-tab{padding:9px 14px;font-size:12.5px;font-weight:600;color:var(--ink-3);border-bottom:2px solid transparent;border-radius:var(--r-xs) var(--r-xs) 0 0;transition:color var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease),background var(--t-fast) var(--ease);}
+  .drawer-tab:hover:not(.active){color:var(--ink-2);background:var(--bg);}
+  .drawer-tab.active{color:var(--ink);border-bottom-color:var(--ink);}
 
 </style>

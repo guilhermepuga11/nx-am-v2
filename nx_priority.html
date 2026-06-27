@@ -1,0 +1,307 @@
+<!-- ══════════════════════════════════════════════════════════════════════════
+     NEXUS — nx_priority.html
+     The "{team}" landing: ONE combined surface. The spine is the team's
+     PRIORITIES (directives → partners, authored in the Team view). Grounded
+     book metrics fold in around them:
+       • a KPI strip (book GTV · YoY, partners, open priorities, stock online);
+       • Stock drops (24h) + Top movers (4-week) read straight from the data;
+       • Stock + Mail analytics fold in inline (lazy, per-team remembered);
+       • a "Deep dive ⤢" link opens the full Overview dashboard (kept as child).
+     100% client-side over P[] + the engine in nx_intel.html (nxBrief).
+═══════════════════════════════════════════════════════════════════════════════ -->
+<style>
+  #view-priority{padding:0;overflow-y:auto;}
+  .prv{max-width:1220px;margin:0 auto;padding:24px 28px 64px;}
+  /* hero / controls */
+  .prv-controls{display:flex;align-items:center;gap:9px;margin-left:auto;flex-wrap:wrap;}
+  .prv-win{font-family:'Barlow',sans-serif;font-size:12px;font-weight:600;color:var(--ink);background:var(--surface);
+    border:1px solid var(--border);border-radius:8px;padding:7px 10px;cursor:pointer;box-shadow:var(--sh-1);}
+  .prv-win:hover{border-color:var(--ink-3);}
+  .prv-setbtn,.prv-deep{font-family:'Barlow',sans-serif;font-size:11px;font-weight:700;letter-spacing:.02em;color:var(--ink-2);
+    background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 12px;cursor:pointer;box-shadow:var(--sh-1);white-space:nowrap;}
+  .prv-setbtn:hover,.prv-deep:hover{border-color:var(--ink-3);color:var(--ink);}
+  /* analytics region */
+  .prv-an{margin-top:14px;}
+  .prv-an-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 4px 12px;}
+  .prv-an-lab{font-size:9px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-right:2px;}
+  .prv-chip{font-family:'Barlow',sans-serif;font-size:11px;font-weight:700;letter-spacing:.02em;color:var(--ink-3);
+    background:var(--surface);border:1px solid var(--border);border-radius:99px;padding:5px 12px;cursor:pointer;transition:all .14s var(--ease);}
+  .prv-chip:hover{border-color:var(--ink-3);color:var(--ink);}
+  .prv-chip.on{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .prv-an-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  @media(max-width:820px){.prv-an-grid{grid-template-columns:1fr;}}
+  .prv-stat{display:flex;align-items:baseline;gap:6px;padding:7px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--ink-2);}
+  .prv-stat:last-child{border-bottom:none;}
+  .prv-stat b{font-size:14px;font-weight:800;letter-spacing:-.02em;color:var(--ink);font-variant-numeric:tabular-nums;}
+  .prv-stat .l{margin-left:auto;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-4);}
+  /* team directive (priority) rows — the landing spine */
+  .prv-dir{display:flex;align-items:flex-start;gap:11px;padding:11px 16px;border-bottom:1px solid var(--border);}
+  .prv-dir:last-child{border-bottom:none;}
+  .prv-dir-body{flex:1;min-width:0;}
+  .prv-dir-txt{font-size:13px;font-weight:600;color:var(--ink);line-height:1.25;}
+  .prv-dir-targets{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;}
+  .prv-tchip{font-size:10px;font-weight:600;color:var(--ink-2);background:var(--bg);border:1px solid var(--border);border-radius:var(--r-xs);padding:2px 7px;cursor:pointer;}
+  .prv-tchip:hover{border-color:var(--ink);color:var(--ink);}
+  .prv-dir-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0;font-size:10.5px;color:var(--ink-4);white-space:nowrap;}
+  .prv-due{font-weight:700;color:var(--ink-3);} .prv-due.over{color:#be123c;}
+  /* landing quick-launcher — jump to a team / Head / Admin (in-app) */
+  .prv-jumpbar{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 16px;}
+  .prv-jump-lab{font-size:9px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-right:2px;}
+  .prv-jump{font-family:'Barlow',sans-serif;font-size:12px;font-weight:600;color:var(--ink-2);background:var(--surface);
+    border:1px solid var(--border);border-radius:8px;padding:6px 13px;cursor:pointer;box-shadow:var(--sh-1);transition:all .14s var(--ease);}
+  .prv-jump:hover{border-color:var(--ink-3);color:var(--ink);}
+  .prv-jump.on{background:var(--ink);color:#fff;border-color:var(--ink);cursor:default;}
+  .prv-jump-x{color:var(--ink-3);}
+  /* no-permission overlay */
+  .nxnp-ov{position:fixed;inset:0;z-index:9500;background:rgba(13,13,12,.34);display:flex;align-items:center;justify-content:center;}
+  .nxnp-card{background:var(--surface);border:1px solid var(--border-2);border-radius:16px;box-shadow:var(--sh-3,0 24px 50px -16px rgba(13,13,12,.28));padding:30px 34px;max-width:360px;text-align:center;}
+  .nxnp-ic{font-size:30px;margin-bottom:8px;}
+  .nxnp-t{font-size:17px;font-weight:800;letter-spacing:-.02em;color:var(--ink);margin-bottom:5px;}
+  .nxnp-s{font-size:12.5px;color:var(--ink-3);line-height:1.45;margin-bottom:18px;}
+  .nxnp-btn{font-family:'Barlow',sans-serif;font-size:12px;font-weight:700;color:#fff;background:var(--ink);border:1px solid var(--ink);border-radius:8px;padding:8px 22px;cursor:pointer;}
+  .nxnp-btn:hover{opacity:.88;}
+</style>
+
+<script>
+/* ═══════════════════════════════ STATE ═══════════════════════════════ */
+var _prvWin = 'stock';              // 'd7' | 'w4' | 'ytd' | 'stock'  (stock drops lead the landing)
+var _prvExpanded = null;            // {stock:bool, mail:bool} — lazy-loaded per team
+
+/* engine reuse helpers (defined in nx_intel.html; guard at call time) */
+function _esc(s){ return (typeof _ixEsc==='function') ? _ixEsc(s) : String(s==null?'':s).replace(/[&<>"]/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];}); }
+function _prvJs(s){ return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+function _prvNum(x){ return (typeof _ixNum==='function') ? _ixNum(x) : (isFinite(+x)?+x:0); }
+function _prvPct(x){ return (typeof _ixPct==='function') ? _ixPct(x) : ((x>=0?'+':'')+Math.round(x*100)+'%'); }
+function _prvMoney(x){ return (typeof _ixMoney==='function') ? _ixMoney(x) : (''+Math.round(_prvNum(x))); }
+function _prvWinField(){ return _prvWin==='w4' ? 'w4_pct' : _prvWin==='ytd' ? 'ytd_pct' : 'd7_pct'; }
+
+/* ═══════════ FOLDED OVERVIEW ANALYTICS (self-contained, lazy) ═══════════ */
+function _prvExpKey(){ return 'nx_prv_exp_' + (typeof _userTeam!=='undefined'?_userTeam:''); }
+function _prvLoadExpanded(seedOpen){
+  if(_prvExpanded) return;
+  try { var raw = localStorage.getItem(_prvExpKey()); if(raw){ _prvExpanded=JSON.parse(raw); return; } } catch(e){}
+  _prvExpanded = seedOpen ? {stock:true, mail:true} : {stock:false, mail:false};
+}
+function prvToggleExpand(key){
+  _prvLoadExpanded(false); _prvExpanded[key] = !_prvExpanded[key];
+  try { localStorage.setItem(_prvExpKey(), JSON.stringify(_prvExpanded)); } catch(e){}
+  initPriorityView();
+}
+/* Stock stat (self-contained; same data as Overview's Stock KPIs) */
+function _prvStockStat(){
+  var sp = (typeof stockPartners==='function') ? stockPartners() : [];
+  if(!sp.length) return null;
+  var now=0, old=0; sp.forEach(function(r){ now+=_prvNum(r.today); var v=r.values||[]; old+=_prvNum(v[v.length-1]); });
+  var varPct = old>0 ? (now-old)/old : 0;
+  return { online:now, varPct:varPct, n:sp.length };
+}
+/* Mail stat (self-contained; FIX: scope to cockpit_matched, not all P) */
+function _prvMailStat(){
+  var rows = ((typeof P!=='undefined'&&P)?P:[]).filter(function(p){ return p.cockpit_matched; });
+  var sent=0, replied=0;
+  rows.forEach(function(p){ var s=p.send_totals||{}; sent+=_prvNum(s.sent); replied+=_prvNum(s.replied); });
+  if(sent<=0) return null;
+  return { sent:sent, replied:replied, rate: sent>0?replied/sent:0 };
+}
+function _prvAnalyticsHtml(){
+  _prvLoadExpanded(false);
+  var stock = _prvStockStat(), mail = _prvMailStat();
+  var bar = '<div class="prv-an-bar"><span class="prv-an-lab">View detail</span>'
+    + (stock ? '<button class="prv-chip'+(_prvExpanded.stock?' on':'')+'" onclick="prvToggleExpand(\'stock\')">📦 Stock</button>' : '')
+    + (mail  ? '<button class="prv-chip'+(_prvExpanded.mail?' on':'')+'" onclick="prvToggleExpand(\'mail\')">✉ Mail</button>' : '')
+    + '<button class="prv-chip" onclick="switchView(\'overview\')">Full dashboard ⤢</button>'
+    + '</div>';
+  var cards = '';
+  if(stock && _prvExpanded.stock){
+    var vc = stock.varPct<0?'down':stock.varPct>0?'up':'flat';
+    cards += '<div class="tdv-card"><div class="tdv-card-h"><i data-lucide="package"></i>Stock</div>'
+      + '<div class="prv-stat"><b>'+stock.online.toLocaleString()+'</b> units online<span class="l">'+stock.n+' partners</span></div>'
+      + '<div class="prv-stat"><b class="'+vc+'">'+_prvPct(stock.varPct)+'</b> 15-day variance<span class="l">SOH</span></div></div>';
+  }
+  if(mail && _prvExpanded.mail){
+    cards += '<div class="tdv-card"><div class="tdv-card-h"><i data-lucide="mail"></i>Outreach</div>'
+      + '<div class="prv-stat"><b>'+mail.sent.toLocaleString()+'</b> sent<span class="l">book</span></div>'
+      + '<div class="prv-stat"><b>'+mail.replied.toLocaleString()+'</b> replied<span class="l">'+Math.round(mail.rate*100)+'% rate</span></div></div>';
+  }
+  return '<div class="prv-an">'+bar+(cards?'<div class="prv-an-grid">'+cards+'</div>':'')+'</div>';
+}
+
+/* ═══════════ RENDER HELPERS — drops + movers read straight from the data ═══════════ */
+function _prvDropsRows(){
+  if(_prvWin==='stock'){
+    var sp = (typeof stockPartners==='function') ? stockPartners() : [];
+    var drops = sp.filter(function(r){ return r.diff < 0; }).sort(function(a,b){ return a.diff - b.diff; }).slice(0,10);
+    if(!drops.length) return '<div class="tdv-empty">No stock drops since yesterday</div>';
+    return drops.map(function(r){ return '<div class="tdv-mv" onclick="prvOpen(\''+_prvJs(r.store)+'\')"><span class="tdv-mv-co">'+_esc(r.store)+'</span><span class="tdv-mv-d down">↓ '+Math.abs(r.diff).toLocaleString()+' u</span></div>'; }).join('');
+  }
+  var field = _prvWinField();
+  var rows = ((typeof P!=='undefined'&&P)?P:[]).filter(function(p){ return _prvNum(p.cy_ytd)>0 && _prvNum(p[field])<=-0.05; });
+  rows.sort(function(a,b){ return _prvNum(a[field]) - _prvNum(b[field]); }); rows = rows.slice(0,10);
+  if(!rows.length) return '<div class="tdv-empty">No drops in this window</div>';
+  return rows.map(function(p){ return '<div class="tdv-mv" onclick="prvOpen(\''+_prvJs(p.company)+'\')"><span class="tdv-mv-co">'+_esc(p.company)+'</span><span class="tdv-mv-d down">'+_prvPct(_prvNum(p[field]))+'</span></div>'; }).join('');
+}
+function _prvMoverRow(p){
+  var d = _prvNum(p.w4_pct); var cls = d>0?'up':d<0?'down':'flat';
+  return '<div class="tdv-mv" onclick="prvOpen(\''+_prvJs(p.company)+'\')"><span class="tdv-mv-co">'+_esc(p.company)+'</span><span class="tdv-mv-d '+cls+'">'+_prvPct(d)+'</span></div>';
+}
+
+/* team directive row — the landing spine (directive text + target chips + due/owner) */
+function _prvDirectiveRow(p){
+  var chips = (p.targets||[]).map(function(t){ return '<span class="prv-tchip" onclick="event.stopPropagation();prvOpen(\''+_prvJs(t)+'\')">'+_esc(t)+'</span>'; }).join('')
+    || '<span style="font-size:10.5px;color:var(--ink-4)">no partners</span>';
+  var over = (typeof nxPriIsOverdue==='function') && nxPriIsOverdue(p.due_date);
+  var dueLbl = (typeof nxPriDueLabel==='function') ? nxPriDueLabel(p.due_date) : (p.due_date||'');
+  var due = p.due_date ? '<span class="prv-due'+(over?' over':'')+'">due '+_esc(dueLbl)+'</span>' : '';
+  var owner = p.owner ? '<span>'+_esc((typeof nxPriOwnerName==='function')?nxPriOwnerName(p.owner):p.owner)+'</span>' : '';
+  return '<div class="prv-dir">'
+    + '<span class="tdv-pri pri1" style="margin-top:5px;align-self:flex-start"></span>'
+    + '<div class="prv-dir-body"><div class="prv-dir-txt">'+_esc(p.directive)+'</div>'
+    +   '<div class="prv-dir-targets">'+chips+'</div></div>'
+    + '<div class="prv-dir-meta">'+due+owner+'</div>'
+    + '</div>';
+}
+
+/* ═══════════════════════════════ MAIN RENDER ═══════════════════════════════
+   The landing spine is the team's PRIORITIES (directives → partners), authored in
+   the Team view. Grounded book metrics (GTV, partners, stock drops, movers) fold
+   in around them. */
+function initPriorityView(){
+  var host = document.getElementById('view-priority');
+  if(!host) return;
+  var list = ((typeof P!=='undefined'&&P)?P:[]);
+  if(!list.length){ host.innerHTML = '<div class="prv"><div class="tdv-empty" style="margin-top:60px">No partner data loaded yet.</div></div>'; return; }
+
+  // team directives (priorities) — lazy-loaded once, then re-render
+  var pris = (typeof _priorities!=='undefined') ? _priorities : [];
+  var loadingPris = (pris===null);
+  if(loadingPris && typeof loadPriorities==='function' && !(typeof _prioritiesLoading!=='undefined' && _prioritiesLoading)) loadPriorities(function(){ initPriorityView(); });
+  var openPris = (pris && pris.filter) ? pris.filter(function(p){ return p.status!=='done'; }) : [];
+  var canEdit = (typeof _canEditPriorities==='function') ? _canEditPriorities() : false;
+
+  var b = (typeof nxBrief==='function') ? nxBrief(list) : { count:list.length, gtv:0, yoy:0, up:[], down:[] };
+  var teamName = (typeof _amLandingLabel_==='function') ? _amLandingLabel_() : 'Priority';
+  var name = (typeof _ixName==='function') ? _ixName() : '';
+  var greet = (typeof _ixGreet==='function') ? _ixGreet() : 'Welcome';
+  var dateStr = new Date().toLocaleDateString('en-IE', { weekday:'long', day:'numeric', month:'long' });
+
+  // hero controls — window (sales/stock magnitude) + manage + deep dive
+  var win = '<select class="prv-win" onchange="prvSetWin(this.value)" title="Time window for Drops + movers">'
+    + '<optgroup label="Sales (vs last year)"><option value="d7"'+(_prvWin==='d7'?' selected':'')+'>This week</option>'
+    + '<option value="w4"'+(_prvWin==='w4'?' selected':'')+'>4 weeks</option><option value="ytd"'+(_prvWin==='ytd'?' selected':'')+'>YTD</option></optgroup>'
+    + '<optgroup label="Stock (day-over-day)"><option value="stock"'+(_prvWin==='stock'?' selected':'')+'>Stock · 24h</option></optgroup></select>';
+  var manageBtn = canEdit ? '<button class="prv-setbtn" onclick="switchView(\'team\')" title="Create &amp; manage team priorities">⚙ Manage priorities</button>' : '';
+
+  // KPI strip — grounded book metrics (no invented "status")
+  var stock = (typeof _prvStockStat==='function') ? _prvStockStat() : null;
+  var yoyCls = b.yoy>=0?'up':'down';
+  var stkCls = stock ? (stock.varPct<0?'down':stock.varPct>0?'up':'') : '';
+  var kpis = '<div class="tdv-kpis">'
+    + '<div class="tdv-kpi"><div class="tdv-kpi-l">Book GTV · YTD</div><div class="tdv-kpi-v">'+_prvMoney(b.gtv)+'</div><div class="tdv-kpi-s '+yoyCls+'">'+_prvPct(b.yoy)+' vs last year</div></div>'
+    + '<div class="tdv-kpi"><div class="tdv-kpi-l">Partners</div><div class="tdv-kpi-v">'+b.count+'</div><div class="tdv-kpi-s">in your book</div></div>'
+    + '<div class="tdv-kpi"><div class="tdv-kpi-l">Open priorities</div><div class="tdv-kpi-v">'+openPris.length+'</div><div class="tdv-kpi-s">'+(canEdit?'set in Team':'this week')+'</div></div>'
+    + '<div class="tdv-kpi"><div class="tdv-kpi-l">Stock online</div><div class="tdv-kpi-v">'+(stock?stock.online.toLocaleString():'—')+'</div><div class="tdv-kpi-s '+stkCls+'">'+(stock?(_prvPct(stock.varPct)+' 15-day'):'no stock data')+'</div></div>'
+    + '</div>';
+
+  // worklist = team directives (open)
+  var listHtml, listCount;
+  if(loadingPris){ listHtml = '<div class="tdv-empty">Loading priorities…</div>'; listCount=''; }
+  else if(!openPris.length){
+    listHtml = '<div class="tdv-empty">No team priorities yet. '+(canEdit?'<a onclick="switchView(\'team\')" style="cursor:pointer;text-decoration:underline">Set them in Team →</a>':'A manager will set the week.')+'</div>';
+    listCount = '<span class="tdv-count">0</span>';
+  } else {
+    listHtml = openPris.map(_prvDirectiveRow).join('');
+    listCount = '<span class="tdv-count">'+openPris.length+'</span>';
+  }
+
+  // Top movers (up & down) · 4-week — read straight from nxBrief
+  var moversCard = '<div class="tdv-card"><div class="tdv-card-h"><i data-lucide="trending-up"></i>Top movers · 4 weeks</div>'
+    + ((b.up&&b.up.length) ? b.up.map(_prvMoverRow).join('') : '<div class="tdv-empty">No risers</div>')
+    + ((b.down&&b.down.length) ? '<div class="tdv-card-h" style="border-top:1px solid var(--border)"><i data-lucide="trending-down"></i>Cooling</div>'+b.down.map(_prvMoverRow).join('') : '')
+    + '</div>';
+
+  var dropTitle = _prvWin==='stock' ? 'Stock drops · since yesterday' : ('Sales drops · ' + (_prvWin==='ytd'?'YTD':_prvWin==='w4'?'4 weeks':'this week'));
+  _prvLoadExpanded(true);
+
+  host.innerHTML = '<div class="prv">'
+    + '<div class="tdv-hero"><div><div class="tdv-greet">'+_esc(greet)+(name?', '+_esc(name):'')+'<span class="tdv-wave"> — '+_esc(teamName)+'</span></div>'
+    +   '<div class="tdv-sub"><span>'+_esc(dateStr)+'</span><span>·</span><span class="tdv-fresh"><span class="dot"></span>'+_esc(teamName)+'</span>'
+    +   '<span>·</span><span>'+b.count+' partners</span><span>·</span><span>'+openPris.length+' '+(openPris.length===1?'priority':'priorities')+'</span>'
+    +   '<span class="tdv-kbd">⌘K to jump</span></div></div>'
+    +   '<div class="prv-controls">'+win+manageBtn+'<button class="prv-deep" onclick="switchView(\'overview\')" title="Open the full Overview dashboard">Deep dive ⤢</button></div>'
+    + '</div>'
+    + _prvLauncherHtml()
+    + kpis
+    + '<div class="tdv-grid" style="grid-template-columns:1.2fr 1fr"><div class="tdv-col">'
+    +   '<div class="tdv-card"><div class="tdv-card-h"><i data-lucide="target"></i>Priority this week'+listCount+'</div>'+listHtml+'</div></div>'
+    +   '<div class="tdv-col">'
+    +     '<div class="tdv-card"><div class="tdv-card-h"><i data-lucide="trending-down"></i>'+_esc(dropTitle)+'</div>'+_prvDropsRows()+'</div>'
+    +     moversCard
+    +   '</div>'
+    + '</div>'
+    + _prvAnalyticsHtml()
+    + '</div>';
+
+  if(typeof refreshIcons==='function') refreshIcons();
+}
+
+/* ═══════════════════════════════ CONTROLS ═══════════════════════════════ */
+function prvSetWin(w){ _prvWin = w; initPriorityView(); }
+function prvOpen(company){ if(typeof nxOpen==='function') nxOpen(company); }
+
+/* ── Landing quick-launcher: jump to a team / Head / Admin — in-app, NO new GAS deploy.
+   Team boxes come from _userTeams (the teams this user may access); Head/Admin are gated
+   on click. Real enforcement stays server-side (checkManager_/assertHead_); this just
+   avoids dead navigation and shows a no-permission card when access is missing. */
+function _prvCanHead(){ return (typeof _isV2!=='undefined' && _isV2) ? (typeof _isHead!=='undefined' && _isHead) : (typeof _isManager!=='undefined' && _isManager); }
+function _prvCanAdmin(){ return (typeof _isManager!=='undefined' && _isManager); }   // matches initAdminView + server checkManager_ (Head is a viewer, not a system admin)
+function _prvLauncherHtml(){
+  var teams = (typeof _userTeams!=='undefined' && _userTeams) ? _userTeams : [];
+  var cur = (typeof _userTeam!=='undefined') ? _userTeam : '';
+  var html = '<div class="prv-jumpbar"><span class="prv-jump-lab">Jump to</span>';
+  teams.forEach(function(t){
+    var on = (t.name === cur);
+    html += '<button class="prv-jump'+(on?' on':'')+'" onclick="nxLaunch(\'team\',\''+_prvJs(_esc(t.name))+'\')" title="Open '+_esc(t.label||t.name)+'">'+_esc(t.label||t.name)+'</button>';
+  });
+  html += '<button class="prv-jump prv-jump-x" onclick="nxLaunch(\'head\')" title="Head — all teams">Head</button>';
+  html += '<button class="prv-jump prv-jump-x" onclick="nxLaunch(\'admin\')" title="Admin">Admin</button>';
+  return html + '</div>';
+}
+function nxLaunch(kind, value){
+  if(kind==='team'){
+    var teams = (typeof _userTeams!=='undefined' && _userTeams) ? _userTeams : [];
+    if(!teams.some(function(t){return t.name===value;})){ nxNoPermission('Team “'+value+'”'); return; }
+    if(value === (typeof _userTeam!=='undefined'?_userTeam:'')){ if(typeof switchView==='function') switchView('priority'); return; }
+    if(typeof handleTeamSwitch==='function') handleTeamSwitch(value);   // full in-app reboot for that team → lands on its landing
+    return;
+  }
+  if(kind==='head'){ if(_prvCanHead()){ if(typeof switchView==='function') switchView('head'); } else nxNoPermission('the Head view'); return; }
+  if(kind==='admin'){ if(_prvCanAdmin()){ if(typeof switchView==='function') switchView('admin'); } else nxNoPermission('Admin'); return; }
+}
+function nxNoPermission(label){
+  var id='nxNoPerm', ov=document.getElementById(id);
+  if(!ov){ ov=document.createElement('div'); document.body.appendChild(ov); ov.id=id; }
+  ov.className='nxnp-ov';
+  ov.innerHTML='<div class="nxnp-card"><div class="nxnp-ic">🔒</div><div class="nxnp-t">No access</div>'
+    + '<div class="nxnp-s">You don\'t have permission to open '+_esc(label)+'.</div>'
+    + '<button class="nxnp-btn" onclick="var e=document.getElementById(\''+id+'\');if(e)e.style.display=\'none\'">Back</button></div>';
+  ov.style.display='flex';
+}
+
+/* Apply a deep-link (?team=/?view=) once after boot — same gating as the launcher.
+   The boot nulls NX_DEEP after the first call so a team-switch reboot won't re-fire. */
+function nxApplyDeepLink_(d){
+  if(!d) return;
+  var view = String(d.view||'').toLowerCase().trim();
+  var team = String(d.team||'').trim();
+  if(view){
+    if(view==='head'){ _prvCanHead() ? switchView('head') : nxNoPermission('the Head view'); }
+    else if(view==='admin'){ _prvCanAdmin() ? switchView('admin') : nxNoPermission('Admin'); }
+    else { try{ switchView(view); }catch(e){ console.error('deep-link view',e); } }
+    return;
+  }
+  if(team && team !== (typeof _userTeam!=='undefined'?_userTeam:'')){
+    var ok = ((typeof _userTeams!=='undefined' && _userTeams)?_userTeams:[]).some(function(t){return t.name===team;});
+    ok ? handleTeamSwitch(team) : nxNoPermission('Team “'+team+'”');
+  }
+}
+</script>

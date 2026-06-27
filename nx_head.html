@@ -1,6 +1,6 @@
 <script>
 /* ═══════════════════════════════════════════════════════════════════════════
-   HEAD DASHBOARD (V3.9) — manager-only cross-team view
+   HEAD DASHBOARD (V3.10) — manager-only cross-team view
 
    Lazy-loaded on first nav. Read-only — no writes from here. Two regions:
      1. Combined KPI strip (top)
@@ -12,6 +12,12 @@
 
    Recent huddles feed: cross-team, last 4-8 weeks. Click jumps into team
    then opens Huddle view at that week.
+
+   Enriched collapsed row: overdue pills, reply-rate, 7d sales-vs-PY arrow,
+   lead name. Expanded detail: 3-column layout (priorities / drops / team
+   stats), priorities + drops extended to 5. Client-side sort control
+   (Biggest drop / Overdue / GTV YoY / Reply-rate) with asc/desc toggle —
+   zero server calls. All fields guard gracefully when absent.
 ═══════════════════════════════════════════════════════════════════════════ */
 
 var headState = {
@@ -19,6 +25,9 @@ var headState = {
   data: null,                  // { teams, combined, recentHuddles }
   weeks: 4
 };
+
+// Sort state: key=null means "original order", dir=1 means ascending
+var _headSort = { key: null, dir: -1 };  // default desc (best first)
 
 function initHeadView() {
   var host = document.getElementById('view-head');
@@ -81,12 +90,15 @@ function headRenderBody_() {
 
   el.innerHTML = ''
     + headCombinedStripHtml_(d.combined || {})
+    + headSortBarHtml_()
     + '<div style="display:grid;grid-template-columns:1fr 380px;gap:16px;align-items:start;margin-top:16px">'
       + '<div>' + headTeamsGridHtml_(d.teams || []) + '</div>'
       + '<div>' + headRecentHuddlesHtml_(d.recentHuddles || []) + '</div>'
     + '</div>';
   refreshIcons();
 }
+
+// ─── Combined KPI strip ────────────────────────────────────────────────────
 
 function headCombinedStripHtml_(c) {
   var ytd = headFGtv_(c.ytdGtv || 0);
@@ -102,7 +114,7 @@ function headCombinedStripHtml_(c) {
   var kpi = function(label, value, sub) {
     return '<div class="section-card" style="margin:0;padding:14px 16px;flex:1;min-width:0">'
       + '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:6px">' + label + '</div>'
-      + '<div style="font-size:22px;font-weight:700;color:var(--ink);letter-spacing:-0.02em;font-variant-numeric:tabular-nums;line-height:1.1">' + value + '</div>'
+      + '<div style="font-size:var(--fs-display);font-weight:800;color:var(--ink);letter-spacing:-0.04em;font-variant-numeric:tabular-nums;line-height:1.1">' + value + '</div>'
       + (sub ? '<div style="font-size:10px;color:var(--ink-4);margin-top:4px">' + sub + '</div>' : '')
     + '</div>';
   };
@@ -121,13 +133,107 @@ function headCombinedStripHtml_(c) {
   + '</div>';
 }
 
+// ─── Sort bar ──────────────────────────────────────────────────────────────
+
+function headSortBarHtml_() {
+  var keys = [
+    { k: 'bigdrop',   label: 'Biggest drop' },
+    { k: 'overdue',   label: '# Overdue' },
+    { k: 'gtv_yoy',   label: 'GTV YoY' },
+    { k: 'replyrate', label: 'Reply-rate' }
+  ];
+  var dirLabel = _headSort.dir === 1 ? '↑ Asc' : '↓ Desc';
+  var btns = keys.map(function(o) {
+    var active = _headSort.key === o.k;
+    return '<button class="filter-tag-btn' + (active ? ' active' : '') + '" onclick="headSortBy_(\'' + o.k + '\')">' + o.label + '</button>';
+  }).join('');
+  return '<div class="filter-bar" style="margin-top:12px;padding:6px 12px;gap:6px;flex-wrap:wrap">'
+    + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);flex-shrink:0">Sort:</span>'
+    + btns
+    + '<button class="filter-tag-btn" onclick="headToggleSortDir_()" style="margin-left:auto">' + dirLabel + '</button>'
+    + (_headSort.key ? '<button class="filter-tag-btn" onclick="headSortBy_(null)" style="color:var(--ink-4)">Clear</button>' : '')
+  + '</div>';
+}
+
+// Called when a sort button is clicked. Toggles direction if same key, else sets new key.
+function headSortBy_(key) {
+  if (key === null) {
+    _headSort.key = null;
+    _headSort.dir = -1;
+  } else if (_headSort.key === key) {
+    _headSort.dir = _headSort.dir === 1 ? -1 : 1;
+  } else {
+    _headSort.key = key;
+    _headSort.dir = -1;  // default desc (best/highest first)
+  }
+  _headReRenderGrid_();
+}
+
+function headToggleSortDir_() {
+  _headSort.dir = _headSort.dir === 1 ? -1 : 1;
+  _headReRenderGrid_();
+}
+
+// Re-renders only the sort bar + teams grid (no server call, no scroll jump)
+function _headReRenderGrid_() {
+  var el = document.getElementById('headBody');
+  if (!el || !headState.data) return;
+  // Re-render body which picks up _headSort state
+  headRenderBody_();
+}
+
+// Returns numeric sort value for a team object given a sort key.
+// Missing fields degrade to worst possible value (sorts last in desc order).
+function _headSortVal_(t, key) {
+  switch (key) {
+    case 'bigdrop': {
+      var drops = t.topDrop && t.topDrop.length ? t.topDrop : null;
+      if (!drops) return 1;  // no drop info = not as bad (sort near end in desc)
+      // most negative pct = biggest drop; return pct so desc = worst first
+      return drops[0].pct != null ? drops[0].pct : 0;
+    }
+    case 'overdue':
+      // overdueCount === -1 means unavailable — treat as unknown, sort last
+      return (t.overdueCount != null && t.overdueCount >= 0) ? t.overdueCount : -1;
+    case 'gtv_yoy':
+      return (t.fwGtv != null && t.pyFwGtv > 0) ? (t.fwGtv - t.pyFwGtv) / t.pyFwGtv : -999;
+    case 'replyrate':
+      return t.replyRate90d != null ? t.replyRate90d : -1;
+    default:
+      return 0;
+  }
+}
+
+// ─── Teams grid ────────────────────────────────────────────────────────────
+
 function headTeamsGridHtml_(teams) {
   if (!teams.length) {
     return '<div class="section-card" style="padding:32px;text-align:center;color:var(--ink-4);font-size:12px">No teams configured.</div>';
   }
+
+  // Apply sort if a key is set
+  var sorted = teams.slice();  // shallow copy to avoid mutating original
+  if (_headSort.key) {
+    var k = _headSort.key;
+    var d = _headSort.dir;
+    sorted.sort(function(a, b) {
+      var av = _headSortVal_(a, k);
+      var bv = _headSortVal_(b, k);
+      // Items with value -1 or -999 (unavailable/missing) always sort last
+      var aLast = av < 0 || av === -999;
+      var bLast = bv < 0 || bv === -999;
+      if (aLast && !bLast) return 1;
+      if (!aLast && bLast) return -1;
+      if (av === bv) return 0;
+      return (av < bv ? -1 : 1) * d;
+    });
+  }
+
   return '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px;padding-left:2px">Teams</div>'
-    + teams.map(headTeamRowHtml_).join('');
+    + sorted.map(headTeamRowHtml_).join('');
 }
+
+// ─── Collapsed team row ────────────────────────────────────────────────────
 
 function headTeamRowHtml_(t) {
   var ytdStr = headFGtv_(t.ytdGtv || 0);
@@ -153,23 +259,227 @@ function headTeamRowHtml_(t) {
     : '';
   var teamSafe = esc(t.name).replace(/'/g, "\\'");
 
-  return '<div class="section-card" style="margin:0 0 8px;padding:14px 16px;display:flex;align-items:center;gap:14px;opacity:' + rowOpacity + ';' + rowBg + '">'
-    + '<div style="flex-shrink:0;min-width:140px">'
-      + '<div style="font-size:14px;font-weight:700;color:var(--ink);letter-spacing:-0.01em">' + esc(t.label || t.name) + indirectBadge + huddleBadge + emptyBadge + '</div>'
-      + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">' + partners + ' partner' + (t.partners === 1 ? '' : 's') + (isDirect ? '' : ' · awareness only') + '</div>'
+  // Intelligence line: #1 priority + #1 drop from server payload (degrades
+  // gracefully when topPriority/topDrop are absent — old payload compat).
+  var p1 = (t.topPriority && t.topPriority.length) ? t.topPriority[0] : null;
+  var d1 = (t.topDrop && t.topDrop.length) ? t.topDrop[0] : null;
+  var p1Html = p1
+    ? '<span style="color:var(--ink-3)">&#9733; Priority:</span> <strong>' + esc(p1.name) + '</strong>'
+      + (p1.rank > 0 ? ' <span style="color:var(--ink-4)">(rank ' + p1.rank + ')</span>' : '')
+      + (p1.tag ? ' <span style="font-size:9px;color:var(--ink-4);background:var(--bg);border:1px solid var(--border);padding:1px 5px;border-radius:99px">' + esc(p1.tag) + '</span>' : '')
+    : '<span style="color:var(--ink-4)">&#9733; Priority: —</span>';
+  var d1Html = d1
+    ? '<span style="color:var(--ink-4)">&#9660; Drop:</span> <strong>' + esc(d1.name) + '</strong>'
+      + ' <span style="color:#dc2626;font-weight:700">' + (d1.pct * 100).toFixed(0) + '%</span>'
+    : '<span style="color:var(--ink-4)">&#9660; Drop: —</span>';
+
+  // Detail panel id (unique per team)
+  var detailId = 'hd-detail-' + (t.name || '').replace(/[^a-zA-Z0-9]/g, '_');
+  var chevronId = 'hd-chev-' + (t.name || '').replace(/[^a-zA-Z0-9]/g, '_');
+
+  // ── V3.10: enriched second line ──────────────────────────────────────────
+
+  // Conditional pills (only render when > 0; skip overdueCount if -1 or absent)
+  var pillsHtml = '';
+  if (t.overdueCount != null && t.overdueCount > 0) {
+    pillsHtml += '<span style="background:#fffbeb;color:#b45309;border:1px solid #fde68a;padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700;white-space:nowrap">◷ ' + t.overdueCount + ' overdue</span>';
+  }
+  // Reply-rate (guard: show only when present)
+  var rrHtml = '';
+  if (t.replyRate90d != null) {
+    var rrVal = Math.round(t.replyRate90d * 100);
+    var rrColor = rrVal >= 50 ? '#15803d' : (rrVal >= 25 ? '#b45309' : '#be123c');
+    rrHtml = '<span style="color:' + rrColor + ';font-size:9px;font-weight:700;white-space:nowrap">✉ ' + rrVal + '%</span>';
+  }
+
+  // 7d sales vs prior-year arrow: (wkGtv - pyWkGtv) / pyWkGtv (guard both fields)
+  var momHtml = '';
+  if (t.wkGtv != null && t.pyWkGtv != null && t.pyWkGtv > 0) {
+    var mom = (t.wkGtv - t.pyWkGtv) / t.pyWkGtv;
+    var momPct = Math.abs(mom * 100).toFixed(0);
+    var momFlat = Math.abs(mom) < 0.02;  // within ±2% = flat
+    if (momFlat) {
+      momHtml = '<span style="color:var(--ink-4);font-size:9px;font-weight:700;white-space:nowrap">▬ ' + momPct + '%</span>';
+    } else if (mom > 0) {
+      momHtml = '<span style="color:#15803d;font-size:9px;font-weight:700;white-space:nowrap">▲ ' + momPct + '%</span>';
+    } else {
+      momHtml = '<span style="color:#dc2626;font-size:9px;font-weight:700;white-space:nowrap">▼ ' + momPct + '%</span>';
+    }
+  } else if (t.wkGtv != null && (t.pyWkGtv == null || t.pyWkGtv === 0)) {
+    // Have current week but no PY comparison — show neutral
+    momHtml = '';
+  }
+
+  // Lead name (guard: show only when present and non-empty)
+  var leadHtml = '';
+  if (t.lead && String(t.lead).trim()) {
+    leadHtml = '<span style="font-size:9px;color:var(--ink-4);white-space:nowrap">lead: ' + esc(String(t.lead).trim()) + '</span>';
+  }
+
+  // Assemble enriched second line only if any element exists
+  var hasEnrichedLine = pillsHtml || rrHtml || momHtml || leadHtml;
+  var enrichedLine = '';
+  if (hasEnrichedLine) {
+    enrichedLine = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 2px;border-top:1px solid var(--border);padding-top:6px;margin-top:0">'
+      + pillsHtml
+      + rrHtml
+      + momHtml
+      + leadHtml
+    + '</div>';
+  }
+
+  var rowHtml = '<div class="section-card" style="margin:0 0 2px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;opacity:' + rowOpacity + ';' + rowBg + '">'
+    + '<div style="display:flex;align-items:center;gap:14px">'
+      + '<div style="flex-shrink:0;min-width:140px">'
+        + '<div style="font-size:14px;font-weight:700;color:var(--ink);letter-spacing:-0.01em">' + esc(t.label || t.name) + indirectBadge + huddleBadge + emptyBadge + '</div>'
+        + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">' + partners + ' partner' + (t.partners === 1 ? '' : 's') + (isDirect ? '' : ' · awareness only') + '</div>'
+      + '</div>'
+      + '<div style="flex:1;display:grid;grid-template-columns:repeat(4, 1fr);gap:10px">'
+        + headTeamMiniKpi_('YTD GTV', ytdStr)
+        + headTeamMiniKpi_('4W GTV', fwStr, yoyPct, yoyColor, yoySign)
+        + headTeamMiniKpi_('Sent · 90d', (t.sent90d || 0).toLocaleString())
+        + headTeamMiniKpi_('Replies', (t.replied90d || 0).toLocaleString())
+      + '</div>'
+      + '<div style="flex-shrink:0;display:flex;gap:6px;align-items:center">'
+        + '<button class="btn-ghost" onclick="headEnterTeam(\'' + teamSafe + '\', \'huddle\')" title="Open team huddles"><i data-lucide="users-round" style="width:12px;height:12px"></i></button>'
+        + '<button class="btn-primary" onclick="headEnterTeam(\'' + teamSafe + '\', \'priority\')" style="padding:6px 12px;font-size:11px"><i data-lucide="arrow-right" style="width:12px;height:12px"></i> Enter</button>'
+        + '<button id="' + chevronId + '" class="btn-ghost" onclick="headToggleDetail_(\'' + detailId + '\',\'' + chevronId + '\')" title="Show priorities &amp; drops" style="padding:4px 6px"><i data-lucide="chevron-down" style="width:12px;height:12px"></i></button>'
+      + '</div>'
     + '</div>'
-    + '<div style="flex:1;display:grid;grid-template-columns:repeat(4, 1fr);gap:10px">'
-      + headTeamMiniKpi_('YTD GTV', ytdStr)
-      + headTeamMiniKpi_('4W GTV', fwStr, yoyPct, yoyColor, yoySign)
-      + headTeamMiniKpi_('Sent · 90d', (t.sent90d || 0).toLocaleString())
-      + headTeamMiniKpi_('Replies', (t.replied90d || 0).toLocaleString())
+    + enrichedLine
+    + '<div style="display:flex;gap:24px;align-items:center;font-size:11px;padding:0 2px;border-top:1px solid var(--border);padding-top:8px">'
+      + '<span>' + p1Html + '</span>'
+      + '<span style="color:var(--border)">|</span>'
+      + '<span>' + d1Html + '</span>'
     + '</div>'
-    + '<div style="flex-shrink:0;display:flex;gap:6px">'
-      + '<button class="btn-ghost" onclick="headEnterTeam(\'' + teamSafe + '\', \'huddle\')" title="Open team huddles"><i data-lucide="users-round" style="width:12px;height:12px"></i></button>'
-      + '<button class="btn-primary" onclick="headEnterTeam(\'' + teamSafe + '\', \'overview\')" style="padding:6px 12px;font-size:11px"><i data-lucide="arrow-right" style="width:12px;height:12px"></i> Enter</button>'
+  + '</div>'
+  + '<div id="' + detailId + '" style="display:none;margin:0 0 8px">'
+    + headTeamDetailHtml_(t, teamSafe)
+  + '</div>';
+
+  return rowHtml;
+}
+
+function headToggleDetail_(detailId, chevronId) {
+  var el = document.getElementById(detailId);
+  var chev = document.getElementById(chevronId);
+  if (!el) return;
+  var open = el.style.display !== 'none';
+  el.style.display = open ? 'none' : 'block';
+  if (chev) {
+    var icon = chev.querySelector('i[data-lucide]');
+    if (icon) {
+      icon.setAttribute('data-lucide', open ? 'chevron-down' : 'chevron-up');
+      if (typeof refreshIcons === 'function') refreshIcons();
+    }
+  }
+}
+
+// ─── Expanded detail (3-column) ────────────────────────────────────────────
+
+function headTeamDetailHtml_(t, teamSafe) {
+  var pRows = (t.topPriority && t.topPriority.length) ? t.topPriority.slice(0, 5) : [];
+  var dRows = (t.topDrop && t.topDrop.length) ? t.topDrop.slice(0, 5) : [];
+
+  // ── Column 1: Top Priorities ───────────────────────────────────────────
+  var pHtml = '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px">Top Priorities</div>';
+  if (!pRows.length) {
+    pHtml += '<div style="font-size:11px;color:var(--ink-4)">—</div>';
+  } else {
+    pRows.forEach(function(p) {
+      var tagHtml = p.tag
+        ? ' <span style="font-size:9px;background:var(--bg);border:1px solid var(--border);color:var(--ink-4);padding:1px 5px;border-radius:99px">' + esc(p.tag) + '</span>'
+        : '';
+      var rankBadge = p.rank > 0
+        ? ' <span style="font-size:9px;background:#fef9c3;color:#854d0e;border:1px solid #fde68a;padding:1px 6px;border-radius:99px;font-weight:700">R' + p.rank + '</span>'
+        : '';
+      pHtml += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
+        + '<span style="font-size:11.5px;font-weight:600;color:var(--ink);cursor:pointer" onclick="headEnterTeam(\'' + teamSafe + '\',\'priority\')">' + esc(p.name) + '</span>'
+        + rankBadge + tagHtml
+      + '</div>';
+    });
+  }
+
+  // ── Column 2: Top Drops (with inline trend bars when present) ─────────
+  var dHtml = '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px">Top Drops</div>';
+  if (!dRows.length) {
+    dHtml += '<div style="font-size:11px;color:var(--ink-4)">—</div>';
+  } else {
+    dRows.forEach(function(dr) {
+      dHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+        + '<span style="font-size:11.5px;font-weight:600;color:var(--ink)">' + esc(dr.name) + '</span>'
+        + '<span style="font-size:11px;color:#dc2626;font-weight:700;font-variant-numeric:tabular-nums">'
+          + (dr.pct != null ? (dr.pct * 100).toFixed(0) + '%' : '—')
+        + '</span>'
+      + '</div>';
+    });
+  }
+
+  // ── Column 3: Team summary ─────────────────────────────────────────────
+  var vHtml = '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:8px">Team summary</div>';
+
+  var vRow = function(label, value) {
+    return '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:8px">'
+      + '<span style="font-size:10px;color:var(--ink-4);flex-shrink:0">' + label + '</span>'
+      + '<span style="font-size:11px;font-weight:600;color:var(--ink);text-align:right;min-width:0">' + value + '</span>'
+    + '</div>';
+  };
+
+  // Overdue actions (skip entirely if overdueCount is -1 or absent)
+  if (t.overdueCount != null && t.overdueCount >= 0) {
+    var odColor = t.overdueCount > 0 ? '#b45309' : '#15803d';
+    vHtml += vRow('Overdue actions', '<span style="color:' + odColor + ';font-weight:700">' + t.overdueCount + '</span>');
+  }
+
+  // Drops
+  var drStr = (t.dropCount != null ? t.dropCount : '—') + ' drops';
+  vHtml += vRow('Drops', drStr);
+
+  // Outreach 90d
+  var sent90 = t.sent90d != null ? (t.sent90d).toLocaleString() : '—';
+  var repl90 = t.replied90d != null ? (t.replied90d).toLocaleString() : '—';
+  var pend90 = t.repliesPending != null ? (t.repliesPending).toLocaleString() : '—';
+  var rrVital = t.replyRate90d != null ? Math.round(t.replyRate90d * 100) + '%' : '—';
+  vHtml += vRow('Outreach · 90d', sent90 + ' sent');
+  vHtml += vRow('', repl90 + ' replied · ' + pend90 + ' pending · <span style="font-weight:700">' + rrVital + '</span> rate');
+
+  // Full-price share
+  if (t.fpShare != null) {
+    var fpPct = Math.round(t.fpShare * 100);
+    var fpColor = fpPct >= 60 ? '#15803d' : (fpPct >= 40 ? '#b45309' : '#be123c');
+    vHtml += vRow('Full-price share', '<span style="color:' + fpColor + ';font-weight:700">' + fpPct + '%</span>');
+  }
+
+  // Online penetration
+  if (t.onlineShare != null) {
+    var onPct = Math.round(t.onlineShare * 100);
+    vHtml += vRow('Online penetration', onPct + '%');
+  }
+
+  // Last huddle
+  if (t.lastHuddle && t.lastHuddle.week) {
+    var lhWeek = esc(headWeekShort_(t.lastHuddle.week) || t.lastHuddle.week);
+    var lhTopic = t.lastHuddle.topic ? ' — ' + esc(String(t.lastHuddle.topic).slice(0, 38)) : '';
+    vHtml += vRow('Last huddle', lhWeek + lhTopic);
+  } else if (t.lastHuddle === null) {
+    vHtml += vRow('Last huddle', '<span style="color:var(--ink-4)">—</span>');
+  }
+
+  return '<div class="section-card" style="margin:0;padding:14px 16px;border-top:none;border-top-left-radius:0;border-top-right-radius:0">'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">'
+      + '<div>' + pHtml + '</div>'
+      + '<div>' + dHtml + '</div>'
+      + '<div>' + vHtml + '</div>'
+    + '</div>'
+    + '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">'
+      + '<button class="btn-ghost" onclick="headEnterTeam(\'' + teamSafe + '\',\'priority\')" style="font-size:11px">'
+        + '<i data-lucide="layout-list" style="width:11px;height:11px"></i> Open team priorities'
+      + '</button>'
     + '</div>'
   + '</div>';
 }
+
+// ─── Mini KPI ──────────────────────────────────────────────────────────────
 
 function headTeamMiniKpi_(label, value, pct, pctColor, pctSign) {
   return '<div>'
@@ -178,6 +488,8 @@ function headTeamMiniKpi_(label, value, pct, pctColor, pctSign) {
     + (pct !== undefined ? '<div style="font-size:9px;color:' + pctColor + ';font-weight:700;font-variant-numeric:tabular-nums">' + pctSign + pct.toFixed(1) + '%</div>' : '')
   + '</div>';
 }
+
+// ─── Recent huddles feed ───────────────────────────────────────────────────
 
 function headRecentHuddlesHtml_(huddles) {
   if (!huddles.length) {
@@ -203,6 +515,8 @@ function headRecentHuddlesHtml_(huddles) {
       }).join('');
 }
 
+// ─── Utilities ─────────────────────────────────────────────────────────────
+
 function headWeekShort_(iso) {
   if (!iso) return '';
   var d = new Date(iso);
@@ -220,7 +534,8 @@ function headFGtv_(v) {
 function headEnterTeam(team, view) {
   if (!team) return;
   // Trigger the existing team-switch flow, then route to requested view after data loads.
-  window.__headPendingView = view || 'overview';
+  // Default landing is 'priority' (the per-team AM priority board).
+  window.__headPendingView = view || 'priority';
   if (typeof handleTeamSwitch === 'function' && team !== _userTeam) {
     handleTeamSwitch(team);
     // After data loads, handleUnifiedData will land on overview by default.
@@ -233,7 +548,7 @@ function headEnterTeam(team, view) {
     }, 1500);  // belt-and-braces; team data load typically ~600-1200ms warm
   } else {
     // Same team — just switch view
-    switchView(view || 'overview');
+    switchView(view || 'priority');
   }
 }
 </script>

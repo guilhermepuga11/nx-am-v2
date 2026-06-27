@@ -1,7 +1,7 @@
 <html lang="en">
 <head>
   <base target="_top">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230b0b0a'/><path d='M30 74V30l40 40V30' stroke='white' stroke-width='12' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230b0b0a'/><path d='M30 74V30l40 40V30' stroke='white' stroke-width='20' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NEXUS</title>
@@ -31,13 +31,14 @@
   </style>
 </head>
 <body>
+<script>window.NX_DEEP = <?!= deepJson ?>;</script>
 
 
 <!-- LOADING -->
 <div id="loadingOverlay">
   <div style="display:flex;align-items:center;gap:13px">
-    <span style="width:44px;height:44px;border-radius:13px;background:linear-gradient(160deg,#1a1a18,#0b0b0a);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px -3px rgba(13,13,12,.30),inset 0 1px 0 rgba(255,255,255,.14)"><svg viewBox="0 0 100 100" fill="none" style="width:25px;height:25px"><path d="M24 76V24l52 52V24" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-    <span style="font-family:'Barlow',sans-serif;font-weight:800;font-size:34px;letter-spacing:-0.04em;text-transform:uppercase;color:#0b0b0a">NEXUS</span>
+    <span style="width:44px;height:44px;border-radius:13px;background:linear-gradient(160deg,#1a1a18,#0b0b0a);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px -3px rgba(13,13,12,.30),inset 0 1px 0 rgba(255,255,255,.14)"><svg viewBox="0 0 100 100" fill="none" style="width:25px;height:25px"><path d="M24 76V24l52 52V24" stroke="#fff" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    <span style="font-family:'Barlow',sans-serif;font-weight:800;font-size:34px;letter-spacing:-0.04em;text-transform:uppercase;color:#0b0b0a">NEXUS<sup class="logo-v2">v2</sup></span>
   </div>
   <div style="display:flex;align-items:center;gap:8px">
     <i data-lucide="loader-2" class="spin" style="width:14px;height:14px;color:var(--ink-4)"></i>
@@ -50,59 +51,61 @@
   <!-- SIDEBAR -->
   <aside class="sidebar">
     <div class="logo-wordmark">
-      <span class="logo-mark"><svg viewBox="0 0 100 100" fill="none"><path d="M24 76V24l52 52V24" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-      <span class="logo-text"><span class="logo-name">NEXUS</span><span class="logo-sub">Account Mgmt<i>v2</i></span></span>
+      <span class="logo-mark"><svg viewBox="0 0 100 100" fill="none"><path d="M24 76V24l52 52V24" stroke="#fff" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span class="logo-text"><span class="logo-name">NEXUS<sup class="logo-v2">v2</sup></span><span class="logo-sub">Account Management</span></span>
     </div>
-    <div style="padding:8px 4px 10px;border-bottom:1px solid var(--border);margin-bottom:0">
-      <div style="font-size:8px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px;padding:0 2px;display:flex;align-items:center;gap:6px">User <span id="teamRoleBadge" style="display:none"></span></div>
-      <select id="ctxUser" class="ctx-select"><option value="">Loading…</option></select>
-    </div>
-    <!-- V11: Team selector -->
-    <div id="teamSelectorWrap" style="padding:6px 4px 12px;border-bottom:1px solid var(--border);margin-bottom:4px">
-      <div style="font-size:8px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-4);margin-bottom:4px;padding:0 2px">Team</div>
-      <select id="ctxTeam" class="ctx-select" onchange="handleTeamSwitch(this.value)"><option value="">Loading…</option></select>
+    <!-- Context card: User + Team selectors consolidated (ids/onchange preserved) -->
+    <div class="ctx-card">
+      <div class="ctx-row">
+        <div class="ctx-row-label">User <span id="teamRoleBadge" style="display:none"></span></div>
+        <select id="ctxUser" class="ctx-select"><option value="">Loading…</option></select>
+      </div>
+      <div class="ctx-row" id="teamSelectorWrap">
+        <div class="ctx-row-label">Team</div>
+        <select id="ctxTeam" class="ctx-select" onchange="handleTeamSwitch(this.value)"><option value="">Loading…</option></select>
+      </div>
     </div>
     <div class="nav-section-label">Menu</div>
-    <div class="nav-item active" id="nav-overview" onclick="switchView('overview')"><i data-lucide="layout-dashboard" style="width:14px;height:14px;flex-shrink:0"></i> Overview</div>
+    <div class="nav-item active" id="nav-priority" onclick="switchView('priority')"><i data-lucide="target" style="width:14px;height:14px;flex-shrink:0"></i> <span id="navPriorityLabel">Priority</span></div>
+    <div class="nav-item nav-sub" id="nav-overview" onclick="switchView('overview')"><i data-lucide="layout-dashboard" style="width:12px;height:12px;flex-shrink:0"></i> Overview</div>
     <div class="nav-item" id="nav-cockpit" onclick="switchView('cockpit')"><i data-lucide="bar-chart-2" style="width:14px;height:14px;flex-shrink:0"></i> Cockpit</div>
-    <div class="nav-item" id="nav-bidask" onclick="switchView('bidask')" style="display:none;padding-left:34px;font-size:12px">
+    <div class="nav-item nav-sub" id="nav-bidask" onclick="switchView('bidask')" style="display:none">
       <i data-lucide="line-chart" style="width:12px;height:12px;flex-shrink:0"></i> Bid-Ask
-      <span style="margin-left:auto;font-size:7px;font-weight:700;background:#fffbeb;border:1px solid #fde68a;padding:1px 5px;border-radius:4px;color:#b45309;letter-spacing:0.06em">DRAFT</span>
+      <span class="nav-badge nav-badge--draft" style="margin-left:auto">DRAFT</span>
     </div>
     <div class="nav-item" id="nav-partners" onclick="switchView('partners')"><i data-lucide="users" style="width:14px;height:14px;flex-shrink:0"></i> Partners</div>
-    <div class="nav-item" id="nav-contacts" onclick="switchView('contacts')" style="display:none;padding-left:34px;font-size:12px">
+    <div class="nav-item nav-sub" id="nav-contacts" onclick="switchView('contacts')" style="display:none">
       <i data-lucide="contact" style="width:12px;height:12px;flex-shrink:0"></i> Contacts
     </div>
     <div class="nav-item" id="nav-team" onclick="switchView('team')"><i data-lucide="users" style="width:14px;height:14px;flex-shrink:0"></i> Team</div>
-    <div class="nav-item" id="nav-huddle" onclick="switchView('huddle')" style="display:none;padding-left:34px;font-size:12px">
+    <div class="nav-item nav-sub" id="nav-huddle" onclick="switchView('huddle')" style="display:none">
       <i data-lucide="users-round" style="width:12px;height:12px;flex-shrink:0"></i> Huddles
     </div>
-    <div class="nav-item" id="nav-calendar-sub" onclick="switchView('calendar')" style="display:none;padding-left:34px;font-size:12px">
+    <div class="nav-item nav-sub" id="nav-calendar-sub" onclick="switchView('calendar')" style="display:none">
       <i data-lucide="calendar-days" style="width:12px;height:12px;flex-shrink:0"></i> Calendar
     </div>
-    <div class="nav-item" id="nav-holidays" onclick="switchView('holidays')" style="display:none;padding-left:34px;font-size:12px">
+    <div class="nav-item nav-sub" id="nav-holidays" onclick="switchView('holidays')" style="display:none">
       <i data-lucide="palmtree" style="width:12px;height:12px;flex-shrink:0"></i> Holidays
     </div>
     <div class="nav-item" id="nav-email" onclick="switchView('email')"><i data-lucide="send" style="width:14px;height:14px;flex-shrink:0"></i> Outreach</div>
-    <div class="nav-item" id="nav-campaigns" onclick="switchView('campaigns')" style="display:none;padding-left:34px;font-size:12px">
+    <div class="nav-item nav-sub" id="nav-campaigns" onclick="switchView('campaigns')" style="display:none">
       <i data-lucide="megaphone" style="width:12px;height:12px;flex-shrink:0"></i> Campaigns
     </div>
-    <div class="nav-item" id="nav-replies" onclick="switchView('replies')" style="display:none;padding-left:34px;font-size:12px">
-      <i data-lucide="reply" style="width:12px;height:12px;flex-shrink:0"></i> Reply Center
-    </div>
+    <!-- Reply Center merged into the Campaigns view as a "Replies" tab (no separate nav item) -->
+
     <!-- Operations / OPS Projects section removed (descoped, V3.14.1) -->
     <div class="nav-section-label" style="margin-top:14px">Global Tools</div>
     <a class="nav-item-ext" href="https://gemini.google.com/gem/12sRDSiiqZdOQ7q2ZsfBZHtF7g1mhxPhW?usp=sharing" target="_blank" rel="noopener">
       <i data-lucide="sparkles" style="width:14px;height:14px;flex-shrink:0"></i> MBO Studio
-      <span style="margin-left:auto;font-size:8px;font-weight:700;background:var(--bg);border:1px solid var(--border);padding:1px 5px;border-radius:4px;color:var(--ink-4)">AI</span>
+      <span class="nav-badge nav-badge--role" style="margin-left:auto">AI</span>
     </a>
     <div class="nav-item" id="nav-head" onclick="switchView('head')" style="display:none">
       <i data-lucide="crown" style="width:14px;height:14px;flex-shrink:0"></i> Head
-      <span style="margin-left:auto;font-size:7px;font-weight:700;background:#FAEEDA;border:1px solid #854F0B;padding:1px 5px;border-radius:4px;color:#854F0B;letter-spacing:0.06em">MGR</span>
+      <span class="nav-badge nav-badge--mgr" style="margin-left:auto">MGR</span>
     </div>
     <div class="nav-item" id="nav-admin" onclick="switchView('admin')" style="display:none">
       <i data-lucide="shield" style="width:14px;height:14px;flex-shrink:0"></i> Admin
-      <span id="pendingBadge" style="display:none;margin-left:auto;background:#ef4444;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px">0</span>
+      <span id="pendingBadge" class="nav-badge nav-badge--count" style="display:none;margin-left:auto">0</span>
     </div>
     <div class="sidebar-footer">
       <!-- V3.1 Snapshot freshness pill (hidden until NX_SNAPSHOT.boot runs) -->
@@ -113,7 +116,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;padding:8px">
         <span class="sync-dot pulse"></span>
-        <span style="font-size:10px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4)" id="syncLabel">NEXUS</span>
+        <span style="font-size:10px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4)" id="syncLabel">Live sync</span>
       </div>
     </div>
   </aside>
@@ -159,13 +162,15 @@
     </div>
 
 
+    <!-- ══ PRIORITY LANDING ("AM - {team}", parent of Overview — nx_priority.html) ══ -->
+    <div id="view-priority" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
+
     <!-- ══ OVERVIEW VIEW ══ -->
     <div id="view-overview" class="content" style="display:block">
       <!-- Greeting -->
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <div>
-          <div style="font-size:17px;font-weight:700;letter-spacing:-0.02em" id="ovGreeting">Good morning</div>
-          <div style="font-size:11px;color:var(--ink-3);margin-top:2px" id="ovDate"></div>
+          <div style="font-size:17px;font-weight:700;letter-spacing:-0.02em" id="ovTitle">Overview</div>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           <span style="font-size:10px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4)" id="ovPartnerCount"></span>
@@ -502,6 +507,9 @@
     <div id="view-replies" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
 
 
+    <!-- ══ TEAM VIEW — priorities (directives) + latest huddle + upcoming holidays ══ -->
+    <div id="view-team" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
+
     <!-- ══ HUDDLE VIEW (V3.9 — team weekly meeting log) ══ -->
     <div id="view-huddle" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
 
@@ -778,7 +786,8 @@
   .wiz-step-pill.active:hover{transform:none;}
   .wiz-step-pill.done{background:var(--surface);color:var(--ink-2);border-color:var(--ink-2);}
   .wiz-step-pill.done .wiz-pill-num{background:var(--ink-2);color:#fff;}
-  .wiz-step-sep{width:18px;height:1px;background:var(--border);margin:0 3px;}
+  .wiz-step-sep{width:22px;height:2px;border-radius:2px;background:var(--border);margin:0 4px;transition:background .2s var(--ease);}
+  .wiz-step-sep.done{background:var(--ink-2);}
   .tpl-card{display:flex;align-items:center;gap:7px;padding:8px 12px;border-radius:10px;cursor:pointer;background:var(--surface);border:1px solid var(--border);transition:all 0.15s;min-width:0;}
   .tpl-card:hover{border-color:var(--ink-3);}
   .tpl-card.active{background:var(--ink);border-color:var(--ink);color:#fff;}
@@ -820,7 +829,10 @@
 <?!= include('nx_reply_center') ?>
 <?!= include('nx_huddle') ?>
 <?!= include('nx_holidays') ?>
+<?!= include('nx_team') ?>
 <?!= include('nx_head') ?>
+<?!= include('nx_intel') ?>
+<?!= include('nx_priority') ?>
 
 </body>
 </html>

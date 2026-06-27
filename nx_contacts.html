@@ -1,34 +1,208 @@
+<style>
+  /* ── Unified contact card (shared by the Contacts subtab + the partner drawer) ── */
+  .nxc-card{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;transition:border-color .15s;}
+  .nxc-card:hover{border-color:var(--ink-3);}
+  .nxc-av{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;background:var(--border);color:var(--ink-3);}
+  .nxc-av.prim{background:var(--ink);color:#fff;}
+  .nxc-main{flex:1;min-width:0;}
+  .nxc-nm{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);}
+  .nxc-prim{font-size:8px;font-weight:700;background:var(--ink);color:#fff;padding:1px 6px;border-radius:4px;letter-spacing:.06em;}
+  .nxc-em{font-size:11px;color:var(--ink-3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .nxc-role{font-size:9px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-4);background:var(--bg);border:1px solid var(--border);padding:2px 8px;border-radius:5px;flex-shrink:0;}
+  .nxc-crm{cursor:pointer;font-size:8px;font-weight:700;letter-spacing:.06em;padding:2px 7px;border-radius:5px;flex-shrink:0;}
+  .nxc-acts{display:flex;gap:4px;flex-shrink:0;}
+  .nxc-edit{background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px 14px;}
+</style>
 <script>
-/* ═══════════════════════════════════════
-   CONTACTS VIEW — card-based groups
-═══════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONTACTS — one shared component for BOTH the Contacts subtab and the partner
+   drawer's Contacts tab. Same cards, same actions everywhere:
+     view · add · edit · delete · set-primary · CRM toggle · email
+   All mutations reuse the existing propose→approve backend verbatim
+   (proposeContact / proposeEditContact / proposeDeleteContact / toggleContactCRM).
+   allContacts / pendingContacts are globals (declared in nx_core.html).
+═══════════════════════════════════════════════════════════════════════════ */
 var _editingContactRow = null;
 var _expandedStores = {};
+var _nxContactsLoaded = false, _nxContactsLoading = false, _nxContactsCbs = [];
 
+/* ── Loading ──────────────────────────────────────────────────────────────── */
+function _nxApplyContacts(rows){
+  rows = rows || [];
+  var cockpitNames = {};
+  P.forEach(function(p){ cockpitNames[(p.company || '').toLowerCase()] = true; });
+  allContacts = rows.filter(function(c){ return c.status === 'active' && cockpitNames[(c.merchant_name || '').toLowerCase()]; });
+  pendingContacts = rows.filter(function(c){ return c.status === 'pending' && cockpitNames[(c.merchant_name || '').toLowerCase()]; });
+  _nxContactsLoaded = true;
+  if (typeof updatePendingBadge === 'function') updatePendingBadge();
+  if (typeof renderAdminPending === 'function') renderAdminPending();
+}
+
+// Subtab entry point — always does a fresh load, then renders the grouped list.
 function loadAllContacts() {
   var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
-  if (!useGAS) return;
+  if (!useGAS) { renderContactsAll(); return; }
   google.script.run.withSuccessHandler(function(rows) {
-    rows = rows || [];
-    var cockpitNames = {};
-    P.forEach(function(p) { cockpitNames[(p.company || '').toLowerCase()] = true; });
-    allContacts = rows.filter(function(c) {
-      return c.status === 'active' && cockpitNames[(c.merchant_name || '').toLowerCase()];
-    });
-    pendingContacts = rows.filter(function(c) {
-      return c.status === 'pending' && cockpitNames[(c.merchant_name || '').toLowerCase()];
-    });
+    _nxApplyContacts(rows);
     renderContactsAll();
-    updatePendingBadge();
-    if (typeof renderAdminPending === 'function') renderAdminPending();
   }).getAllContacts();
 }
 
+// Shared loader the drawer uses — loads once if not already loaded, then runs cb.
+function nxEnsureContactsLoaded(cb) {
+  if (_nxContactsLoaded) { if (cb) cb(); return; }
+  if (cb) _nxContactsCbs.push(cb);
+  if (_nxContactsLoading) return;
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (!useGAS) { _nxContactsLoaded = true; _nxFlushContactsCbs(); return; }
+  _nxContactsLoading = true;
+  google.script.run.withSuccessHandler(function(rows) {
+    _nxApplyContacts(rows); _nxContactsLoading = false; _nxFlushContactsCbs();
+  }).withFailureHandler(function() { _nxContactsLoading = false; _nxFlushContactsCbs(); }).getAllContacts();
+}
+function _nxFlushContactsCbs(){ var cbs = _nxContactsCbs.slice(); _nxContactsCbs = []; cbs.forEach(function(cb){ try { cb(); } catch(e){ console.error('nxContactsCb', e); } }); }
+
+/* ── Data helpers ─────────────────────────────────────────────────────────── */
+function _nxCPartner(merchant){ return ((typeof P !== 'undefined' && P) ? P : []).filter(function(x){ return (x.company || '').toLowerCase() === String(merchant || '').toLowerCase(); })[0]; }
+function _nxCForMerchant(merchant){ return ((typeof allContacts !== 'undefined' && allContacts) ? allContacts : []).filter(function(c){ return (c.merchant_name || '').toLowerCase() === String(merchant || '').toLowerCase(); }); }
+function _nxCInCrm(merchant, email){
+  var p = _nxCPartner(merchant); if (!p || !p.contacts) return true;
+  var hit = p.contacts.filter(function(c){ return (c.contact_email || '').toLowerCase() === String(email || '').toLowerCase(); })[0];
+  return hit ? (hit.include_in_crm !== false) : true;
+}
+function _nxCq(s){ return String(s == null ? '' : s).replace(/'/g, "\\'"); }
+function _nxCRoleOpts(role){
+  return ['Buyer','GM','Finance','Operations','Other'].map(function(r){ return '<option' + (role === r ? ' selected' : '') + '>' + r + '</option>'; }).join('');
+}
+
+/* ── The unified card (display + inline-edit) ─────────────────────────────── */
+function _nxCCard(c, surface, merchant, inCrm){
+  var rowIndex = c.rowIndex;                       // present only when sourced from the sheet cache
+  var canRow = (rowIndex != null && rowIndex > 0); // edit/delete/set-primary need a real sheet row (synthetic CRM-fallback contacts use rowIndex -1 → view + CRM only)
+  var isPrim = c.is_primary === true || c.is_primary === 'TRUE';
+  if (canRow && _editingContactRow === rowIndex) return _nxCEditForm(c, surface, merchant);
+
+  var initial = (c.contact_name || '?').charAt(0).toUpperCase();
+  var mjs = _nxCq(merchant), ejs = _nxCq(c.contact_email), njs = _nxCq(c.contact_name);
+  var crmStyle = inCrm
+    ? 'background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0'
+    : 'background:var(--bg);color:var(--ink-4);border:1px solid var(--border);text-decoration:line-through';
+
+  var acts = '<button class="icon-btn" style="width:26px;height:26px" title="Email this partner" onclick="event.stopPropagation();nxCMail(\'' + mjs + '\')"><i data-lucide="mail" style="width:11px;height:11px"></i></button>';
+  if (canRow && !isPrim) acts += '<button class="icon-btn" style="width:26px;height:26px" title="Make primary" onclick="event.stopPropagation();nxCSetPrimary(' + rowIndex + ',\'' + mjs + '\',\'' + surface + '\')"><i data-lucide="star" style="width:11px;height:11px"></i></button>';
+  if (canRow) acts += '<button class="icon-btn" style="width:26px;height:26px" title="Edit" onclick="event.stopPropagation();nxCStartEdit(' + rowIndex + ',\'' + surface + '\')"><i data-lucide="pencil" style="width:11px;height:11px"></i></button>';
+  if (canRow) acts += '<button class="icon-btn" style="width:26px;height:26px;color:#be123c" title="Delete" onclick="event.stopPropagation();nxCDelete(' + rowIndex + ',\'' + njs + '\',\'' + surface + '\')"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>';
+
+  return '<div class="nxc-card">'
+    + '<div class="nxc-av' + (isPrim ? ' prim' : '') + '">' + initial + '</div>'
+    + '<div class="nxc-main"><div class="nxc-nm">' + esc(c.contact_name) + (isPrim ? '<span class="nxc-prim">PRIMARY</span>' : '') + '</div>'
+    +   '<div class="nxc-em">' + esc(c.contact_email) + '</div></div>'
+    + '<span class="nxc-role">' + esc(c.contact_role || 'No role') + '</span>'
+    + '<span class="nxc-crm" style="' + crmStyle + '" title="' + (inCrm ? 'Included in CRM email scanning — click to exclude' : 'Excluded from CRM scanning — click to include') + '" onclick="event.stopPropagation();nxCToggleCRM(\'' + ejs + '\',\'' + mjs + '\',' + (!inCrm) + ',\'' + surface + '\')">CRM</span>'
+    + '<div class="nxc-acts">' + acts + '</div>'
+    + '</div>';
+}
+function _nxCEditForm(c, surface, merchant){
+  var isPrim = c.is_primary === true || c.is_primary === 'TRUE';
+  var mjs = _nxCq(merchant);
+  return '<div class="nxc-edit">'
+    + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'
+    +   '<input type="text" class="nx-field-input" id="cedit-name" value="' + esc(c.contact_name) + '" placeholder="Name" style="padding:6px 10px;font-size:12px;flex:1">'
+    +   '<input type="email" class="nx-field-input" id="cedit-email" value="' + esc(c.contact_email) + '" placeholder="Email" style="padding:6px 10px;font-size:12px;flex:1.2">'
+    + '</div>'
+    + '<div style="display:flex;gap:8px;align-items:center">'
+    +   '<select class="nx-field-input" id="cedit-role" style="padding:6px 10px;font-size:11px;width:110px">' + _nxCRoleOpts(c.contact_role) + '</select>'
+    +   '<label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:10px;font-weight:500;color:var(--ink-2)"><input type="checkbox" id="cedit-primary"' + (isPrim ? ' checked' : '') + ' style="accent-color:var(--ink)"> Primary</label>'
+    +   '<div style="margin-left:auto;display:flex;gap:6px">'
+    +     '<button class="btn-primary" style="padding:5px 12px;font-size:11px" onclick="nxCSaveEdit(' + c.rowIndex + ',\'' + mjs + '\',\'' + surface + '\')">Save</button>'
+    +     '<button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="nxCCancelEdit(\'' + surface + '\')">Cancel</button>'
+    +   '</div></div></div>';
+}
+
+/* ── Shared action handlers (surface = 'view' | 'drawer') ─────────────────── */
+function _nxCReRender(surface){
+  if (surface === 'drawer') { if (typeof renderDrawerContacts === 'function' && typeof currentDeal !== 'undefined' && currentDeal) renderDrawerContacts(currentDeal); }
+  else renderContactsAll();
+}
+function nxCMail(merchant){
+  var p = _nxCPartner(merchant);
+  if (p && typeof emailThisPartner === 'function') emailThisPartner(p);
+  else showToast('No partner record to email', 'error');
+}
+function nxCStartEdit(rowIndex, surface){
+  _editingContactRow = rowIndex;
+  if (surface !== 'drawer') { var c = allContacts.find(function(ct){ return ct.rowIndex === rowIndex; }); if (c) _expandedStores[c.merchant_name || 'Unknown'] = true; }
+  _nxCReRender(surface);
+}
+function nxCCancelEdit(surface){ _editingContactRow = null; _nxCReRender(surface); }
+function nxCSaveEdit(rowIndex, merchant, surface){
+  var name = document.getElementById('cedit-name').value.trim();
+  var email = document.getElementById('cedit-email').value.trim();
+  var role = document.getElementById('cedit-role').value;
+  var isPrimary = document.getElementById('cedit-primary').checked;
+  if (!name || !email) { showToast('Name and email required', 'error'); return; }
+  var _src = (allContacts || []).find(function(ct){ return ct.rowIndex === rowIndex; }) || ((typeof currentDeal !== 'undefined' && currentDeal && currentDeal.contacts) ? currentDeal.contacts.find(function(ct){ return ct.rowIndex === rowIndex; }) : null);
+  var payload = { sk_merchant: (_src && _src.sk_merchant) || '', merchant_name: merchant, contact_name: name, contact_email: email, contact_role: role, is_primary: isPrimary, rowIndex: rowIndex };
+  // Edits queue for admin approval; the live list won't reflect them until then.
+  _editingContactRow = null; _nxCReRender(surface);
+  showToast('Edit proposed — awaiting admin approval', 'success');
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run.withSuccessHandler(function(){}).withFailureHandler(function(e){
+      _editingContactRow = rowIndex; _nxCReRender(surface);
+      showToast('Edit failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
+    }).proposeEditContact(payload);
+  }
+}
+function nxCDelete(rowIndex, contactName, surface){
+  if (!confirm('Propose deletion of "' + contactName + '"?\nThis will require admin approval.')) return;
+  showToast('Delete proposed — awaiting admin approval', 'success');
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run.withSuccessHandler(function(){}).withFailureHandler(function(e){
+      showToast('Delete failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
+    }).proposeDeleteContact(rowIndex);
+  }
+}
+function nxCSetPrimary(rowIndex, merchant, surface){
+  var c = (allContacts || []).find(function(ct){ return ct.rowIndex === rowIndex; });
+  if (!c && typeof currentDeal !== 'undefined' && currentDeal && currentDeal.contacts) c = currentDeal.contacts.find(function(ct){ return ct.rowIndex === rowIndex; });  // drawer first-paint window: cache not loaded yet
+  if (!c) { showToast('Contact not found', 'error'); return; }
+  // Reuse the edit proposal — flip is_primary, keep every other field.
+  var payload = { sk_merchant: (c.sk_merchant || ''), merchant_name: merchant, contact_name: c.contact_name, contact_email: c.contact_email, contact_role: c.contact_role || '', is_primary: true, rowIndex: rowIndex };
+  showToast('Primary change proposed — awaiting admin approval', 'success');
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run.withSuccessHandler(function(){}).withFailureHandler(function(e){
+      showToast('Failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
+    }).proposeEditContact(payload);
+  }
+}
+function nxCToggleCRM(email, merchant, newValue, surface){
+  if (!(typeof google !== 'undefined' && google.script && google.script.run)) { showToast('Not available in demo', 'error'); return; }
+  var prevValue = !newValue;
+  var _patch = function(val){
+    P.forEach(function(p){
+      if ((p.company || '').toLowerCase() !== String(merchant).toLowerCase() || !p.contacts) return;
+      p.contacts.forEach(function(c){ if ((c.contact_email || '').toLowerCase() === String(email).toLowerCase()) c.include_in_crm = val; });
+    });
+    if (typeof currentDeal !== 'undefined' && currentDeal && currentDeal.contacts) {
+      currentDeal.contacts.forEach(function(c){ if ((c.contact_email || '').toLowerCase() === String(email).toLowerCase()) c.include_in_crm = val; });
+    }
+    _nxCReRender(surface);
+  };
+  _patch(newValue);   // optimistic
+  google.script.run
+    .withSuccessHandler(function(res){ if (res && res.success === false) { _patch(prevValue); showToast('CRM toggle failed: ' + (res.error || 'Unknown') + ' — reverted', 'error'); return; } showToast(email + ' CRM scanning ' + (newValue ? 'enabled' : 'disabled'), 'success'); })
+    .withFailureHandler(function(e){ _patch(prevValue); showToast('CRM toggle failed: ' + ((e && e.message) || e || 'Unknown') + ' — reverted', 'error'); })
+    .toggleContactCRM(email, merchant, newValue);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONTACTS SUBTAB — grouped by merchant, with search / role / primary filters.
+═══════════════════════════════════════════════════════════════════════════ */
 function renderContactsAll() {
   var q = (document.getElementById('cSearch').value || '').toLowerCase();
   var role = document.getElementById('cRoleFilter').value;
   var primaryOnly = document.getElementById('cPrimaryOnly').checked;
-  var filtered = allContacts.filter(function(c) {
+  var filtered = (allContacts || []).filter(function(c) {
     var mq = !q || (c.merchant_name || '').toLowerCase().includes(q) || (c.contact_name || '').toLowerCase().includes(q) || (c.contact_email || '').toLowerCase().includes(q);
     var mr = !role || c.contact_role === role;
     var mp = !primaryOnly || c.is_primary === true || c.is_primary === 'TRUE';
@@ -36,9 +210,7 @@ function renderContactsAll() {
   });
   document.getElementById('cCount').textContent = filtered.length + ' contacts';
 
-  // Group by merchant_name
-  var groups = {};
-  var groupOrder = [];
+  var groups = {}, groupOrder = [];
   filtered.forEach(function(c) {
     var key = c.merchant_name || 'Unknown';
     if (!groups[key]) { groups[key] = []; groupOrder.push(key); }
@@ -48,90 +220,34 @@ function renderContactsAll() {
 
   var el = document.getElementById('cGroupedList');
   if (!el) return;
-
   if (!groupOrder.length) {
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--ink-4);font-size:11px">No contacts found.</div>';
     return;
   }
 
-  // Build include_in_crm lookup from P[] contacts
-  var crmLookup = {};
-  P.forEach(function(p) {
-    if (!p.contacts) return;
-    p.contacts.forEach(function(c) {
-      var lk = (p.company || '').toLowerCase() + '|' + (c.contact_email || '').toLowerCase();
-      crmLookup[lk] = c.include_in_crm !== false;
-    });
-  });
-
   var html = '';
   groupOrder.forEach(function(storeName) {
     var contacts = groups[storeName];
     var isExpanded = _expandedStores[storeName] === true;
-    var count = contacts.length;
     var primaryC = contacts.find(function(c) { return c.is_primary === true || c.is_primary === 'TRUE'; });
+    var sjs = _nxCq(storeName);
 
     html += '<div class="section-card" style="margin:0 0 8px;padding:0;overflow:hidden">';
-
-    // Store header
-    html += '<div onclick="toggleStoreExpand(\'' + esc(storeName).replace(/'/g, "\\'") + '\')" style="display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;transition:background 0.1s;user-select:none" onmouseenter="this.style.background=\'var(--bg)\'" onmouseleave="this.style.background=\'\'">'
-      + '<span style="font-size:10px;color:var(--ink-3);transition:transform 0.15s;display:inline-block;transform:rotate(' + (isExpanded ? '90' : '0') + 'deg)">&#x25B8;</span>'
-      + '<div style="flex:1;min-width:0">'
+    html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;transition:background 0.1s;user-select:none">'
+      + '<span onclick="toggleStoreExpand(\'' + sjs + '\')" style="cursor:pointer;font-size:10px;color:var(--ink-3);transition:transform 0.15s;display:inline-block;transform:rotate(' + (isExpanded ? '90' : '0') + 'deg)">&#x25B8;</span>'
+      + '<div onclick="toggleStoreExpand(\'' + sjs + '\')" style="flex:1;min-width:0;cursor:pointer">'
       + '<div style="font-size:12.5px;font-weight:600;color:var(--ink)">' + esc(storeName) + '</div>'
       + (primaryC ? '<div style="font-size:10px;color:var(--ink-3);margin-top:1px">' + esc(primaryC.contact_name) + ' &middot; ' + esc(primaryC.contact_email) + '</div>' : '')
       + '</div>'
-      + '<span style="background:var(--bg);border:1px solid var(--border);padding:2px 9px;border-radius:99px;font-size:9px;font-weight:700;color:var(--ink-3)">' + count + '</span>'
+      + '<button class="icon-btn" style="width:26px;height:26px" title="Email this partner" onclick="event.stopPropagation();nxCMail(\'' + sjs + '\')"><i data-lucide="mail" style="width:11px;height:11px"></i></button>'
+      + '<span style="background:var(--bg);border:1px solid var(--border);padding:2px 9px;border-radius:99px;font-size:9px;font-weight:700;color:var(--ink-3)">' + contacts.length + '</span>'
       + '</div>';
 
-    // Expanded contact cards
     if (isExpanded) {
       html += '<div style="padding:0 16px 14px;display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--border);padding-top:12px;background:var(--bg)">';
       contacts.forEach(function(c) {
-        var isPrim = c.is_primary === true || c.is_primary === 'TRUE';
-        var initial = (c.contact_name || '?').charAt(0).toUpperCase();
-        var crmKey = (storeName || '').toLowerCase() + '|' + (c.contact_email || '').toLowerCase();
-        var inCrm = crmLookup.hasOwnProperty(crmKey) ? crmLookup[crmKey] : true;
-
-        if (_editingContactRow === c.rowIndex) {
-          // Edit mode
-          html += '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px 14px">'
-            + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'
-            + '<input type="text" class="nx-field-input" id="cedit-name" value="' + esc(c.contact_name) + '" placeholder="Name" style="padding:6px 10px;font-size:12px;flex:1">'
-            + '<input type="email" class="nx-field-input" id="cedit-email" value="' + esc(c.contact_email) + '" placeholder="Email" style="padding:6px 10px;font-size:12px;flex:1.2">'
-            + '</div>'
-            + '<div style="display:flex;gap:8px;align-items:center">'
-            + '<select class="nx-field-input" id="cedit-role" style="padding:6px 10px;font-size:11px;width:110px"><option' + (c.contact_role === 'Buyer' ? ' selected' : '') + '>Buyer</option><option' + (c.contact_role === 'GM' ? ' selected' : '') + '>GM</option><option' + (c.contact_role === 'Finance' ? ' selected' : '') + '>Finance</option><option' + (c.contact_role === 'Operations' ? ' selected' : '') + '>Operations</option><option' + (c.contact_role === 'Other' ? ' selected' : '') + '>Other</option></select>'
-            + '<label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:10px;font-weight:500;color:var(--ink-2)"><input type="checkbox" id="cedit-primary"' + (isPrim ? ' checked' : '') + ' style="accent-color:var(--ink)"> Primary</label>'
-            + '<div style="margin-left:auto;display:flex;gap:6px">'
-            + '<button class="btn-primary" style="padding:5px 12px;font-size:11px" onclick="submitEditContact(' + c.rowIndex + ',\'' + esc(c.merchant_name).replace(/'/g, "\\'") + '\')">Save</button>'
-            + '<button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="cancelEditContact()">Cancel</button>'
-            + '</div></div></div>';
-        } else {
-          // Display mode
-          var crmBadgeStyle = inCrm
-            ? 'background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0'
-            : 'background:var(--bg);color:var(--ink-4);border:1px solid var(--border);text-decoration:line-through';
-
-          html += '<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;transition:border-color 0.15s" onmouseenter="this.style.borderColor=\'var(--ink-3)\'" onmouseleave="this.style.borderColor=\'var(--border)\'">'
-            + '<div style="width:32px;height:32px;border-radius:50%;background:' + (isPrim ? 'var(--ink)' : 'var(--border)') + ';color:' + (isPrim ? '#fff' : 'var(--ink-3)') + ';display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">' + initial + '</div>'
-            + '<div style="flex:1;min-width:0">'
-            + '<div style="display:flex;align-items:center;gap:6px">'
-            + '<span style="font-size:12.5px;font-weight:600;color:var(--ink)">' + esc(c.contact_name) + '</span>'
-            + (isPrim ? '<span style="font-size:8px;font-weight:700;background:var(--ink);color:#fff;padding:1px 6px;border-radius:4px;letter-spacing:0.06em">PRIMARY</span>' : '')
-            + '</div>'
-            + '<div style="font-size:11px;color:var(--ink-3);margin-top:1px">' + esc(c.contact_email) + '</div>'
-            + '</div>'
-            // Role pill
-            + '<span style="font-size:9px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-4);background:var(--bg);border:1px solid var(--border);padding:2px 8px;border-radius:5px;flex-shrink:0">' + esc(c.contact_role || 'No role') + '</span>'
-            // CRM toggle badge
-            + '<span onclick="event.stopPropagation();toggleCRMFromContacts(\'' + esc(c.contact_email).replace(/'/g, "\\'") + '\',\'' + esc(storeName).replace(/'/g, "\\'") + '\',' + !inCrm + ')" style="cursor:pointer;font-size:8px;font-weight:700;letter-spacing:0.06em;padding:2px 7px;border-radius:5px;flex-shrink:0;' + crmBadgeStyle + '" title="' + (inCrm ? 'Included in CRM email scanning — click to exclude' : 'Excluded from CRM scanning — click to include') + '">CRM</span>'
-            // Actions
-            + '<div style="display:flex;gap:4px;flex-shrink:0" onclick="event.stopPropagation()">'
-            + '<button class="icon-btn" style="width:26px;height:26px" onclick="startEditContact(' + c.rowIndex + ')" title="Edit"><i data-lucide="pencil" style="width:11px;height:11px"></i></button>'
-            + '<button class="icon-btn" style="width:26px;height:26px;color:#be123c" onclick="proposeDelete(' + c.rowIndex + ',\'' + esc(c.contact_name).replace(/'/g, "\\'") + '\')" title="Delete"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>'
-            + '</div>'
-            + '</div>';
-        }
+        var inCrm = _nxCInCrm(storeName, c.contact_email);
+        html += _nxCCard(c, 'view', storeName, inCrm);
       });
       html += '</div>';
     }
@@ -142,108 +258,13 @@ function renderContactsAll() {
   refreshIcons();
 }
 
-function toggleCRMFromContacts(email, merchant, newValue) {
-  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
-  if (!useGAS) { showToast('Not available in demo', 'error'); return; }
-  google.script.run
-    .withSuccessHandler(function(res) {
-      if (res && res.success) {
-        // Update local P[] data so re-render shows new state
-        P.forEach(function(p) {
-          if ((p.company || '').toLowerCase() !== merchant.toLowerCase()) return;
-          if (!p.contacts) return;
-          p.contacts.forEach(function(c) {
-            if ((c.contact_email || '').toLowerCase() === email.toLowerCase()) {
-              c.include_in_crm = newValue;
-            }
-          });
-        });
-        renderContactsAll();
-        showToast(email + ' CRM scanning ' + (newValue ? 'enabled' : 'disabled'), 'success');
-      } else {
-        showToast(res.error || 'Failed', 'error');
-      }
-    })
-    .withFailureHandler(function(e) { showToast('Error: ' + (e.message || e), 'error'); })
-    .toggleContactCRM(email, merchant, newValue);
-}
+function toggleStoreExpand(storeName) { _expandedStores[storeName] = !_expandedStores[storeName]; renderContactsAll(); }
+function expandAllStores() { (allContacts || []).forEach(function(c) { _expandedStores[c.merchant_name || 'Unknown'] = true; }); renderContactsAll(); }
+function collapseAllStores() { _expandedStores = {}; renderContactsAll(); }
 
-function toggleStoreExpand(storeName) {
-  _expandedStores[storeName] = !_expandedStores[storeName];
-  renderContactsAll();
-}
-
-function expandAllStores() {
-  allContacts.forEach(function(c) { _expandedStores[c.merchant_name || 'Unknown'] = true; });
-  renderContactsAll();
-}
-
-function collapseAllStores() {
-  _expandedStores = {};
-  renderContactsAll();
-}
-
-function startEditContact(rowIndex) {
-  _editingContactRow = rowIndex;
-  var c = allContacts.find(function(ct) { return ct.rowIndex === rowIndex; });
-  if (c) _expandedStores[c.merchant_name || 'Unknown'] = true;
-  renderContactsAll();
-}
-
-function cancelEditContact() {
-  _editingContactRow = null;
-  renderContactsAll();
-}
-
-function submitEditContact(rowIndex, merchant) {
-  var name = document.getElementById('cedit-name').value.trim();
-  var email = document.getElementById('cedit-email').value.trim();
-  var role = document.getElementById('cedit-role').value;
-  var isPrimary = document.getElementById('cedit-primary').checked;
-  if (!name || !email) { showToast('Name and email required', 'error'); return; }
-  var payload = { sk_merchant: '', merchant_name: merchant, contact_name: name, contact_email: email, contact_role: role, is_primary: isPrimary, rowIndex: rowIndex };
-
-  // V3.2 Phase 5 — instant edit-row dismissal + toast.
-  // Skipping post-success loadAllContacts() for the same reason as proposeContact:
-  // edits queue for admin approval; live list won't reflect them until then.
-  _editingContactRow = null;
-  if (typeof renderContacts === 'function') renderContacts();   // collapse the inline editor
-  showToast('Edit proposed — awaiting admin approval', 'success');
-
-  google.script.run
-    .withSuccessHandler(function() { /* already toasted */ })
-    .withFailureHandler(function(e) {
-      // Re-open the inline editor on the same row so user can retry
-      _editingContactRow = rowIndex;
-      if (typeof renderContacts === 'function') renderContacts();
-      var el = document.getElementById('cedit-name');
-      if (el && typeof flashField_ === 'function') flashField_(el);
-      showToast('Edit failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
-    })
-    .proposeEditContact(payload);
-}
-
-/* ═══════════════════════════════════════
-   PROPOSE DELETE CONTACT
-═══════════════════════════════════════ */
-function proposeDelete(rowIndex, contactName) {
-  if (!confirm('Propose deletion of "' + contactName + '"?\nThis will require admin approval.')) return;
-
-  // V3.2 Phase 5 — instant toast (delete proposal queues for approval; no
-  // visible row change in the live list until admin approves).
-  showToast('Delete proposed — awaiting admin approval', 'success');
-
-  google.script.run
-    .withSuccessHandler(function() { /* already toasted */ })
-    .withFailureHandler(function(e) {
-      showToast('Delete failed: ' + ((e && e.message) || 'Unknown') + ' — please retry', 'error');
-    })
-    .proposeDeleteContact(rowIndex);
-}
-
-/* ═══════════════════════════════════════
-   PROPOSE MODAL (global)
-═══════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════════════
+   ADD CONTACT (subtab modal) — same proposeContact backend as the drawer form.
+═══════════════════════════════════════════════════════════════════════════ */
 function openProposeModal() {
   var sel = document.getElementById('pmAccount'); sel.innerHTML = '<option value="">Select…</option>';
   P.forEach(function(d) { sel.add(new Option(d.company, d.company)); });
@@ -263,12 +284,8 @@ function submitProposeModal() {
   if (!merchant || !name || !email) { showToast('Account, name, and email required', 'error'); return; }
   var payload = { sk_merchant: '', merchant_name: merchant, contact_name: name, contact_email: email, contact_role: document.getElementById('pmRole').value, is_primary: document.getElementById('pmPrimary').checked };
 
-  // V3.2 Phase 5 (flow #5) — INSTANT MODAL CLOSE + toast.
-  // Proposals enter a pending-approval queue (not the live contact list), so
-  // there's no contact row to optimistically inject. The optimistic win is
-  // skipping the round-trip wait before the user can keep working.
-  // Skipping post-success loadAllContacts() — the proposal isn't visible in
-  // the live list anyway; snapshot refresh reconciles when admin approves.
+  // Proposals enter a pending-approval queue (not the live list), so there's no
+  // contact row to optimistically inject — just close + toast and keep working.
   closeProposeModal();
   showToast('Contact proposed — pending approval', 'success');
 
@@ -281,11 +298,9 @@ function submitProposeModal() {
     .proposeContact(payload);
 }
 
-/* V3.2 Phase 5 — re-open propose modal with values preserved + flash on failure */
 function _reopenProposeModal_(payload) {
   var modal = document.getElementById('proposeModal');
   if (!modal) return;
-  // Re-populate dropdown (openProposeModal builds it; safe to re-call structure)
   var sel = document.getElementById('pmAccount');
   if (sel && sel.options.length <= 1 && typeof P !== 'undefined') {
     sel.innerHTML = '<option value="">Select…</option>';

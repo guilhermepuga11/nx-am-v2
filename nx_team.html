@@ -1,0 +1,312 @@
+<!-- ══════════════════════════════════════════════════════════════════════════
+     NEXUS — nx_team.html
+     The TEAM view: create & manage team PRIORITIES (directives → partners),
+     plus a latest-huddle summary and upcoming-holidays summary. Clicking the
+     "Team" nav opens this view AND keeps expanding the Huddles/Calendar/Holidays
+     accordion (decision: keep accordion + add view).
+     Priorities are the spine of the landing's "Priority this week" — this is
+     where they're authored. Writes are Manager/Head/Admin only (server-gated).
+═══════════════════════════════════════════════════════════════════════════════ -->
+<style>
+  #view-team{padding:0;overflow-y:auto;}
+  .tm{max-width:1100px;margin:0 auto;padding:24px 28px 64px;}
+  .tm-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px;}
+  .tm-h1{font-size:var(--fs-display);font-weight:800;letter-spacing:-.03em;color:var(--ink);line-height:1.05;}
+  .tm-sub{font-size:12px;color:var(--ink-3);margin-top:6px;}
+  .tm-grid{display:grid;grid-template-columns:1.5fr 1fr;gap:16px;align-items:start;}
+  @media(max-width:900px){.tm-grid{grid-template-columns:1fr;}}
+  /* priority directive cards */
+  .tm-pri{display:flex;align-items:flex-start;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);transition:background var(--t-fast) var(--ease);}
+  .tm-pri:last-child{border-bottom:none;}
+  .tm-pri:hover{background:var(--bg);}
+  .tm-pri.done{opacity:.55;}
+  .tm-pri-check{flex-shrink:0;width:18px;height:18px;border-radius:5px;border:1.5px solid var(--border-2);background:var(--surface);cursor:pointer;display:flex;align-items:center;justify-content:center;margin-top:1px;transition:all var(--t-fast) var(--ease);}
+  .tm-pri-check:hover{border-color:var(--ink);}
+  .tm-pri-check.on{background:var(--ink);border-color:var(--ink);color:#fff;}
+  .tm-pri-check.ro{cursor:default;opacity:.6;}
+  .tm-pri-body{flex:1;min-width:0;}
+  .tm-pri-txt{font-size:13px;font-weight:600;color:var(--ink);line-height:1.25;}
+  .tm-pri.done .tm-pri-txt{text-decoration:line-through;}
+  .tm-pri-targets{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;}
+  .tm-tchip{font-size:10px;font-weight:600;color:var(--ink-2);background:var(--bg);border:1px solid var(--border);border-radius:var(--r-xs);padding:2px 7px;cursor:pointer;}
+  .tm-tchip:hover{border-color:var(--ink);color:var(--ink);}
+  .tm-pri-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:6px;font-size:10.5px;color:var(--ink-4);}
+  .tm-pri-due{font-weight:700;color:var(--ink-3);}
+  .tm-pri-due.over{color:#be123c;}
+  .tm-pri-actions{display:flex;gap:4px;flex-shrink:0;}
+  .tm-ibtn{width:26px;height:26px;border-radius:var(--r-xs);background:var(--surface);border:1px solid var(--border);color:var(--ink-3);cursor:pointer;font-size:11px;font-weight:700;line-height:1;}
+  .tm-ibtn:hover{border-color:var(--ink);color:var(--ink);background:var(--bg);}
+  .tm-empty{padding:30px 16px;text-align:center;color:var(--ink-4);font-size:12px;}
+  .tm-empty a{cursor:pointer;text-decoration:underline;color:var(--ink-3);}
+  /* create / edit form */
+  .tm-form{padding:14px 16px;border-top:1px solid var(--border);background:var(--surface-2);}
+  .tm-frow{margin-bottom:10px;}
+  .tm-flab{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-4);margin-bottom:5px;display:block;}
+  .tm-finput{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 11px;font-size:12.5px;font-family:'Barlow',sans-serif;color:var(--ink);outline:none;}
+  .tm-finput:focus{border-color:var(--ink);box-shadow:0 0 0 3px rgba(13,13,12,.08);}
+  .tm-tsearch{margin-bottom:7px;}
+  .tm-tpick{display:flex;flex-wrap:wrap;gap:5px;max-height:128px;overflow-y:auto;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);}
+  .tm-tpick-chip{font-size:10.5px;font-weight:600;color:var(--ink-3);background:var(--bg);border:1px solid var(--border);border-radius:var(--r-xs);padding:3px 8px;cursor:pointer;transition:all var(--t-fast) var(--ease);}
+  .tm-tpick-chip:hover{border-color:var(--ink-3);color:var(--ink);}
+  .tm-tpick-chip.on{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .tm-frow2{display:flex;gap:10px;}
+  .tm-frow2 > div{flex:1;}
+  .tm-fbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px;}
+  /* summary cards (huddle / holidays) */
+  .tm-sum{font-size:12px;color:var(--ink-2);}
+  .tm-sum-row{display:flex;align-items:baseline;gap:8px;padding:7px 16px;border-bottom:1px solid var(--border);}
+  .tm-sum-row:last-child{border-bottom:none;}
+  .tm-sum-row .l{margin-left:auto;font-size:10px;font-weight:700;color:var(--ink-4);white-space:nowrap;}
+  .tm-deep{display:block;text-align:center;padding:10px;font-size:11px;font-weight:700;color:var(--ink-3);cursor:pointer;border-top:1px solid var(--border);}
+  .tm-deep:hover{color:var(--ink);background:var(--bg);}
+</style>
+
+<script>
+/* ════════════════ SHARED PRIORITIES STORE (Team view + landing both read) ════════════════ */
+var _priorities = null;            // null = not loaded yet; array once loaded
+var _prioritiesLoading = false;
+
+function _canEditPriorities(){
+  return (typeof _isManager!=='undefined' && _isManager) || (typeof _isHead!=='undefined' && _isHead);
+}
+function loadPriorities(cb){
+  var team = (typeof _userTeam!=='undefined') ? _userTeam : '';
+  var useGAS = typeof google!=='undefined' && google.script && google.script.run;
+  if(!useGAS){ _priorities = _priorities || []; if(cb) cb(); return; }
+  _prioritiesLoading = true;
+  google.script.run
+    .withSuccessHandler(function(resp){ _priorities = (resp && resp.entries) ? resp.entries : []; _prioritiesLoading=false; if(cb) cb(); })
+    .withFailureHandler(function(){ _priorities = _priorities || []; _prioritiesLoading=false; if(cb) cb(); })
+    .getPriorities(team);
+}
+function reloadPriorities(){
+  _priorities = null;
+  loadPriorities(function(){
+    if(typeof initTeamView==='function' && document.getElementById('view-team') && getComputedStyle(document.getElementById('view-team')).display!=='none') initTeamView();
+    if(typeof initPriorityView==='function') initPriorityView();
+  });
+}
+/* shared formatting helpers (used by both views) */
+function nxPriOwnerName(email){
+  if(!email) return '';
+  var s = String(email).split('@')[0].split('.')[0];
+  return s ? s.charAt(0).toUpperCase()+s.slice(1) : email;
+}
+function nxPriToday(){ return new Date().toISOString().slice(0,10); }
+function nxPriDueLabel(iso){
+  if(!iso) return '';
+  var d = new Date(iso+'T00:00:00');
+  if(isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-IE', { month:'short', day:'numeric' });
+}
+function nxPriIsOverdue(iso){ return iso && iso < nxPriToday(); }
+
+/* ════════════════ TEAM VIEW ════════════════ */
+var _tmDraft = null;               // { id, directive, targets:Set, due, owner } while form open
+var _tmTargetFilter = '';
+
+function _tmEsc(s){ return (typeof _ixEsc==='function') ? _ixEsc(s) : String(s==null?'':s).replace(/[&<>"]/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];}); }
+function _tmJs(s){ return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
+function initTeamView(){
+  var host = document.getElementById('view-team');
+  if(!host) return;
+  if(_priorities===null){
+    host.innerHTML = '<div class="tm"><div class="tm-empty" style="margin-top:50px">Loading team priorities…</div></div>';
+    loadPriorities(function(){ initTeamView(); });
+    return;
+  }
+  var team = (typeof _amLandingLabel_==='function') ? _amLandingLabel_() : (typeof _userTeam!=='undefined'?_userTeam:'Team');
+  var canEdit = _canEditPriorities();
+  var open = _priorities.filter(function(p){ return p.status!=='done'; });
+  var done = _priorities.filter(function(p){ return p.status==='done'; });
+
+  var prisHtml = '';
+  if(!_priorities.length){
+    prisHtml = '<div class="tm-empty">No team priorities yet.'+(canEdit?' Add the first one above.':' A manager will set them.')+'</div>';
+  } else {
+    prisHtml = open.map(_tmPriRow).join('') + (done.length ? '<div class="prv-divider">Done</div>'+done.map(_tmPriRow).join('') : '');
+  }
+
+  host.innerHTML = '<div class="tm">'
+    + '<div class="tm-hero"><div><div class="tm-h1">'+_tmEsc(team)+'</div>'
+    +   '<div class="tm-sub">'+open.length+' open '+(open.length===1?'priority':'priorities')+(done.length?' · '+done.length+' done':'')+'</div></div>'
+    +   (canEdit ? '<button class="btn-primary" onclick="tmOpenCreate()"><i data-lucide="plus" style="width:13px;height:13px"></i> New priority</button>' : '')
+    + '</div>'
+    + '<div class="tm-grid">'
+    +   '<div class="card" style="padding:0;overflow:hidden">'
+    +     '<div class="section-label" style="padding:12px 16px 8px;margin:0">Priorities this week</div>'
+    +     '<div id="tmFormSlot"></div>'
+    +     '<div id="tmPriList">'+prisHtml+'</div>'
+    +   '</div>'
+    +   '<div>'
+    +     '<div class="card" style="padding:0;overflow:hidden;margin-bottom:14px"><div class="section-label" style="padding:12px 16px 8px;margin:0">Latest huddle</div><div id="tmHuddleBox"><div class="tm-empty" style="padding:18px">Loading…</div></div></div>'
+    +     '<div class="card" style="padding:0;overflow:hidden"><div class="section-label" style="padding:12px 16px 8px;margin:0">Upcoming holidays</div><div id="tmHolidaysBox"><div class="tm-empty" style="padding:18px">Loading…</div></div></div>'
+    +   '</div>'
+    + '</div>'
+    + '</div>';
+
+  if(_tmDraft) _tmRenderForm();   // re-open form if it was active
+  _tmLoadHuddle();
+  _tmLoadHolidays();
+  if(typeof refreshIcons==='function') refreshIcons();
+}
+
+function _tmPriRow(p){
+  var canEdit = _canEditPriorities();
+  var done = p.status==='done';
+  var chips = (p.targets||[]).map(function(t){ return '<span class="tm-tchip" onclick="event.stopPropagation();tmOpenPartner(\''+_tmJs(t)+'\')">'+_tmEsc(t)+'</span>'; }).join('')
+    || '<span style="font-size:10px;color:var(--ink-4)">no partners</span>';
+  var due = p.due_date ? '<span class="tm-pri-due'+(nxPriIsOverdue(p.due_date)&&!done?' over':'')+'">due '+_tmEsc(nxPriDueLabel(p.due_date))+'</span>' : '';
+  var owner = p.owner ? '<span>'+_tmEsc(nxPriOwnerName(p.owner))+'</span>' : '';
+  var check = '<div class="tm-pri-check'+(done?' on':'')+(canEdit?'':' ro')+'"'+(canEdit?' onclick="tmToggleDone(\''+_tmJs(p.id)+'\','+(done?'false':'true')+')" title="'+(done?'Reopen':'Mark done')+'"':'')+'>'+(done?'<i data-lucide="check" style="width:12px;height:12px"></i>':'')+'</div>';
+  var actions = canEdit
+    ? '<div class="tm-pri-actions"><button class="tm-ibtn" title="Edit" onclick="tmOpenEdit(\''+_tmJs(p.id)+'\')"><i data-lucide="pencil" style="width:12px;height:12px"></i></button>'
+      + '<button class="tm-ibtn" title="Delete" onclick="tmDelete(\''+_tmJs(p.id)+'\')"><i data-lucide="trash-2" style="width:12px;height:12px"></i></button></div>'
+    : '';
+  return '<div class="tm-pri'+(done?' done':'')+'">'+check
+    + '<div class="tm-pri-body"><div class="tm-pri-txt">'+_tmEsc(p.directive)+'</div>'
+    +   '<div class="tm-pri-targets">'+chips+'</div>'
+    +   '<div class="tm-pri-meta">'+due+owner+'</div></div>'
+    + actions
+    + '</div>';
+}
+
+function tmOpenPartner(company){ if(typeof nxOpen==='function') nxOpen(company); }
+
+/* ── create / edit form ── */
+function tmOpenCreate(){
+  if(!_canEditPriorities()) return;
+  _tmDraft = { id:null, directive:'', targets:_tmNewSet(), due:'', owner:(typeof _userEmail!=='undefined'?_userEmail:'') };
+  _tmTargetFilter = '';
+  _tmRenderForm();
+}
+function tmOpenEdit(id){
+  if(!_canEditPriorities()) return;
+  var p = (_priorities||[]).filter(function(x){return x.id===id;})[0]; if(!p) return;
+  var set = _tmNewSet(); (p.targets||[]).forEach(function(t){ set.add(t); });
+  _tmDraft = { id:p.id, directive:p.directive, targets:set, due:p.due_date||'', owner:p.owner||'' };
+  _tmTargetFilter = '';
+  _tmRenderForm();
+}
+function tmCancelForm(){ _tmDraft=null; var slot=document.getElementById('tmFormSlot'); if(slot) slot.innerHTML=''; }
+function _tmNewSet(){ return new Set(); }
+function _tmPartners(){ return ((typeof P!=='undefined'&&P)?P:[]).map(function(x){return x.company;}).filter(Boolean).sort(); }
+
+function _tmRenderForm(){
+  var slot = document.getElementById('tmFormSlot'); if(!slot || !_tmDraft) return;
+  var d = _tmDraft;
+  var partners = _tmPartners();
+  var flt = (_tmTargetFilter||'').toLowerCase();
+  var picks = partners.filter(function(n){ return !flt || n.toLowerCase().indexOf(flt)>-1; }).slice(0,60);
+  var chipHtml = picks.map(function(n){ var on=d.targets.has(n); return '<span class="tm-tpick-chip'+(on?' on':'')+'" onclick="tmToggleTarget(\''+_tmJs(n)+'\')">'+_tmEsc(n)+'</span>'; }).join('');
+  slot.innerHTML = '<div class="tm-form">'
+    + '<div class="tm-frow"><label class="tm-flab">Directive</label>'
+    +   '<input class="tm-finput" id="tmFDirective" placeholder="e.g. Push for X25 promo adherence" value="'+_tmEsc(d.directive)+'" oninput="_tmDraft.directive=this.value"></div>'
+    + '<div class="tm-frow"><label class="tm-flab">Target partners ('+d.targets.size+')</label>'
+    +   '<input class="tm-finput tm-tsearch" placeholder="Filter partners…" value="'+_tmEsc(_tmTargetFilter)+'" oninput="_tmTargetFilter=this.value;_tmRenderPicks()">'
+    +   '<div class="tm-tpick" id="tmTPick">'+chipHtml+'</div></div>'
+    + '<div class="tm-frow tm-frow2">'
+    +   '<div><label class="tm-flab">Due date</label><input type="date" class="tm-finput" value="'+_tmEsc(d.due)+'" oninput="_tmDraft.due=this.value"></div>'
+    +   '<div><label class="tm-flab">Owner</label><input class="tm-finput" placeholder="owner@…" value="'+_tmEsc(nxPriOwnerName(d.owner))+'" oninput="_tmDraft.owner=this.value"></div>'
+    + '</div>'
+    + '<div class="tm-fbtns"><button class="btn-ghost" onclick="tmCancelForm()">Cancel</button>'
+    +   '<button class="btn-primary" onclick="tmSavePriority()">'+(d.id?'Save changes':'Add priority')+'</button></div>'
+    + '</div>';
+  if(typeof refreshIcons==='function') refreshIcons();
+}
+function _tmRenderPicks(){
+  var box = document.getElementById('tmTPick'); if(!box || !_tmDraft) return;
+  var flt = (_tmTargetFilter||'').toLowerCase();
+  var picks = _tmPartners().filter(function(n){ return !flt || n.toLowerCase().indexOf(flt)>-1; }).slice(0,60);
+  box.innerHTML = picks.map(function(n){ var on=_tmDraft.targets.has(n); return '<span class="tm-tpick-chip'+(on?' on':'')+'" onclick="tmToggleTarget(\''+_tmJs(n)+'\')">'+_tmEsc(n)+'</span>'; }).join('');
+}
+function tmToggleTarget(name){
+  if(!_tmDraft) return;
+  if(_tmDraft.targets.has(name)) _tmDraft.targets.delete(name); else _tmDraft.targets.add(name);
+  _tmRenderPicks();
+  var lab = document.querySelector('#tmFormSlot .tm-frow:nth-child(2) .tm-flab');
+  if(lab) lab.textContent = 'Target partners ('+_tmDraft.targets.size+')';
+}
+function tmSavePriority(){
+  if(!_tmDraft) return;
+  var d = _tmDraft;
+  var directive = String(d.directive||'').trim();
+  if(!directive){ if(typeof showToast==='function') showToast('Directive text required','error'); return; }
+  var payload = { directive:directive, targets:Array.from(d.targets), due_date:d.due||'', owner:d.owner||'' };
+  var team = (typeof _userTeam!=='undefined')?_userTeam:'';
+  var useGAS = typeof google!=='undefined' && google.script && google.script.run;
+  var onOk = function(resp){
+    if(resp && resp.success===false){ if(typeof showToast==='function') showToast(resp.error||'Failed','error'); return; }
+    if(typeof showToast==='function') showToast(d.id?'Priority updated':'Priority added','success');
+    _tmDraft=null; reloadPriorities();
+  };
+  var onErr = function(err){ if(typeof showToast==='function') showToast('Failed: '+((err&&err.message)||''),'error'); };
+  if(!useGAS){ onOk({success:true}); return; }
+  if(d.id) google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).editPriority(team, d.id, payload);
+  else     google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).addPriority(team, payload);
+}
+function tmToggleDone(id, done){
+  if(!_canEditPriorities()) return;
+  var team = (typeof _userTeam!=='undefined')?_userTeam:'';
+  var useGAS = typeof google!=='undefined' && google.script && google.script.run;
+  var onOk = function(resp){ if(resp&&resp.success===false){ if(typeof showToast==='function') showToast(resp.error||'Failed','error'); return; } reloadPriorities(); };
+  var onErr = function(err){ if(typeof showToast==='function') showToast('Failed: '+((err&&err.message)||''),'error'); };
+  if(!useGAS){ onOk({success:true}); return; }
+  google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).setPriorityStatus(team, id, done?'done':'open');
+}
+function tmDelete(id){
+  if(!_canEditPriorities()) return;
+  if(typeof confirm==='function' && !confirm('Delete this priority?')) return;
+  var team = (typeof _userTeam!=='undefined')?_userTeam:'';
+  var useGAS = typeof google!=='undefined' && google.script && google.script.run;
+  var onOk = function(resp){ if(resp&&resp.success===false){ if(typeof showToast==='function') showToast(resp.error||'Failed','error'); return; } if(typeof showToast==='function') showToast('Priority deleted','success'); reloadPriorities(); };
+  var onErr = function(err){ if(typeof showToast==='function') showToast('Failed: '+((err&&err.message)||''),'error'); };
+  if(!useGAS){ onOk({success:true}); return; }
+  google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).deletePriority(team, id);
+}
+
+/* ── latest huddle summary ── */
+function _tmLoadHuddle(){
+  var box = document.getElementById('tmHuddleBox'); if(!box) return;
+  var team = (typeof _userTeam!=='undefined')?_userTeam:'';
+  var useGAS = typeof google!=='undefined' && google.script && google.script.run;
+  var render = function(resp){
+    var entries = (resp && resp.entries) ? resp.entries : [];
+    if(!entries.length){ box.innerHTML = '<div class="tm-empty" style="padding:18px">No huddles logged yet.</div>'; return; }
+    var h = entries[0];
+    var pNotes = h.partner_notes || (h.partnerNotes) || [];
+    var pCount = Array.isArray(pNotes) ? pNotes.length : 0;
+    box.innerHTML = '<div class="tm-sum">'
+      + '<div class="tm-sum-row"><b style="font-weight:700;color:var(--ink)">'+_tmEsc(h.title||'Huddle')+'</b><span class="l">'+_tmEsc(h.week_start||'')+'</span></div>'
+      + (pCount?'<div class="tm-sum-row">'+pCount+' partner '+(pCount===1?'note':'notes')+'</div>':'')
+      + (h.general_notes?'<div class="tm-sum-row" style="color:var(--ink-3)">'+_tmEsc(String(h.general_notes).slice(0,120))+(String(h.general_notes).length>120?'…':'')+'</div>':'')
+      + '</div><div class="tm-deep" onclick="switchView(\'huddle\')">Open Huddles →</div>';
+  };
+  if(!useGAS){ render({entries:[]}); return; }
+  google.script.run.withSuccessHandler(render).withFailureHandler(function(){ box.innerHTML='<div class="tm-empty" style="padding:18px">Couldn\'t load huddles.</div>'; }).getHuddleLog(team, 4);
+}
+
+/* ── upcoming holidays summary ── */
+function _tmLoadHolidays(){
+  var box = document.getElementById('tmHolidaysBox'); if(!box) return;
+  var team = (typeof _userTeam!=='undefined')?_userTeam:'';
+  var useGAS = typeof google!=='undefined' && google.script && google.script.run;
+  var render = function(resp){
+    var entries = (resp && resp.entries) ? resp.entries : [];
+    var horizon = new Date(); horizon.setDate(horizon.getDate()+21);
+    var hIso = horizon.toISOString().slice(0,10);
+    var soon = entries.filter(function(e){ return e.start_date && e.start_date <= hIso; }).slice(0,5);
+    if(!soon.length){ box.innerHTML = '<div class="tm-empty" style="padding:18px">Nothing in the next 3 weeks.</div><div class="tm-deep" onclick="switchView(\'holidays\')">Open Holidays →</div>'; return; }
+    box.innerHTML = '<div class="tm-sum">'
+      + soon.map(function(e){
+          var who = e.type==='Public Holiday' ? 'Team — public holiday' : (e.member||'Off');
+          var when = nxPriDueLabel(e.start_date) + (e.end_date&&e.end_date!==e.start_date ? '–'+nxPriDueLabel(e.end_date) : '');
+          return '<div class="tm-sum-row"><span>'+_tmEsc(who)+'</span><span class="l">'+_tmEsc(when)+'</span></div>';
+        }).join('')
+      + '</div><div class="tm-deep" onclick="switchView(\'holidays\')">Open Holidays →</div>';
+  };
+  if(!useGAS){ render({entries:[]}); return; }
+  google.script.run.withSuccessHandler(render).withFailureHandler(function(){ box.innerHTML='<div class="tm-empty" style="padding:18px">Couldn\'t load holidays.</div>'; }).getHolidays(team);
+}
+</script>

@@ -89,7 +89,7 @@ function rcListTopbarHtml_() {
 }
 
 function rcRenderList_() {
-  document.getElementById('rcTopbar').innerHTML = rcListTopbarHtml_();
+  document.getElementById('rcTopbar').innerHTML = (typeof outreachTabsHtml==='function'?outreachTabsHtml('replies'):'') + rcListTopbarHtml_();
   var body = document.getElementById('rcBody');
   body.innerHTML = '<div id="rcListShell" style="padding:18px 24px">'
     + '<div class="section-card" style="padding:0;overflow:hidden">'
@@ -250,7 +250,7 @@ function rcSetStateFilter(s) {
 }
 
 function rcRenderDetail_() {
-  document.getElementById('rcTopbar').innerHTML = rcDetailTopbarHtml_();
+  document.getElementById('rcTopbar').innerHTML = (typeof outreachTabsHtml==='function'?outreachTabsHtml('replies'):'') + rcDetailTopbarHtml_();
   var body = document.getElementById('rcBody');
   body.innerHTML = '<div id="rcDetailBody" style="padding:14px 18px"></div>';
   rcRenderDetailBody_();

@@ -27,8 +27,21 @@ function initCampaignsView() {
   refreshIcons();
 }
 
+// Shared Outreach-results tab bar (Sent campaigns | Replies) — used by both the
+// merged campaigns view and the reply center, which are one surface under Outreach.
+function outreachTabsHtml(active) {
+  return '<div style="display:flex;align-items:center;gap:12px;padding:9px 14px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0">'
+    + '<div class="seg">'
+    +   '<button class="seg-opt' + (active === 'sent' ? ' active' : '') + '" onclick="switchView(\'campaigns\')">Sent</button>'
+    +   '<button class="seg-opt' + (active === 'replies' ? ' active' : '') + '" onclick="switchView(\'replies\')">Replies</button>'
+    + '</div>'
+    + '<span style="font-size:11px;color:var(--ink-3)">' + (active === 'sent' ? 'Every campaign you\'ve sent' : 'Campaigns with replies to action') + '</span>'
+    + '</div>';
+}
+
 function campShellHtml_() {
   return ''
+    + outreachTabsHtml('sent')
     + '<div class="filter-bar" style="justify-content:space-between;padding:10px 14px">'
       + '<div style="display:flex;align-items:center;gap:10px">'
         + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Window</span>'
@@ -67,7 +80,7 @@ function campShellHtml_() {
         + '</div>'
       + '</div>'
     + '</div>'
-    + '<div id="campDetailOverlay" onclick="closeCampDetail()" style="display:none;position:fixed;inset:0;background:rgba(13,13,12,0.45);backdrop-filter:blur(6px);z-index:85"></div>'
+    + '<div id="campDetailOverlay" onclick="closeCampDetail()" style="display:none;position:fixed;inset:0;background:rgba(13,13,12,0.45);z-index:85"></div>'
     + '<div id="campDetailDrawer" style="display:none;position:fixed;top:0;right:0;width:min(760px,92vw);height:100vh;background:var(--surface);border-left:1px solid var(--border);box-shadow:-20px 0 60px -10px rgba(13,13,12,0.25);z-index:86;flex-direction:column"></div>';
 }
 
@@ -149,6 +162,7 @@ function renderCampaignsTable() {
   });
 
   document.getElementById('campCount').textContent = list.length + ' of ' + campState.list.length + ' campaign' + (campState.list.length === 1 ? '' : 's');
+  if (typeof nxMarkSortCaret === 'function') nxMarkSortCaret('#view-campaigns .nx-table', campState.sortCol, campState.sortAsc);
 
   if (!list.length) {
     document.getElementById('campTableBody').innerHTML = '<tr><td colspan="9" style="padding:48px;text-align:center;color:var(--ink-4);font-size:12px">' + (campState.filterQuery ? 'No campaigns match your search.' : 'No campaigns in this window yet. Start your first from <b>Outreach</b>.') + '</td></tr>';

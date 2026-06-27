@@ -32,6 +32,19 @@ function sortPartners(col) {
   filterPartners();
 }
 
+/* Directional sort caret: toggles .is-sorted/.sort-asc/.sort-desc on the static
+   header th whose onclick targets the active column. Additive — no sort logic touched. */
+function nxMarkSortCaret(scopeSel, col, asc) {
+  var scope = document.querySelector(scopeSel);
+  if (!scope) return;
+  scope.querySelectorAll('th[onclick]').forEach(function(th) {
+    th.classList.remove('is-sorted', 'sort-asc', 'sort-desc');
+    if (col && th.getAttribute('onclick').indexOf("'" + col + "'") > -1) {
+      th.classList.add('is-sorted', asc ? 'sort-asc' : 'sort-desc');
+    }
+  });
+}
+
 function filterPartners() {
   var q = document.getElementById('globalSearch').value.toLowerCase();
   var fM = document.getElementById('flt-model').value;
@@ -52,6 +65,7 @@ function filterPartners() {
     });
   }
   renderPartnersTable(filtered);
+  nxMarkSortCaret('#view-partners .nx-table', partnersSortCol, partnersSortAsc);
 }
 
 /* ═══════════════════════════════════════
@@ -119,8 +133,8 @@ function renderPartnersTable(rows) {
     var emailIn = d.lastReceived && d.lastReceived !== '-' ? d.lastReceived : '—';
     var emailOut = d.lastSent && d.lastSent !== '-' ? d.lastSent : '—';
     return '<tr class="' + (overdue ? 'overdue' : '') + '" onclick="openDeal(' + d.row + ')">'
-      + '<td style="color:var(--ink-4);font-weight:700;text-align:center;font-variant-numeric:tabular-nums">' + rank + '</td>'
-      + '<td style="font-weight:500;color:var(--ink)">' + esc(d.company) + '<div style="font-size:10px;color:var(--ink-4);margin-top:2px">' + esc(d.country || '') + '</div></td>'
+      + '<td class="rank">' + rank + '</td>'
+      + '<td><span class="cell-name">' + esc(d.company) + '</span><div class="cell-sub">' + esc(d.country || '') + '</div></td>'
       + '<td style="font-size:11px;color:var(--ink-2);white-space:nowrap">' + esc(d.account_manager || '—') + '</td>'
       + '<td><span class="pill ' + stageClass(d.stage) + '">' + esc(d.stage) + '</span></td>'
       + '<td><span style="font-size:10px;font-weight:700;letter-spacing:0.06em;color:var(--ink-3)">' + esc(d.model || '3P') + '</span></td>'
