@@ -10,6 +10,10 @@ var adminTab = 'pending';
 var adminAccounts = [];
 var adminLogsExpanded = false;
 var adminSendsExpanded = false;
+// V3.16.2 — Send Log scope. Default 'team' = the SELECTED team only (each team's
+// DB is its own source of truth; switch the picker to see each one). Admin/Head
+// can flip to 'all' for a combined, team-tagged view across every team.
+var adminSendsAllTeams = false;
 
 function initAdminView() {
   if (!_isManager) {
@@ -173,6 +177,11 @@ function expandAdminLogs() { loadAdminLogs(true); }
 /* ── Send Log (V3.0 schema — 14 cols, null-safe status) ─────────────────── */
 function loadAdminSends(loadAll) {
   var limit = loadAll ? 10000 : 100;
+  // V3.16.2 — show the team/all-teams toggle to Admin/Head; label the active source.
+  var _scopeT = document.getElementById('sendsScopeToggle');
+  if (_scopeT) _scopeT.style.display = (_userRole === 'Admin' || _isHead === true) ? 'flex' : 'none';
+  var _scopeL = document.getElementById('sendsScopeLabel');
+  if (_scopeL) _scopeL.textContent = (adminSendsAllTeams && (_userRole === 'Admin' || _isHead === true)) ? 'All teams' : (_userTeam || 'current team');
   var expandBtn = document.getElementById('adminSendsExpandBtn');
   if (loadAll && expandBtn) {
     expandBtn.innerHTML = '<i data-lucide="loader-2" class="spin" style="width:12px;height:12px"></i> Loading all sends…';
@@ -182,23 +191,27 @@ function loadAdminSends(loadAll) {
   var runner = google.script.run
     .withSuccessHandler(function(sends) {
       if (!sends || !sends.length) {
-        if (_userRole === 'Admin' || _isHead === true) {
-          // Admin/Head read the aggregated log across every team — empty only
-          // when no team has any sends.
+        if (adminSendsAllTeams) {
+          // Aggregated log across every team — empty only when no team has sends.
           document.getElementById('adminSendBody').innerHTML =
             '<tr><td colspan="9" style="padding:20px;text-align:center;font-size:11px;color:var(--ink-4)">'
             + 'No send records across any team yet.</td></tr>';
         } else {
-          // Self-diagnosing empty state: show WHICH team + DB sheet was queried, so a
-          // wrong Teams→DB mapping is obvious vs a genuinely empty Send Log tab.
+          // Honest self-diagnosing empty state. The client-side Teams→DB guess is
+          // only a hint; fire a live server diagnostic so the message reflects what
+          // the SERVER actually resolved and saw (distinguishes a stale deployed
+          // library / wrong DB mapping from a genuinely empty Send Log tab).
           var _t = (typeof _userTeams !== 'undefined' && _userTeams) ? _userTeams.find(function(x){ return x.name === _userTeam; }) : null;
           var _db = (_t && _t.dbSheetId) ? _t.dbSheetId : '(unknown)';
           document.getElementById('adminSendBody').innerHTML =
-            '<tr><td colspan="9" style="padding:20px;text-align:center;font-size:11px;color:var(--ink-4)">'
-            + 'No send records for <b>' + esc(_userTeam || '?') + '</b>.'
-            + '<br><span style="font-size:10px">Queried DB <code>' + esc(_db) + '</code> → "Send Log" tab. '
-            + 'If that isn\'t the ' + esc(_userTeam || '') + ' sheet you expect, the Teams tab maps this team to the wrong DB sheet.</span>'
+            '<tr><td colspan="9" style="padding:20px;text-align:left;font-size:11px;color:var(--ink-4)">'
+            + '<div style="text-align:center;margin-bottom:8px">No send records for <b>' + esc(_userTeam || '?') + '</b>.'
+            + ' <button class="btn-ghost" style="padding:2px 10px;font-size:10px;margin-left:6px" onclick="runSendDiagnostic(false)"><i data-lucide="stethoscope" style="width:11px;height:11px;vertical-align:-1px"></i> Run full diagnostic</button></div>'
+            + '<div style="font-size:10px">Client maps this team to DB <code>' + esc(_db) + '</code> (a hint, not proof).</div>'
+            + '<div id="adminSendDiagCell" style="font-size:10px;margin-top:4px"><i data-lucide="loader-2" class="spin" style="width:11px;height:11px;vertical-align:-1px"></i> Checking what the server actually sees…</div>'
             + '</td></tr>';
+          refreshIcons();
+          runSendDiagnostic(true, _userTeam);
         }
         if (expandBtn) expandBtn.style.display = 'none';
         return;
@@ -248,14 +261,150 @@ function loadAdminSends(loadAll) {
     .withFailureHandler(function(e) {
       document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="9" style="padding:24px;text-align:center;font-size:11px;color:#be123c">Failed to load: ' + esc(e.message || e) + '</td></tr>';
     });
-  // V3.16 — Admin/Head get the GLOBAL Send Log (aggregated across all teams,
-  // tagged by team) so a single team's empty tab no longer shows "0". Managers
-  // get their selected team's log (per-team, as before).
-  if (_userRole === 'Admin' || _isHead === true) runner.getRecentSendsAllTeams(limit);
+  // V3.16.2 — DEFAULT = the SELECTED team's own log (each team's DB is its source
+  // of truth; switch the team picker to see each one). Admin/Head may flip to the
+  // aggregated "All teams" view. Managers always see their selected team.
+  if (adminSendsAllTeams && (_userRole === 'Admin' || _isHead === true)) runner.getRecentSendsAllTeams(limit);
   else runner.getRecentSends(limit, _userTeam);
 }
 
+// V3.16.2 — toggle between the selected team's log and the all-teams aggregate.
+function setAdminSendsScope(all) {
+  adminSendsAllTeams = !!all;
+  adminSendsExpanded = false;
+  var t = document.getElementById('sendsScopeTeam'), a = document.getElementById('sendsScopeAll');
+  if (t) t.classList.toggle('active', !adminSendsAllTeams);
+  if (a) a.classList.toggle('active', adminSendsAllTeams);
+  loadAdminSends();
+}
+
 function expandAdminSends() { loadAdminSends(true); }
+
+/* ── Pipeline diagnostic (V3.16.3 — self-service §4-D) ────────────────────────
+   The admin Send Log can read empty even when a team's DB has 1000+ rows. In
+   the sim the lib code is PROVEN correct for the real 15-col sheet, so a live
+   empty result means a DEPLOY/ENV fault (stale deployed library, or the server
+   resolving the team to the wrong/empty DB). `diagnosePipeline()` returns the
+   SERVER's ground truth (resolved dbId, Send Log tab found?, lastRow,
+   in-execution recentCount, proxy config) per team. Surfacing it in-app means
+   the root cause is confirmable from the deployed web app — no Apps Script
+   editor needed — and the empty state shows what the SERVER saw, not a client
+   guess. If `diagnosePipeline` itself 404s via the web app, that IS the answer:
+   the deployed library predates it → stale build → re-deploy. */
+function runSendDiagnostic(auto, team) {
+  var panel = document.getElementById('sendsDiagPanel');
+  if (panel && !auto) {
+    panel.style.display = 'block';
+    panel.innerHTML = '<div style="padding:14px;font-size:11px;color:var(--ink-4)"><i data-lucide="loader-2" class="spin" style="width:13px;height:13px;vertical-align:-2px"></i> Running live pipeline diagnostic…</div>';
+    refreshIcons();
+  }
+  google.script.run
+    .withSuccessHandler(function(d) {
+      if (!auto) renderSendDiagnostic(d);
+      if (auto && team) renderEmptyStateServerTruth(d, team);
+    })
+    .withFailureHandler(function(e) {
+      var msg = String((e && e.message) || e || '');
+      // A "not a function" failure for diagnosePipeline = the DEPLOYED library is
+      // older than this build → the definitive stale-build signature.
+      var stale = /is not a function|not a server function|diagnosePipeline/i.test(msg);
+      var staleHtml = 'The deployed library is likely <b>STALE</b> (this build predates <code>diagnosePipeline</code>). Re-save every NEXUS_LIB file, then deploy a NEW web-app version to re-bind it.';
+      if (!auto && panel) {
+        panel.style.display = 'block';
+        panel.innerHTML = '<div style="padding:12px 14px;border:1px solid #fecaca;background:#fff1f2;border-radius:8px;font-size:11px;color:#be123c"><b>Live diagnostic unavailable.</b> ' + (stale ? staleHtml : esc(msg)) + '</div>';
+      }
+      if (auto && team) {
+        var cell = document.getElementById('adminSendDiagCell');
+        if (cell) cell.innerHTML = stale ? ('<span style="color:#be123c">⚠ ' + staleHtml + '</span>') : ('Diagnostic error: ' + esc(msg));
+      }
+    })
+    .diagnosePipeline();
+}
+
+// esc() coerces falsy values to '' (so esc(0) === ''); numeric diagnostic fields
+// must still render "0", which is the whole point of a count. Use this for them.
+function _diagNum(n) { return esc(String(n == null ? '—' : n)); }
+
+function renderSendDiagnostic(d) {
+  var panel = document.getElementById('sendsDiagPanel');
+  if (!panel) return;
+  panel.style.display = 'block';
+  if (!d) { panel.innerHTML = '<div style="padding:12px;font-size:11px;color:#be123c">Diagnostic returned no data.</div>'; return; }
+  window.__lastSendDiag = d;
+  var headerJoined = (d.teamsHeader || []).join(',');
+  var flags = '<div style="font-size:10px;color:var(--ink-3);margin-bottom:8px;line-height:1.7">'
+    + 'Running as <code>' + esc(d.effectiveUser || '?') + '</code>'
+    + ' · active <code>' + esc(d.activeUser || '?') + '</code>'
+    + ' · proxy secret ' + (d.secretSet ? '<b style="color:#15803d">set</b>' : '<b style="color:#be123c">NOT set</b>')
+    + ' · Teams columns: <b>' + _diagNum(d.teamsCols) + '</b>'
+    + (/proxyurl/i.test(headerJoined) ? '' : ' <b style="color:#b45309">(no proxyUrl column — direct send / proxy may misroute)</b>')
+    + (d.teamsErr ? ' · <span style="color:#be123c">Teams read error: ' + esc(d.teamsErr) + '</span>' : '')
+    + (d.resolverErr ? ' · <span style="color:#be123c">resolver error: ' + esc(d.resolverErr) + '</span>' : '')
+    + '</div>';
+  var rows = (d.teams || []).map(function(t) {
+    var emptyButHasRows = (t.lastRow > 1) && (t.recentCount === 0);
+    var noTab = !t.sendLogTab;
+    var warn = emptyButHasRows || noTab || t.err;
+    return '<tr style="' + (warn ? 'background:#fff1f2' : '') + '">'
+      + '<td style="font-weight:600;font-size:11px">' + esc(t.team) + '</td>'
+      + '<td style="font-size:10px;font-family:monospace;color:var(--ink-3);word-break:break-all">' + esc(t.dbId || '(none)') + '</td>'
+      + '<td style="text-align:center">' + (t.sendLogTab ? '<span style="color:#15803d">✓</span>' : '<b style="color:#be123c">✗</b>') + '</td>'
+      + '<td style="text-align:right;font-size:11px">' + _diagNum(t.lastRow) + '</td>'
+      + '<td style="text-align:right;font-size:11px' + (emptyButHasRows ? ';color:#be123c;font-weight:700' : '') + '">' + _diagNum(t.recentCount) + '</td>'
+      + '<td style="font-size:10px;color:var(--ink-4);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(t.proxyUrl || '') + '">' + esc(t.proxyUrl || '(none)') + '</td>'
+      + '<td style="font-size:10px;color:#be123c">' + esc(t.err || '') + '</td>'
+      + '</tr>';
+  }).join('');
+  panel.innerHTML = '<div class="section-card" style="padding:14px">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+    + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-4)">Pipeline diagnostic — server truth</span>'
+    + '<button class="btn-ghost" style="margin-left:auto;padding:3px 10px;font-size:10px" onclick="copySendDiagnostic()"><i data-lucide="copy" style="width:11px;height:11px"></i> Copy JSON</button>'
+    + '<button class="btn-ghost" style="padding:3px 10px;font-size:10px" onclick="document.getElementById(\'sendsDiagPanel\').style.display=\'none\'">Hide</button>'
+    + '</div>'
+    + flags
+    + '<table class="nx-table"><thead><tr><th>Team</th><th>Resolved DB</th><th style="text-align:center">Send Log</th><th style="text-align:right">lastRow</th><th style="text-align:right">recentCount</th><th>proxyUrl</th><th>error</th></tr></thead><tbody>'
+    + (rows || '<tr><td colspan="7" style="padding:14px;text-align:center;color:var(--ink-4)">No teams resolved.</td></tr>') + '</tbody></table>'
+    + '<div style="font-size:10px;color:var(--ink-4);margin-top:8px">A team with <b>lastRow &gt; 1</b> but <b>recentCount 0</b> (shaded) = the server opened the sheet and saw rows, but the read returned nothing → the deployed library read path is <b>stale</b>; deploy a new web-app version. A wrong <b>Resolved DB</b> = the Teams tab maps the team to the wrong sheet (§4-B).</div>'
+    + '</div>';
+  refreshIcons();
+}
+
+function copySendDiagnostic() {
+  var d = window.__lastSendDiag;
+  if (!d) return;
+  var txt = JSON.stringify(d, null, 2);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(
+      function() { showToast('Diagnostic JSON copied', 'success'); },
+      function() { showToast('Copy failed — select & copy manually', 'error'); });
+  } else { showToast('Clipboard unavailable in this browser', 'error'); }
+}
+
+// Fill the per-team empty state with what the SERVER actually resolved/saw.
+function renderEmptyStateServerTruth(d, team) {
+  var cell = document.getElementById('adminSendDiagCell');
+  if (!cell || !d) return;
+  var t = (d.teams || []).filter(function(x) { return x.team === team; })[0];
+  if (!t) { cell.innerHTML = 'Server has <b>no Teams entry</b> for <b>' + esc(team) + '</b> — check the Teams tab name/spelling.'; return; }
+  // Order matters: a real in-execution read ERROR (t.err, set when getRecentSends
+  // THROWS inside diagnosePipeline after lastRow was read) ALSO presents as
+  // lastRow>1 & recentCount 0 — so check it FIRST, otherwise an authz/getRange/
+  // malformed-row failure gets mislabeled "STALE — redeploy" and sends the admin
+  // down the wrong path. STALE is only the genuine signature when there's NO error.
+  var verdict = t.err
+    ? '<span style="color:#be123c;font-weight:600">Server read ERROR for this team: ' + esc(t.err) + ' — investigate this error (not necessarily a stale deploy).</span>'
+    : (t.lastRow > 1 && t.recentCount === 0)
+      ? '<span style="color:#be123c;font-weight:600">Server SEES ' + _diagNum(t.lastRow - 1) + ' rows in this sheet but the read returned 0 — the deployed library read path is STALE. Deploy a new web-app version, then refresh.</span>'
+      : (!t.sendLogTab
+        ? '<span style="color:#be123c;font-weight:600">Server found NO "Send Log" tab in the resolved DB.</span>'
+        : (t.lastRow <= 1
+          ? 'Server confirms this DB\'s "Send Log" tab is genuinely empty (lastRow ' + _diagNum(t.lastRow) + ').'
+          : 'Server read <b>' + _diagNum(t.recentCount) + '</b> rows — click Refresh to display them.'));
+  cell.innerHTML = 'Server resolved DB <code>' + esc(t.dbId || '(none)') + '</code>'
+    + ' · Send Log tab ' + (t.sendLogTab ? 'found' : '<b style="color:#be123c">NOT found</b>')
+    + ' · lastRow <b>' + _diagNum(t.lastRow) + '</b> · recentCount <b>' + _diagNum(t.recentCount) + '</b>'
+    + ' · running as <code>' + esc(d.effectiveUser || '?') + '</code><br>' + verdict;
+}
 
 /* ── Accounts ───────────────────────────────────────────────────────────── */
 function loadAdminAccounts() {
@@ -393,7 +542,16 @@ function adminRebuildSpine() {
 
     <!-- SEND LOG TAB (V3.16 — 9 cols: Team, Timestamp, Partner, Email, Campaign, Template, Status, Replied, Sent By. Admin/Head = aggregated across all teams) -->
     <div id="admin-sends" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
-      <div style="margin-bottom:12px"><button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminSendsExpanded=false;loadAdminSends()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button></div>
+      <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px">
+        <div id="sendsScopeToggle" style="display:none;gap:4px">
+          <button class="drawer-tab active" id="sendsScopeTeam" onclick="setAdminSendsScope(false)" style="padding:5px 12px">This team</button>
+          <button class="drawer-tab" id="sendsScopeAll" onclick="setAdminSendsScope(true)" style="padding:5px 12px">All teams</button>
+        </div>
+        <span style="font-size:10px;color:var(--ink-4)">Source: <b id="sendsScopeLabel"></b></span>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px;margin-left:auto" onclick="runSendDiagnostic(false)" title="Run a live server-side pipeline diagnostic (resolved DB, Send Log tab, row counts per team)"><i data-lucide="stethoscope" style="width:12px;height:12px"></i> Diagnostic</button>
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminSendsExpanded=false;loadAdminSends()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>
+      </div>
+      <div id="sendsDiagPanel" style="display:none;margin-bottom:12px"></div>
       <div class="section-card" style="padding:0;overflow:hidden">
         <table class="nx-table"><thead><tr><th>Team</th><th>Timestamp</th><th>Partner</th><th>Email</th><th>Campaign</th><th>Template</th><th>Status</th><th style="text-align:center">Replied</th><th>Sent By</th></tr></thead>
         <tbody id="adminSendBody"><tr><td colspan="9" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Click tab to load…</td></tr></tbody></table>
