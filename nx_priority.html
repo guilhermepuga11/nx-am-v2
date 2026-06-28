@@ -293,15 +293,17 @@ function nxApplyDeepLink_(d){
   if(!d) return;
   var view = String(d.view||'').toLowerCase().trim();
   var team = String(d.team||'').trim();
+  // V3.17 — apply TEAM first, THEN view. Previously a ?view= short-circuited and
+  // returned before ?team= was honoured, so ?team=Daniel&view=cockpit landed on
+  // the CURRENT team's data (Admin saw the wrong team).
+  if(team && team !== (typeof _userTeam!=='undefined'?_userTeam:'')){
+    var okT = ((typeof _userTeams!=='undefined' && _userTeams)?_userTeams:[]).some(function(t){return t.name===team;});
+    if(okT){ handleTeamSwitch(team); } else { nxNoPermission('Team “'+team+'”'); return; }
+  }
   if(view){
     if(view==='head'){ _prvCanHead() ? switchView('head') : nxNoPermission('the Head view'); }
     else if(view==='admin'){ _prvCanAdmin() ? switchView('admin') : nxNoPermission('Admin'); }
     else { try{ switchView(view); }catch(e){ console.error('deep-link view',e); } }
-    return;
-  }
-  if(team && team !== (typeof _userTeam!=='undefined'?_userTeam:'')){
-    var ok = ((typeof _userTeams!=='undefined' && _userTeams)?_userTeams:[]).some(function(t){return t.name===team;});
-    ok ? handleTeamSwitch(team) : nxNoPermission('Team “'+team+'”');
   }
 }
 </script>

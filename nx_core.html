@@ -967,13 +967,14 @@ function buildUnifiedSchedule() {
   unifiedSchedule = [];      
   calEvents.forEach(function(e) {      
     if (!e.start) return;      
-    var d = new Date(e.start);      
+    var d = new Date(e.start); if (isNaN(d.getTime())) return;   // V3.17 — skip invalid dates      
     unifiedSchedule.push({ title: e.title, desc: e.desc, date: d, isGCal: e.isGCal !== false, isInternal: !!e.isInternal, time: e.isAllDay ? 'All Day' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) });      
   });      
   P.forEach(function(d) {      
-    if (d.actionDate && d.stage !== 'Inactive') {      
-      unifiedSchedule.push({ title: d.company + ' — ' + d.nextAction, desc: d.notes, date: new Date(d.actionDate), isGCal: false, isInternal: false, time: 'CRM Action' });      
-    }      
+    if (d.actionDate && d.stage !== 'Inactive') {
+      var _ad = new Date(d.actionDate);   // V3.17 — skip invalid CRM action dates
+      if (!isNaN(_ad.getTime())) unifiedSchedule.push({ title: d.company + ' — ' + d.nextAction, desc: d.notes, date: _ad, isGCal: false, isInternal: false, time: 'CRM Action' });
+    }
   });      
 }
 

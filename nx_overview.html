@@ -457,14 +457,14 @@ function buildOvEmailFeed() {
     try { le = typeof p.latestEmail === 'string' ? JSON.parse(p.latestEmail) : p.latestEmail; } catch(ex) {}  
     if (le) {  
       if (le.sent && le.sent.length) {  
-        le.sent.forEach(function(s) {  
-          var ts = s.timestamp ? new Date(s.timestamp).toISOString() : (s.date || '');  
+        le.sent.forEach(function(s) {
+          var ts = ''; if (s.timestamp) { var _ds = new Date(s.timestamp); ts = isNaN(_ds.getTime()) ? (s.date || '') : _ds.toISOString(); } else { ts = (s.date || ''); }
           feed.push({ dir: 'out', partner: p.company, row: p.row, subject: s.subject || '(No Subject)', snippet: s.snippet || '', date: ts, email: '' });  
         });  
       }  
       if (le.received && le.received.length) {  
-        le.received.forEach(function(r) {  
-          var ts = r.timestamp ? new Date(r.timestamp).toISOString() : (r.date || '');  
+        le.received.forEach(function(r) {
+          var ts = ''; if (r.timestamp) { var _dr = new Date(r.timestamp); ts = isNaN(_dr.getTime()) ? (r.date || '') : _dr.toISOString(); } else { ts = (r.date || ''); }
           feed.push({ dir: 'in', partner: p.company, row: p.row, subject: r.subject || 'Email received', snippet: r.snippet || '', date: ts, email: '' });  
         });  
       }  

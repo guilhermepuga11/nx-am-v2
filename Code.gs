@@ -11,11 +11,6 @@ var HUB = 'AM';
 
 // ── Web App ─────────────────────────────────────────────────────────────────
 function doGet(e) {
-  // TEMP probe (am2 detection validation). Safe + additive: only fires when the
-  // URL carries ?whoami=1. Remove once detection is confirmed.
-  if (e && e.parameter && e.parameter.whoami) {
-    return ContentService.createTextOutput(ScriptApp.getService().getUrl());
-  }
   // Deep-link: ?team=<name> and/or ?view=<head|admin|…> boots NEXUS into that
   // team/view. The client applies it after load, gated by the same permissions
   // (a forbidden link shows the no-permission card / the user's own team).
@@ -81,27 +76,22 @@ var SNAPSHOT_TEAM_AM = 'Carlos';  // legacy default for the un-suffixed wrappers
 function initSnapshotAM_Carlos() { return NX.initSnapshotFile(HUB, 'Carlos'); }
 function initSnapshotAM_Daniel() { return NX.initSnapshotFile(HUB, 'Daniel'); }
 function initSnapshotAM_Tanya()  { return NX.initSnapshotFile(HUB, 'Tanya');  }
-function initSnapshotAM_Meghan() { return NX.initSnapshotFile(HUB, 'Meghan'); }
 
 // Per-team generate — these are the trigger handlers
 function generateSnapshotAM_Carlos() { return NX.generateSnapshot(HUB, 'Carlos'); }
 function generateSnapshotAM_Daniel() { return NX.generateSnapshot(HUB, 'Daniel'); }
 function generateSnapshotAM_Tanya()  { return NX.generateSnapshot(HUB, 'Tanya');  }
-function generateSnapshotAM_Meghan() { return NX.generateSnapshot(HUB, 'Meghan'); }
 
 // Per-team read paths — bound to a specific team (mirrors V3.1 Carlos wrapper)
 function getSnapshotAM_Carlos()    { return NX.getSnapshot(HUB, 'Carlos'); }
 function getSnapshotAM_Daniel()    { return NX.getSnapshot(HUB, 'Daniel'); }
 function getSnapshotAM_Tanya()     { return NX.getSnapshot(HUB, 'Tanya');  }
-function getSnapshotAM_Meghan()    { return NX.getSnapshot(HUB, 'Meghan'); }
 function getSnapshotRawAM_Carlos() { return NX.getSnapshotRaw(HUB, 'Carlos'); }
 function getSnapshotRawAM_Daniel() { return NX.getSnapshotRaw(HUB, 'Daniel'); }
 function getSnapshotRawAM_Tanya()  { return NX.getSnapshotRaw(HUB, 'Tanya');  }
-function getSnapshotRawAM_Meghan() { return NX.getSnapshotRaw(HUB, 'Meghan'); }
 function getSnapshotMetaAM_Carlos(){ return NX.getSnapshotMeta(HUB, 'Carlos'); }
 function getSnapshotMetaAM_Daniel(){ return NX.getSnapshotMeta(HUB, 'Daniel'); }
 function getSnapshotMetaAM_Tanya() { return NX.getSnapshotMeta(HUB, 'Tanya');  }
-function getSnapshotMetaAM_Meghan(){ return NX.getSnapshotMeta(HUB, 'Meghan'); }
 
 // V3.8 — The frontend snapshot client (nx_snapshot_client) calls
 // getSnapshotRawAM with a team argument, so we expose a team-aware router too.
@@ -120,7 +110,6 @@ function getSnapshotMetaAM(team) {
 function resyncSnapshotSharingAM_Carlos() { return NX.resyncSnapshotSharing(HUB, 'Carlos'); }
 function resyncSnapshotSharingAM_Daniel() { return NX.resyncSnapshotSharing(HUB, 'Daniel'); }
 function resyncSnapshotSharingAM_Tanya()  { return NX.resyncSnapshotSharing(HUB, 'Tanya');  }
-function resyncSnapshotSharingAM_Meghan() { return NX.resyncSnapshotSharing(HUB, 'Meghan'); }
 
 // LEGACY un-suffixed wrappers — all resolve to Carlos (original V3.1 default).
 // Kept for back-compat; the frontend now calls the team-aware router above.
@@ -141,21 +130,18 @@ function resyncSnapshotSharingAM()  { return NX.resyncSnapshotSharing(HUB, SNAPS
 function installSnapshotTriggerAM_Carlos(m) { return _installTeamTrigger_('generateSnapshotAM_Carlos', m); }
 function installSnapshotTriggerAM_Daniel(m) { return _installTeamTrigger_('generateSnapshotAM_Daniel', m); }
 function installSnapshotTriggerAM_Tanya(m)  { return _installTeamTrigger_('generateSnapshotAM_Tanya',  m); }
-function installSnapshotTriggerAM_Meghan(m) { return _installTeamTrigger_('generateSnapshotAM_Meghan', m); }
 
 function installAllSnapshotTriggersAM(m) {
   return {
     Carlos: installSnapshotTriggerAM_Carlos(m),
     Daniel: installSnapshotTriggerAM_Daniel(m),
     Tanya:  installSnapshotTriggerAM_Tanya(m),
-    Meghan: installSnapshotTriggerAM_Meghan(m)
   };
 }
 
 function removeSnapshotTriggersAM_Carlos() { return _removeTeamTrigger_('generateSnapshotAM_Carlos'); }
 function removeSnapshotTriggersAM_Daniel() { return _removeTeamTrigger_('generateSnapshotAM_Daniel'); }
 function removeSnapshotTriggersAM_Tanya()  { return _removeTeamTrigger_('generateSnapshotAM_Tanya');  }
-function removeSnapshotTriggersAM_Meghan() { return _removeTeamTrigger_('generateSnapshotAM_Meghan'); }
 
 // V3.1 legacy — removes the un-suffixed Carlos trigger if ever installed
 function installSnapshotTriggerAM(m) { return _installTeamTrigger_('generateSnapshotAM', m); }
@@ -220,15 +206,6 @@ function getCampaignsList(days, team)             { return NX.getCampaignsList(H
 function getCampaignDetail(campaignId, team)      { return NX.getCampaignDetail(HUB, campaignId, team); }
 function scanRepliesForCampaign(campaignId, team) { return NX.scanRepliesForCampaign(HUB, campaignId, team); }
 
-// ── Legacy Campaign (back-compat, not used by new UI) ───────────────────────
-function previewCampaign(sheetUrl, draftId, campaignName) {
-  return NX.previewCampaign(HUB, sheetUrl, draftId, campaignName);
-}
-function sendCampaignFull(sheetUrl, draftId, campaignName) {
-  return NX.sendCampaignFull(HUB, sheetUrl, draftId, campaignName);
-}
-function getExternalSheetData(url)  { return NX.getExternalSheetData(HUB, url); }
-
 // ── Contacts ────────────────────────────────────────────────────────────────
 function getContacts(merchant, team)   { return NX.getContacts(HUB, merchant, team); }
 function getAllContacts(team)           { return NX.getAllContacts(HUB, team); }
@@ -254,9 +231,9 @@ function replyToThread(tid, html, name, team) { return NX.replyToThread(HUB, tid
 function getGmailSignature()            { return NX.getGmailSignature(HUB); }
 
 // ── Notes ───────────────────────────────────────────────────────────────────
-function savePartnerNote(partner, text)      { return NX.savePartnerNote(HUB, partner, text); }
-function getPartnerNotes(partner)            { return NX.getPartnerNotes(HUB, partner); }
-function deletePartnerNote(partner, isoTs)   { return NX.deletePartnerNote(HUB, partner, isoTs); }
+function savePartnerNote(partner, text, team)   { return NX.savePartnerNote(HUB, partner, text, team); }
+function getPartnerNotes(partner, team)         { return NX.getPartnerNotes(HUB, partner, team); }
+function deletePartnerNote(partner, isoTs, team){ return NX.deletePartnerNote(HUB, partner, isoTs, team); }
 
 // ── Logging & Admin ─────────────────────────────────────────────────────────
 function clearNexusCache()                   { return NX.clearNexusCache(HUB); }
@@ -273,7 +250,6 @@ function buildAccountsSpineForTeam(team) { return NX.buildAccountsSpineForTeam(H
 function rebuildSpine_Carlos()  { return NX.buildAccountsSpineForTeam(HUB, 'Carlos'); }
 function rebuildSpine_Daniel()  { return NX.buildAccountsSpineForTeam(HUB, 'Daniel'); }
 function rebuildSpine_Tanya()  { return NX.buildAccountsSpineForTeam(HUB, 'Tanya'); }
-function rebuildSpine_Meghan()  { return NX.buildAccountsSpineForTeam(HUB, 'Meghan'); }
 
 // ── V3.12 — Language migration: CRM Data → Accounts (store-level) ──────────
 // One-shot bootstrap per team. Creates the 'Language' column on the team's
@@ -284,7 +260,6 @@ function rebuildSpine_Meghan()  { return NX.buildAccountsSpineForTeam(HUB, 'Megh
 function migrateLang_Carlos() { return NX.migrateLanguageFromCrmToAccounts(HUB, 'Carlos'); }
 function migrateLang_Daniel() { return NX.migrateLanguageFromCrmToAccounts(HUB, 'Daniel'); }
 function migrateLang_Tanya()  { return NX.migrateLanguageFromCrmToAccounts(HUB, 'Tanya');  }
-function migrateLang_Meghan() { return NX.migrateLanguageFromCrmToAccounts(HUB, 'Meghan'); }
 
 // ── CRM Email Pool (V3.6.1) — manual rebuild runners ──────────────────────
 // Use these when running from the script editor or as a scheduled trigger.
@@ -294,7 +269,6 @@ function migrateLang_Meghan() { return NX.migrateLanguageFromCrmToAccounts(HUB, 
 function rebuildPool_Carlos() { return NX.rebuildCRMEmailPool(HUB, 'Carlos'); }
 function rebuildPool_Daniel() { return NX.rebuildCRMEmailPool(HUB, 'Daniel'); }
 function rebuildPool_Tanya()  { return NX.rebuildCRMEmailPool(HUB, 'Tanya'); }
-function rebuildPool_Meghan() { return NX.rebuildCRMEmailPool(HUB, 'Meghan'); }
 
 // ── AM_Emails tab (V3.8) — manual initializers, one-shot per team ──────────
 // Creates an AM_Emails tab in the team's DB sheet with a 2-col header row
@@ -305,7 +279,6 @@ function rebuildPool_Meghan() { return NX.rebuildCRMEmailPool(HUB, 'Meghan'); }
 function initAmEmails_Carlos() { return NX.initAmEmailsTab(HUB, 'Carlos'); }
 function initAmEmails_Daniel() { return NX.initAmEmailsTab(HUB, 'Daniel'); }
 function initAmEmails_Tanya()  { return NX.initAmEmailsTab(HUB, 'Tanya');  }
-function initAmEmails_Meghan() { return NX.initAmEmailsTab(HUB, 'Meghan'); }
 
 // ── Bid-Ask (V3.8 — DRAFT sub-view under Cockpit) ─────────────────────────
 function getBidAskData(team) { return NX.getBidAskData(HUB, team); }
@@ -507,11 +480,4 @@ function _builtinTemplatesPayload_() {
   });
 
   return T;
-}
-
-function probe() {
-  var d = NX.getUnifiedPartnerData('AM', 'Carlos');
-  var p = d.partners.find(function(x) { return x.cy_ytd > 0; });
-  Logger.log('account_manager field: ' + JSON.stringify(p.account_manager));
-  Logger.log('company: ' + p.company);
 }

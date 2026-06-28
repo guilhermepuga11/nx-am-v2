@@ -143,7 +143,7 @@ function openDrawer(deal) {
         if (entries.length) ovNotes.innerHTML = entries.map(renderSnapshotEntry_).join('');
       };
       google.script.run.withSuccessHandler(function(notes) { pending.notes = notes || []; commit(); })
-        .withFailureHandler(function() { pending.notes = []; commit(); }).getPartnerNotes(deal.company);
+        .withFailureHandler(function() { pending.notes = []; commit(); }).getPartnerNotes(deal.company, _userTeam);
       google.script.run.withSuccessHandler(function(hd) { pending.huddles = hd || []; commit(); _drawerRenderHuddleBadge_(hd); })
         .withFailureHandler(function() { pending.huddles = []; _drawerRenderHuddleBadge_([]); }).getHuddleLogForPartner(_userTeam, deal.company, 10);
     }
@@ -1041,7 +1041,7 @@ function renderTimelineList() {
     el.innerHTML = entries.map(renderTlEntry_).join('');
   };
   google.script.run.withSuccessHandler(function(notes) { pending.notes = notes || []; commit(); })
-    .withFailureHandler(function() { pending.notes = []; commit(); }).getPartnerNotes(deal.company);
+    .withFailureHandler(function() { pending.notes = []; commit(); }).getPartnerNotes(deal.company, _userTeam);
   google.script.run.withSuccessHandler(function(hd) { pending.huddles = hd || []; commit(); })
     .withFailureHandler(function() { pending.huddles = []; commit(); }).getHuddleLogForPartner(_userTeam, deal.company, 30);
 }
@@ -1096,7 +1096,7 @@ function addTimelineNote() {
       _rollbackPendingNote_(company, tempId, text, inp);
       showToast('Error: ' + ((err && err.message) || err || 'Unknown'), 'error');
     })
-    .savePartnerNote(company, text);
+    .savePartnerNote(company, text, _userTeam);
 }
 var addNote = addTimelineNote;
 
