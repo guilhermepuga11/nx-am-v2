@@ -182,7 +182,16 @@ function loadAdminSends(loadAll) {
   google.script.run
     .withSuccessHandler(function(sends) {
       if (!sends || !sends.length) {
-        document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">No send records.</td></tr>';
+        // Self-diagnosing empty state: show WHICH team + DB sheet was queried, so a
+        // wrong Teams→DB mapping is obvious vs a genuinely empty Send Log tab.
+        var _t = (typeof _userTeams !== 'undefined' && _userTeams) ? _userTeams.find(function(x){ return x.name === _userTeam; }) : null;
+        var _db = (_t && _t.dbSheetId) ? _t.dbSheetId : '(unknown)';
+        document.getElementById('adminSendBody').innerHTML =
+          '<tr><td colspan="8" style="padding:20px;text-align:center;font-size:11px;color:var(--ink-4)">'
+          + 'No send records for <b>' + esc(_userTeam || '?') + '</b>.'
+          + '<br><span style="font-size:10px">Queried DB <code>' + esc(_db) + '</code> → "Send Log" tab. '
+          + 'If that isn\'t the ' + esc(_userTeam || '') + ' sheet you expect, the Teams tab maps this team to the wrong DB sheet.</span>'
+          + '</td></tr>';
         if (expandBtn) expandBtn.style.display = 'none';
         return;
       }
