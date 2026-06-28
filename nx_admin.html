@@ -179,19 +179,27 @@ function loadAdminSends(loadAll) {
     expandBtn.disabled = true;
     refreshIcons();
   }
-  google.script.run
+  var runner = google.script.run
     .withSuccessHandler(function(sends) {
       if (!sends || !sends.length) {
-        // Self-diagnosing empty state: show WHICH team + DB sheet was queried, so a
-        // wrong Teams→DB mapping is obvious vs a genuinely empty Send Log tab.
-        var _t = (typeof _userTeams !== 'undefined' && _userTeams) ? _userTeams.find(function(x){ return x.name === _userTeam; }) : null;
-        var _db = (_t && _t.dbSheetId) ? _t.dbSheetId : '(unknown)';
-        document.getElementById('adminSendBody').innerHTML =
-          '<tr><td colspan="8" style="padding:20px;text-align:center;font-size:11px;color:var(--ink-4)">'
-          + 'No send records for <b>' + esc(_userTeam || '?') + '</b>.'
-          + '<br><span style="font-size:10px">Queried DB <code>' + esc(_db) + '</code> → "Send Log" tab. '
-          + 'If that isn\'t the ' + esc(_userTeam || '') + ' sheet you expect, the Teams tab maps this team to the wrong DB sheet.</span>'
-          + '</td></tr>';
+        if (_userRole === 'Admin' || _isHead === true) {
+          // Admin/Head read the aggregated log across every team — empty only
+          // when no team has any sends.
+          document.getElementById('adminSendBody').innerHTML =
+            '<tr><td colspan="9" style="padding:20px;text-align:center;font-size:11px;color:var(--ink-4)">'
+            + 'No send records across any team yet.</td></tr>';
+        } else {
+          // Self-diagnosing empty state: show WHICH team + DB sheet was queried, so a
+          // wrong Teams→DB mapping is obvious vs a genuinely empty Send Log tab.
+          var _t = (typeof _userTeams !== 'undefined' && _userTeams) ? _userTeams.find(function(x){ return x.name === _userTeam; }) : null;
+          var _db = (_t && _t.dbSheetId) ? _t.dbSheetId : '(unknown)';
+          document.getElementById('adminSendBody').innerHTML =
+            '<tr><td colspan="9" style="padding:20px;text-align:center;font-size:11px;color:var(--ink-4)">'
+            + 'No send records for <b>' + esc(_userTeam || '?') + '</b>.'
+            + '<br><span style="font-size:10px">Queried DB <code>' + esc(_db) + '</code> → "Send Log" tab. '
+            + 'If that isn\'t the ' + esc(_userTeam || '') + ' sheet you expect, the Teams tab maps this team to the wrong DB sheet.</span>'
+            + '</td></tr>';
+        }
         if (expandBtn) expandBtn.style.display = 'none';
         return;
       }
@@ -211,6 +219,7 @@ function loadAdminSends(loadAll) {
           ? '<span style="color:#15803d;background:#f0fdf4;border:1px solid #bbf7d0;padding:1px 7px;border-radius:99px;font-size:9px;font-weight:700">Yes</span>'
           : '<span style="color:var(--ink-4);font-size:10px">—</span>';
         return '<tr>'
+          + '<td style="font-size:10px;color:var(--ink-4)">' + esc(s.team || _userTeam || '') + '</td>'
           + '<td style="font-size:11px;color:var(--ink-3);white-space:nowrap">' + esc(ts) + '</td>'
           + '<td style="font-weight:500">' + esc(s.store) + '</td>'
           + '<td style="font-size:11px;color:var(--ink-3)">' + esc(s.email) + '</td>'
@@ -237,9 +246,13 @@ function loadAdminSends(loadAll) {
       }
     })
     .withFailureHandler(function(e) {
-      document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:#be123c">Failed to load: ' + esc(e.message || e) + '</td></tr>';
-    })
-    .getRecentSends(limit, _userTeam);
+      document.getElementById('adminSendBody').innerHTML = '<tr><td colspan="9" style="padding:24px;text-align:center;font-size:11px;color:#be123c">Failed to load: ' + esc(e.message || e) + '</td></tr>';
+    });
+  // V3.16 — Admin/Head get the GLOBAL Send Log (aggregated across all teams,
+  // tagged by team) so a single team's empty tab no longer shows "0". Managers
+  // get their selected team's log (per-team, as before).
+  if (_userRole === 'Admin' || _isHead === true) runner.getRecentSendsAllTeams(limit);
+  else runner.getRecentSends(limit, _userTeam);
 }
 
 function expandAdminSends() { loadAdminSends(true); }
@@ -378,12 +391,12 @@ function adminRebuildSpine() {
       </div>
     </div>
 
-    <!-- SEND LOG TAB (V3.0 — 8 cols: Timestamp, Partner, Email, Campaign, Template, Status, Replied, Sent By) -->
+    <!-- SEND LOG TAB (V3.16 — 9 cols: Team, Timestamp, Partner, Email, Campaign, Template, Status, Replied, Sent By. Admin/Head = aggregated across all teams) -->
     <div id="admin-sends" style="display:none;flex:1;overflow:auto;padding:0 24px 16px">
       <div style="margin-bottom:12px"><button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="adminSendsExpanded=false;loadAdminSends()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button></div>
       <div class="section-card" style="padding:0;overflow:hidden">
-        <table class="nx-table"><thead><tr><th>Timestamp</th><th>Partner</th><th>Email</th><th>Campaign</th><th>Template</th><th>Status</th><th style="text-align:center">Replied</th><th>Sent By</th></tr></thead>
-        <tbody id="adminSendBody"><tr><td colspan="8" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Click tab to load…</td></tr></tbody></table>
+        <table class="nx-table"><thead><tr><th>Team</th><th>Timestamp</th><th>Partner</th><th>Email</th><th>Campaign</th><th>Template</th><th>Status</th><th style="text-align:center">Replied</th><th>Sent By</th></tr></thead>
+        <tbody id="adminSendBody"><tr><td colspan="9" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Click tab to load…</td></tr></tbody></table>
       </div>
       <div style="text-align:center;padding:12px 0">
         <button class="btn-ghost" id="adminSendsExpandBtn" onclick="expandAdminSends()" style="padding:6px 16px;font-size:11px;display:none;align-items:center;gap:6px;margin:0 auto"><i data-lucide="chevrons-down" style="width:12px;height:12px"></i> Load all entries</button>

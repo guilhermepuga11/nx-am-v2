@@ -265,6 +265,8 @@ function clearAllLogs(team)                  { return NX.clearAllLogs(HUB, team)
 function getRecentLogs(n, status, team)      { return NX.getRecentLogs(HUB, n, status, team); }
 function getLogSummary(days, team)           { return NX.getLogSummary(HUB, days, team); }
 function getRecentSends(n, team)             { return NX.getRecentSends(HUB, n, team); }
+function getRecentSendsAllTeams(n)           { return NX.getRecentSendsAllTeams(HUB, n); }   // V3.16 — admin/head global Send Log
+function diagnosePipeline()                  { return NX.diagnosePipeline(HUB); }            // V3.16 — one-shot live diagnostic
 
 // ── Accounts Spine ──────────────────────────────────────────────────────────
 function buildAccountsSpineForTeam(team) { return NX.buildAccountsSpineForTeam(HUB, team); }
