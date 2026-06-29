@@ -617,7 +617,30 @@ var BA = (function () {
   function onData(d){
     state.loading=false; state.raw=d||{headers:[],rows:[],empty:true};
     state.lastFetchTeam=(typeof _userTeam!=='undefined')?_userTeam:'';
-    state.rows=mapRows(state.raw);
+    
+    var allRows = mapRows(state.raw);
+    
+    // Normalize the team name to lowercase and remove spaces for a safe match
+    var teamKey = String(state.lastFetchTeam).trim().toLowerCase();
+    var targetARM = null;
+    
+    if (teamKey.indexOf('dan') > -1) {
+      targetARM = 'Daniel Mendes Pereira';
+    } else if (teamKey.indexOf('tan') > -1) {
+      targetARM = 'Tanya Santos';
+    } else if (teamKey.indexOf('carlos') > -1) {
+      targetARM = 'Carlos Araújo';
+    }
+    
+    // Filter rows, ensuring we trim any accidental spaces from BigQuery's output
+    if (targetARM) {
+      state.rows = allRows.filter(function(r) { 
+        return String(r.arm).trim() === targetARM; 
+      });
+    } else {
+      state.rows = allRows; // Fallback
+    }
+
     if(!state.rows.length){ renderEmpty(state.raw); return; }
     populateFilters(); buildWeightsUI(); applyFilters();
   }
