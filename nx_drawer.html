@@ -121,35 +121,17 @@ function openDrawer(deal) {
   document.getElementById('saveStatus').style.display = 'none';
   currentTags = deal.tags ? deal.tags.split(',').map(function(t) { return t.trim(); }).filter(Boolean) : [];
   renderTags(); updateRibbon(); parseEmailCtx(deal.latestEmail || '{}');
-  // Notes & Timeline: render immediately from email+calendar data, then async-add notes
-  var ovNotes = document.getElementById('drawerRecentNotes');
-  if (ovNotes) {
-    // Instant render with what we already have (no GAS call needed)
-    var quickEntries = buildTimelineEntries_(deal, [], []).slice(0, 5);
-    if (quickEntries.length) {
-      ovNotes.innerHTML = quickEntries.map(renderSnapshotEntry_).join('');
-    } else {
-      ovNotes.innerHTML = '<span style="color:var(--ink-4);font-size:11px;font-style:italic">No activity yet</span>';
-    }
-    // Then async-load notes AND huddle log in parallel, merge results.
-    // V3.9 — huddle entries blend into the same timeline as notes.
-    var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
-    if (useGAS && deal.company) {
-      var pending = { notes: null, huddles: null };
-      var commit = function() {
-        if (pending.notes === null || pending.huddles === null) return;  // still waiting
-        if (!ovNotes || !currentDeal || currentDeal.company !== deal.company) return;
-        var entries = buildTimelineEntries_(deal, pending.notes || [], pending.huddles || []).slice(0, 5);
-        if (entries.length) ovNotes.innerHTML = entries.map(renderSnapshotEntry_).join('');
-      };
-      google.script.run.withSuccessHandler(function(notes) { pending.notes = notes || []; commit(); })
-        .withFailureHandler(function() { pending.notes = []; commit(); }).getPartnerNotes(deal.company, _userTeam);
-      google.script.run.withSuccessHandler(function(hd) { pending.huddles = hd || []; commit(); _drawerRenderHuddleBadge_(hd); })
-        .withFailureHandler(function() { pending.huddles = []; _drawerRenderHuddleBadge_([]); }).getHuddleLogForPartner(_userTeam, deal.company, 10);
-    }
+  // V3.19 — The Snapshot right panel now shows the editable Notes field (#editNotes,
+  // populated above) instead of a read-only timeline preview; the full chronological
+  // activity feed (notes + emails + huddles + events) lives in the dedicated Timeline
+  // tab, so the old #drawerRecentNotes duplicate was removed. We still fetch the huddle
+  // log here purely to drive the header "N huddle mentions" badge.
+  _drawerRenderHuddleBadge_(null);   // hidden until the async fetch returns
+  var useGAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (useGAS && deal.company) {
+    google.script.run.withSuccessHandler(function(hd) { _drawerRenderHuddleBadge_(hd || []); })
+      .withFailureHandler(function() { _drawerRenderHuddleBadge_([]); }).getHuddleLogForPartner(_userTeam, deal.company, 10);
   }
-  // V3.9 — Reset huddle badge to loading state until async fetch returns.
-  _drawerRenderHuddleBadge_(null);
   renderOvFeed(); switchDrawerTab('snapshot');
   document.getElementById('detailOverlay').style.display = 'block';
   document.getElementById('detailDrawer').classList.add('open');
@@ -1334,7 +1316,13 @@ function openCorrComposeWith_(subject, body) {
     else if (pOpt && !pOpt.disabled) dd.value = 'personal';
     else if (sOpt && !sOpt.disabled) dd.value = 'shared';
   }
-} 
+  // V3.19 — actually SHOW the modal. Without this the compose/reply modal stayed
+  // display:none (the .modal-overlay base style), so the Correspondence "Reply"
+  // button silently did nothing. (The drawer's old "New Mail" button — same dead
+  // path — has been removed; "Email" covers composing a fresh mail.)
+  var modal = document.getElementById('composeModal');
+  if (modal) modal.style.display = 'flex';
+}
 
 function closeComposeModal() { document.getElementById('composeModal').style.display = 'none'; }
 

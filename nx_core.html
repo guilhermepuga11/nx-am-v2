@@ -1075,6 +1075,7 @@ function refreshIcons() { clearTimeout(_iconTimer); _iconTimer = setTimeout(func
    VIEW SWITCHING      
 ═══════════════════════════════════════ */      
 function switchView(v) {      
+  if (v === 'overview') v = 'priority';   // V3.18 — Overview removed; folded into the Priority landing
   // 'team' is now a REAL composite view (priorities + huddle/holiday summaries).
   // Decision: keep the accordion AND add the view — clicking Team expands the
   // Huddles/Calendar/Holidays subs AND opens view-team (fall through below).

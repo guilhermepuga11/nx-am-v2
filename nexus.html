@@ -67,7 +67,7 @@
     </div>
     <div class="nav-section-label">Menu</div>
     <div class="nav-item active" id="nav-priority" onclick="switchView('priority')"><i data-lucide="target" style="width:14px;height:14px;flex-shrink:0"></i> <span id="navPriorityLabel">Priority</span></div>
-    <div class="nav-item nav-sub" id="nav-overview" onclick="switchView('overview')"><i data-lucide="layout-dashboard" style="width:12px;height:12px;flex-shrink:0"></i> Overview</div>
+    <!-- Overview removed (V3.18) — folded into the Priority landing -->
     <div class="nav-item" id="nav-cockpit" onclick="switchView('cockpit')"><i data-lucide="bar-chart-2" style="width:14px;height:14px;flex-shrink:0"></i> Cockpit</div>
     <div class="nav-item nav-sub" id="nav-bidask" onclick="switchView('bidask')" style="display:none">
       <i data-lucide="line-chart" style="width:12px;height:12px;flex-shrink:0"></i> Bid-Ask
@@ -165,8 +165,8 @@
     <!-- ══ PRIORITY LANDING ("AM - {team}", parent of Overview — nx_priority.html) ══ -->
     <div id="view-priority" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0"></div>
 
-    <!-- ══ OVERVIEW VIEW ══ -->
-    <div id="view-overview" class="content" style="display:block">
+    <!-- ══ OVERVIEW VIEW — removed (V3.18), folded into the Priority landing; kept hidden/dead ══ -->
+    <div id="view-overview" class="content" style="display:none">
       <!-- Greeting -->
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <div>
@@ -577,7 +577,6 @@
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:6px">
-        <button class="btn-ghost drawer-new-email-btn" onclick="openCorrCompose()"><i data-lucide="pen-square" style="width:13px;height:13px"></i> New Mail</button>
         <button class="btn-ghost" onclick="openLogCallModal(currentDeal)"><i data-lucide="phone" style="width:13px;height:13px"></i> Log Call</button>
         <button class="btn-ghost" onclick="openCreateEventModal(null,currentDeal?currentDeal.row:null)"><i data-lucide="calendar-plus" style="width:13px;height:13px"></i> Event</button>
         <button class="btn-ghost" onclick="emailThisPartner(currentDeal)"><i data-lucide="mail" style="width:13px;height:13px"></i> Email</button>
@@ -629,10 +628,9 @@
               <div><label class="nx-field-label">Action Date</label><input type="date" class="nx-field-input" id="editDate" onchange="updateRibbon()" style="padding:6px 8px;font-size:11.5px"></div>
               <div><label class="nx-field-label">Model</label><div class="nx-field-input" id="editModel" style="background:var(--bg);cursor:default;color:var(--ink-2);font-weight:600;padding:6px 8px;font-size:11.5px">—</div></div>
           </div>
-          <textarea id="editNotes" rows="5" class="nx-field-input" style="display:none"></textarea>
           <div style="flex:1;min-height:0;display:flex;flex-direction:column">
-            <div class="module-label" style="margin-bottom:6px">Notes & Timeline</div>
-            <div id="drawerRecentNotes" style="flex:1;overflow-y:auto;font-size:12px;color:var(--ink-2);line-height:1.5;min-height:60px"><span style="color:var(--ink-4);font-size:10px">Loading…</span></div>
+            <div class="module-label" style="margin-bottom:6px">Notes</div>
+            <textarea id="editNotes" class="nx-field-input" placeholder="Partner notes — saved with this record" style="flex:1;min-height:90px;resize:none;font-size:12px;line-height:1.5"></textarea>
           </div>
         </div>
       </div>
