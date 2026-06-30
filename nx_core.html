@@ -316,6 +316,10 @@ window.onload = function() {
         // Admin page: v1 = managers+admin; v2 = admin + head + manager.
         var showAdmin = _isManager || (_isV2 && _isHead);
         if (showAdmin) { var n = document.getElementById('nav-admin'); if (n) n.style.display = 'flex'; }
+        // V3.21 — Outreach Automation is ADMIN-ONLY (stricter than the admin
+        // panel, which also admits Managers/Heads). The server re-checks via
+        // assertAdmin_ on every rule write/run — this is only the cosmetic nav.
+        if (_userRole === 'Admin') { var oa = document.getElementById('nav-outreachauto'); if (oa) oa.style.display = 'flex'; }
         // Test send stays a manager/admin tool (Head is view-only).
         if (_isManager) { var tb = document.getElementById('btnTestSend'); if (tb) tb.style.display = 'inline-flex'; }
         // Head nav: v1 = managers+admin (unchanged); v2 = admin + head only.
@@ -523,6 +527,12 @@ function handleTeamSwitch(newTeam) {
     var _av = document.getElementById('view-admin');
     if (_av && _av.style.display !== 'none' && typeof initAdminView === 'function') initAdminView();
   } catch (e) { console.error('NEXUS admin refresh on team switch:', e); }
+  // V3.21 — same for the Automation panel: rules are per-team, so re-load on switch.
+  try {
+    if (typeof outreachAutoLoaded !== 'undefined') outreachAutoLoaded = false;
+    var _oav = document.getElementById('view-outreachauto');
+    if (_oav && _oav.style.display !== 'none' && typeof initOutreachAutoView === 'function') initOutreachAutoView();
+  } catch (e) { console.error('NEXUS automation refresh on team switch:', e); }
 
   // Re-fetch mail config for the new team so sharedEmail / From label update.
   google.script.run
@@ -1082,9 +1092,9 @@ function switchView(v) {
     setTeamGroupVisible_(true);
   }
 
-  var views = ['priority', 'overview', 'cockpit', 'bidask', 'partners', 'calendar', 'email', 'campaigns', 'replies', 'contacts', 'admin', 'huddle', 'holidays', 'head', 'team'];
+  var views = ['priority', 'overview', 'cockpit', 'bidask', 'partners', 'calendar', 'email', 'campaigns', 'replies', 'contacts', 'admin', 'outreachauto', 'huddle', 'holidays', 'head', 'team'];
   views.forEach(function(id) { var el = document.getElementById('view-' + id); if (el) el.style.display = 'none'; });
-  var flexViews = ['priority', 'partners', 'email', 'campaigns', 'replies', 'contacts', 'admin', 'huddle', 'holidays', 'head', 'bidask', 'team'];
+  var flexViews = ['priority', 'partners', 'email', 'campaigns', 'replies', 'contacts', 'admin', 'outreachauto', 'huddle', 'holidays', 'head', 'bidask', 'team'];
   var el = document.getElementById('view-' + v);      
   if (el) el.style.display = flexViews.indexOf(v) > -1 ? 'flex' : 'block';      
   document.querySelectorAll('.nav-item').forEach(function(n) { n.classList.remove('active'); });      
@@ -1106,7 +1116,7 @@ function switchView(v) {
   // V3.8 — Reply Center sibling of Campaigns under Outreach
   var campNav = document.getElementById('nav-campaigns'); if (campNav) campNav.style.display = (v === 'email' || v === 'campaigns' || v === 'replies') ? 'flex' : 'none';
   // (Reply Center is now the "Replies" tab inside the Campaigns view — no nav-replies item.)
-  var titles = { priority: 'Priority', overview: 'Overview', cockpit: 'Cockpit', bidask: 'Bid-Ask', partners: 'Partners', calendar: 'Calendar', email: 'Outreach', campaigns: 'Campaigns', replies: 'Campaigns', contacts: 'Contacts', admin: 'Admin', huddle: 'Huddles', holidays: 'Holidays', head: 'Head', team: 'Team' };
+  var titles = { priority: 'Priority', overview: 'Overview', cockpit: 'Cockpit', bidask: 'Bid-Ask', partners: 'Partners', calendar: 'Calendar', email: 'Outreach', campaigns: 'Campaigns', replies: 'Campaigns', contacts: 'Contacts', admin: 'Admin', outreachauto: 'Automation', huddle: 'Huddles', holidays: 'Holidays', head: 'Head', team: 'Team' };
   var titleEl = document.getElementById('pageTitle');
   titleEl.textContent = (v === 'priority') ? _amLandingLabel_() : (titles[v] || v);
   var ckToggle = document.getElementById('ckTabToggle'); if (ckToggle) ckToggle.style.display = v === 'cockpit' ? 'flex' : 'none';    
@@ -1121,7 +1131,8 @@ function switchView(v) {
   if (v === 'campaigns') initCampaignsView();      
   if (v === 'replies') initReplyCenterView();
   if (v === 'contacts') loadAllContacts();      
-  if (v === 'admin') initAdminView();      
+  if (v === 'admin') initAdminView();
+  if (v === 'outreachauto') { try { initOutreachAutoView(); } catch(e) { console.error('NEXUS initOutreachAutoView:', e); } }
   if (v === 'huddle') initHuddleView();
   if (v === 'holidays') initHolidaysView();
   if (v === 'head') initHeadView();

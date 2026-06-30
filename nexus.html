@@ -107,6 +107,10 @@
       <i data-lucide="shield" style="width:14px;height:14px;flex-shrink:0"></i> Admin
       <span id="pendingBadge" class="nav-badge nav-badge--count" style="display:none;margin-left:auto">0</span>
     </div>
+    <div class="nav-item" id="nav-outreachauto" onclick="switchView('outreachauto')" style="display:none">
+      <i data-lucide="calendar-clock" style="width:14px;height:14px;flex-shrink:0"></i> Automation
+      <span class="nav-badge nav-badge--role" style="margin-left:auto">ADMIN</span>
+    </div>
     <div class="sidebar-footer">
       <!-- V3.1 Snapshot freshness pill (hidden until NX_SNAPSHOT.boot runs) -->
       <div id="snapshotPill" class="snapshot-pill" data-state="unknown" onclick="snapshotManualRefresh()" style="display:none" title="Click to refresh snapshot">
@@ -543,22 +547,9 @@
 
 
     <?!= include('nx_admin') ?>
+    <?!= include('nx_outreach_auto') ?>
   </div>
 </div>
-
-
-<!-- ══ DRAWER ══ --> and </div> after
-     the compose modal (lines ~2340–2475 in current file).
-     Also replace the Log Call modal (line ~2481).
-     Also add new CSS rules to nx_styles (after existing drawer CSS).
-     ═══════════════════════════════════════════════════════════════════════ -->
-
-
-
-
-<!-- ══════════════════════════════════════════════════════════════════════
-     SECTION 1: REPLACE DRAWER HTML (replaces lines 2340–2475)
-     ══════════════════════════════════════════════════════════════════════ -->
 
 
 <!-- ══ DRAWER ══ -->

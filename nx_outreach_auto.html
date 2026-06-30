@@ -1,0 +1,456 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   OUTREACH AUTOMATION — admin-only scheduled outreach (V3.21)
+
+   Create a RULE: send a built-in (multi-language) template to a partner SEGMENT
+   on a day-of-month, optionally recurring monthly. The daily clock trigger fires
+   it server-side. Everything here is gated to _userRole === 'Admin'; the library
+   re-checks (assertAdmin_) on every write/run, so this is only the UI.
+
+   FAIL-CLOSED by design — surfaced to the admin:
+     • Preview (dry-run) shows exactly who would receive it, who's blocked + why,
+       and any reason the whole run would abort. Sends nothing.
+     • A rule sends nothing if the template/segment/transport isn't fully OK, if
+       it would exceed the recipient cap, or if too many partners can't resolve.
+     • A partner already sent this month is never re-sent (idempotent).
+═══════════════════════════════════════════════════════════════════════════ */
+
+var outreachAutoLoaded = false;
+var oaRules = [];
+var oaTemplates = {};          // { key: { display_name, languages:{…} } }
+var oaEditingId = null;        // null = creating; else editing this rule id
+var oaExpandedId = null;       // rule id whose detail (preview/history) panel is open
+
+function initOutreachAutoView() {
+  var gate = document.getElementById('outreachGate');
+  var content = document.getElementById('outreachContent');
+  if (_userRole !== 'Admin') {
+    if (gate) gate.style.display = 'flex';
+    if (content) content.style.display = 'none';
+    return;
+  }
+  if (gate) gate.style.display = 'none';
+  if (content) content.style.display = 'flex';
+  var teamLabel = document.getElementById('oaTeamLabel');
+  if (teamLabel) teamLabel.textContent = _userTeam || '—';
+
+  // Load templates once (for the dropdown), then the rules.
+  if (!outreachAutoLoaded) {
+    oaLoadTemplates(function () { oaLoadRules(); });
+    outreachAutoLoaded = true;
+  } else {
+    oaLoadRules();
+  }
+}
+
+function oaLoadTemplates(then) {
+  google.script.run
+    .withSuccessHandler(function (reg) {
+      oaTemplates = (reg && reg.templates) || {};
+      if (typeof then === 'function') then();
+    })
+    .withFailureHandler(function () { oaTemplates = {}; if (typeof then === 'function') then(); })
+    .getTemplatesAll();
+}
+
+function oaLoadRules() {
+  var body = document.getElementById('oaRulesBody');
+  if (body) body.innerHTML = '<tr><td colspan="7" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr>';
+  google.script.run
+    .withSuccessHandler(function (res) {
+      oaRules = (res && res.entries) || [];
+      oaRenderRules();
+    })
+    .withFailureHandler(function (e) {
+      if (body) body.innerHTML = '<tr><td colspan="7" style="padding:24px;text-align:center;font-size:11px;color:#be123c">Failed to load: ' + esc(e.message || e) + '</td></tr>';
+    })
+    .getRules(_userTeam);
+}
+
+/* ── Rule list ──────────────────────────────────────────────────────────── */
+function oaRenderRules() {
+  var active = oaRules.filter(function (r) { return r.status === 'active'; }).length;
+  var kpi = document.getElementById('oaKpis');
+  if (kpi) {
+    kpi.innerHTML =
+      kpiHtml('Rules', oaRules.length, _userTeam || '')
+      + kpiHtml('Active', active, '<span style="color:#15803d">on</span>')
+      + kpiHtml('Paused', oaRules.length - active, '');
+  }
+  var body = document.getElementById('oaRulesBody');
+  if (!body) return;
+  if (!oaRules.length) {
+    body.innerHTML = '<tr><td colspan="7" style="padding:30px;text-align:center;font-size:11px;color:var(--ink-4)">No automations yet. Click <b>New automation</b> to create one — it takes about a minute.</td></tr>';
+    return;
+  }
+  body.innerHTML = oaRules.map(function (r) {
+    var ph = (r.phases && r.phases[0]) || {};
+    var sched = ph.day ? ('Day ' + ph.day + ' · ' + (ph.cadence === 'once' ? ('once ' + (ph.month || '')) : 'monthly')) : '—';
+    var seg = (r.audience && r.audience.anyOf || []).join(', ') || '—';
+    var segFields = (r.audience && r.audience.matchOn || []).join('/') || 'cockpit_model';
+    var tpl = ph.template_key ? (oaTemplates[ph.template_key] ? oaTemplates[ph.template_key].display_name : ph.template_key) : '—';
+    var lr = r.last_run;
+    var lrHtml = lr ? ('<span title="' + esc(lr.reason || '') + '">' + esc(_oaStatusLabel(lr.status)) + (lr.sent != null ? (' · ' + lr.sent + ' sent') : '') + '<br><span style="color:var(--ink-4);font-size:9px">' + esc(_oaWhen(lr.at)) + '</span></span>') : '<span style="color:var(--ink-4)">never run</span>';
+    var statusBtn = r.status === 'active'
+      ? '<button class="btn-ghost" style="padding:2px 9px;font-size:10px;color:#15803d;border-color:#bbf7d0" onclick="oaToggleStatus(\'' + r.id + '\',\'paused\')">● Active</button>'
+      : '<button class="btn-ghost" style="padding:2px 9px;font-size:10px;color:var(--ink-4)" onclick="oaToggleStatus(\'' + r.id + '\',\'active\')">○ Paused</button>';
+    return '<tr>'
+      + '<td style="font-weight:600">' + esc(r.name) + '</td>'
+      + '<td>' + statusBtn + '</td>'
+      + '<td style="font-size:11px">' + esc(sched) + '</td>'
+      + '<td style="font-size:11px"><span title="match on ' + esc(segFields) + '">' + esc(seg) + '</span></td>'
+      + '<td style="font-size:11px;color:var(--ink-3)">' + esc(tpl) + '</td>'
+      + '<td style="font-size:10px">' + lrHtml + '</td>'
+      + '<td><div style="display:flex;gap:5px;flex-wrap:wrap">'
+        + '<button class="btn-ghost" style="padding:3px 9px;font-size:10px" onclick="oaPreview(\'' + r.id + '\')"><i data-lucide="eye" style="width:11px;height:11px"></i> Preview</button>'
+        + '<button class="btn-ghost" style="padding:3px 9px;font-size:10px" onclick="oaEdit(\'' + r.id + '\')">Edit</button>'
+        + '<button class="btn-ghost" style="padding:3px 9px;font-size:10px;color:#b45309" onclick="oaRunNow(\'' + r.id + '\')"><i data-lucide="send" style="width:11px;height:11px"></i> Run now</button>'
+        + '<button class="btn-ghost" style="padding:3px 9px;font-size:10px;color:#be123c" onclick="oaDelete(\'' + r.id + '\')">Delete</button>'
+      + '</div></td>'
+      + '</tr>'
+      + '<tr id="oa-detail-' + r.id + '" style="display:none"><td colspan="7" style="padding:0;background:var(--bg)"><div id="oa-detail-body-' + r.id + '" style="padding:14px 18px"></div></td></tr>';
+  }).join('');
+  refreshIcons();
+}
+
+function _oaStatusLabel(s) {
+  return ({ sent: 'Sent', sent_with_errors: 'Sent (errors)', partial: 'Partial', aborted: 'Aborted', skipped: 'Skipped', noop: 'No-op' })[s] || (s || '—');
+}
+function _oaWhen(iso) { if (!iso) return ''; try { return new Date(iso).toLocaleString(); } catch (e) { return iso; } }
+
+/* ── Create / edit form ─────────────────────────────────────────────────── */
+function oaNew() { oaEditingId = null; oaShowForm(null); }
+
+function oaEdit(id) {
+  var r = oaRules.filter(function (x) { return x.id === id; })[0];
+  if (!r) return;
+  oaEditingId = id;
+  oaShowForm(r);
+}
+
+function oaShowForm(r) {
+  var panel = document.getElementById('oaFormPanel');
+  if (!panel) return;
+  var ph = (r && r.phases && r.phases[0]) || {};
+  var aud = (r && r.audience) || {};
+  var caps = (r && r.caps) || {};
+  var matchField = (aud.matchOn && aud.matchOn[0]) || 'cockpit_model';
+  var fieldOpts = [
+    ['cockpit_model', 'Business model (Cockpit)'],
+    ['model', 'CRM model'],
+    ['partnerType', 'Partner type'],
+    ['country', 'Country']
+  ];
+  var tplOptions = Object.keys(oaTemplates).sort().map(function (k) {
+    var sel = (ph.template_key === k) ? ' selected' : '';
+    return '<option value="' + esc(k) + '"' + sel + '>' + esc(oaTemplates[k].display_name || k) + '</option>';
+  }).join('');
+  var fieldSel = fieldOpts.map(function (f) {
+    return '<option value="' + f[0] + '"' + (matchField === f[0] ? ' selected' : '') + '>' + esc(f[1]) + '</option>';
+  }).join('');
+  var monthVal = ph.month ? (ph.month.slice(0, 4) + '-' + ph.month.slice(4, 6)) : '';
+  var box = 'border:1px solid var(--border);border-radius:8px;padding:10px 12px';
+
+  panel.innerHTML =
+    '<div class="section-card" style="padding:20px;max-width:660px">'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
+      + '<span style="font-size:14px;font-weight:700">' + (r ? 'Edit automation' : 'New automation') + '</span>'
+      + '<span style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:var(--bg);border:1px solid var(--border);padding:3px 9px;border-radius:6px;color:var(--ink-3)">' + esc(_userTeam || '') + '</span>'
+      + '<button class="btn-ghost" style="margin-left:auto;padding:4px 12px;font-size:11px" onclick="oaHideForm()">Cancel</button>'
+    + '</div>'
+    + '<div style="font-size:11px;color:var(--ink-4);margin-bottom:16px;line-height:1.5">Send an email template to a group of partners on a chosen day. Nothing goes out until you set it Active and Preview it — and a partner already emailed this month is never emailed twice.</div>'
+
+    + '<div style="display:flex;flex-direction:column;gap:14px">'
+
+      // 1 — name
+      + '<div><label class="oa-lbl">1 · Name this automation</label>'
+        + '<input class="nx-input" id="oaName" style="width:100%" placeholder="e.g. Monthly invoice request" value="' + esc(r ? r.name : '') + '"></div>'
+
+      // 2 — when
+      + '<div><label class="oa-lbl">2 · When to send</label>'
+        + '<div style="' + box + ';display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+          + '<span style="font-size:12px;color:var(--ink-2)">On day</span>'
+          + '<input class="nx-input" id="oaDay" type="number" min="1" max="28" style="width:64px;text-align:center" value="' + esc(ph.day || 8) + '">'
+          + '<span style="font-size:12px;color:var(--ink-2)">of</span>'
+          + '<select class="nx-select" id="oaCadence" style="width:auto" onchange="oaToggleMonth()">'
+            + '<option value="monthly"' + ((!ph.cadence || ph.cadence === 'monthly') ? ' selected' : '') + '>every month</option>'
+            + '<option value="once"' + (ph.cadence === 'once' ? ' selected' : '') + '>one specific month</option>'
+          + '</select>'
+          + '<input class="nx-input" id="oaMonth" type="month" style="width:auto;display:' + (ph.cadence === 'once' ? 'inline-block' : 'none') + '" value="' + esc(monthVal) + '">'
+        + '</div>'
+        + '<div style="font-size:10px;color:var(--ink-4);margin-top:4px">Day 1–28 (Lisbon time). It runs in the morning; a missed day catches up within 3 days.</div>'
+      + '</div>'
+
+      // 3 — template
+      + '<div><label class="oa-lbl">3 · Which email</label>'
+        + '<select class="nx-select" id="oaTemplate" style="width:100%">' + (tplOptions || '<option value="">No templates found — add one in the Templates console first</option>') + '</select>'
+        + '<div style="font-size:10px;color:var(--ink-4);margin-top:4px">A built-in template. Each partner automatically gets it in their own language.</div>'
+      + '</div>'
+
+      // 4 — who
+      + '<div><label class="oa-lbl">4 · Who receives it</label>'
+        + '<div style="' + box + ';display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+          + '<span style="font-size:12px;color:var(--ink-2)">Partners whose</span>'
+          + '<select class="nx-select" id="oaMatchField" style="width:auto">' + fieldSel + '</select>'
+          + '<span style="font-size:12px;color:var(--ink-2)">contains</span>'
+          + '<input class="nx-input" id="oaAnyOf" style="flex:1;min-width:160px" placeholder="bid-ask, ffbuy-sell" value="' + esc((aud.anyOf || []).join(', ')) + '">'
+        + '</div>'
+        + '<div style="font-size:10px;color:var(--ink-4);margin-top:4px">Comma-separated; matched anywhere in the value. <b>Preview</b> shows exactly who matches before you turn it on.</div>'
+      + '</div>'
+
+      // advanced (collapsed)
+      + '<div style="border-top:1px solid var(--border);padding-top:6px">'
+        + '<button type="button" class="btn-ghost" style="padding:4px 0;font-size:11px;border:none;color:var(--ink-3)" onclick="oaToggleAdvanced()"><i id="oaAdvChevron" data-lucide="chevron-right" style="width:13px;height:13px;vertical-align:-2px"></i> Advanced settings (optional)</button>'
+        + '<div id="oaAdvanced" style="display:none;flex-direction:column;gap:12px;padding-top:10px">'
+          + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><label class="oa-lbl" style="margin:0">Max recipients (refuse to send above this)</label>'
+            + '<input class="nx-input" id="oaCap" type="number" min="1" style="width:90px" value="' + esc(caps.maxRecipients != null ? caps.maxRecipients : 150) + '"></div>'
+          + '<label style="font-size:11px;display:flex;align-items:center;gap:7px;cursor:pointer"><input type="checkbox" id="oaEnFallback"' + (caps.langEnFallback === false ? '' : ' checked') + '> If a partner\'s language version is missing, send the English version</label>'
+          + '<label style="font-size:11px;display:flex;align-items:center;gap:7px;cursor:pointer"><input type="checkbox" id="oaAbortAny"' + (caps.abortOnAnyBlock ? ' checked' : '') + '> Strict: send <b>nothing</b> if even one partner can\'t be resolved</label>'
+          + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><label class="oa-lbl" style="margin:0">Abort if more than this share can\'t be resolved</label>'
+            + '<select class="nx-select" id="oaMaxBlocked" style="width:auto">'
+              + ['0.25', '0.5', '0.75'].map(function (v) { var cur = (caps.maxBlockedPct != null ? String(caps.maxBlockedPct) : '0.5'); return '<option value="' + v + '"' + (cur === v ? ' selected' : '') + '>' + Math.round(parseFloat(v) * 100) + '%</option>'; }).join('')
+            + '</select></div>'
+          + '<div><label class="oa-lbl">Exclude specific partners by name</label>'
+            + '<input class="nx-input" id="oaExclude" style="width:100%" placeholder="(optional, comma-separated)" value="' + esc((aud.excludeNames || []).join(', ')) + '"></div>'
+        + '</div>'
+      + '</div>'
+
+    + '</div>'
+
+    // hidden status — kept off the main form for simplicity; new = active, edit preserves
+    + '<input type="hidden" id="oaStatus" value="' + esc(r ? r.status : 'active') + '">'
+
+    + '<div style="display:flex;align-items:center;gap:10px;margin-top:18px;border-top:1px solid var(--border);padding-top:14px">'
+      + '<button class="btn-primary" style="padding:8px 20px;font-size:12px" onclick="oaSave()"><i data-lucide="save" style="width:13px;height:13px"></i> Save</button>'
+      + '<button class="btn-ghost" style="padding:8px 16px;font-size:12px" onclick="oaHideForm()">Cancel</button>'
+      + '<span style="font-size:10px;color:var(--ink-4);margin-left:auto">Saved as ' + (r && r.status === 'paused' ? 'Paused' : 'Active') + '. Always Preview before relying on it.</span>'
+    + '</div>'
+    + '</div>';
+  panel.style.display = 'block';
+  refreshIcons();
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function oaHideForm() { var p = document.getElementById('oaFormPanel'); if (p) { p.style.display = 'none'; p.innerHTML = ''; } oaEditingId = null; }
+function oaToggleMonth() { var c = document.getElementById('oaCadence'), w = document.getElementById('oaMonth'); if (c && w) w.style.display = (c.value === 'once') ? 'inline-block' : 'none'; }
+function oaToggleAdvanced() {
+  var d = document.getElementById('oaAdvanced'), chev = document.getElementById('oaAdvChevron');
+  if (!d) return;
+  var open = d.style.display !== 'none';
+  d.style.display = open ? 'none' : 'flex';
+  if (chev) { chev.setAttribute('data-lucide', open ? 'chevron-right' : 'chevron-down'); refreshIcons(); }
+}
+
+function oaCollectForm() {
+  var cadence = document.getElementById('oaCadence').value;
+  var phase = {
+    role: 'broadcast',
+    day: parseInt(document.getElementById('oaDay').value, 10),
+    template_key: document.getElementById('oaTemplate').value,
+    cadence: cadence
+  };
+  if (cadence === 'once') phase.month = String(document.getElementById('oaMonth').value || '').replace('-', '');   // "YYYY-MM" → "YYYYMM"
+  // Advanced fields may be collapsed (still in the DOM) — read with safe defaults.
+  function val(id, dflt) { var e = document.getElementById(id); return e ? e.value : dflt; }
+  function chk(id, dflt) { var e = document.getElementById(id); return e ? e.checked : dflt; }
+  return {
+    id: oaEditingId || '',
+    name: document.getElementById('oaName').value,
+    status: val('oaStatus', 'active'),
+    phases: [phase],
+    audience: {
+      matchOn: [document.getElementById('oaMatchField').value],
+      anyOf: document.getElementById('oaAnyOf').value,
+      excludeNames: val('oaExclude', '')
+    },
+    caps: {
+      maxRecipients: parseInt(val('oaCap', '150'), 10),
+      maxBlockedPct: parseFloat(val('oaMaxBlocked', '0.5')),
+      langEnFallback: chk('oaEnFallback', true),
+      abortOnAnyBlock: chk('oaAbortAny', false)
+    }
+  };
+}
+
+function oaSave() {
+  var rule = oaCollectForm();
+  showToast('Saving…', 'success');
+  google.script.run
+    .withSuccessHandler(function (res) {
+      if (res && res.success) {
+        showToast('Rule saved', 'success');
+        oaHideForm();
+        oaLoadRules();
+      } else {
+        showToast(res && res.error ? res.error : 'Save failed', 'error');
+      }
+    })
+    .withFailureHandler(function (e) { showToast('Error: ' + (e.message || e), 'error'); })
+    .saveRule(_userTeam, rule);
+}
+
+function oaToggleStatus(id, status) {
+  google.script.run
+    .withSuccessHandler(function (res) {
+      if (res && res.success) { showToast('Rule ' + status, 'success'); oaLoadRules(); }
+      else { showToast(res && res.error ? res.error : 'Failed', 'error'); }
+    })
+    .withFailureHandler(function (e) { showToast('Error: ' + (e.message || e), 'error'); })
+    .setRuleStatus(_userTeam, id, status);
+}
+
+function oaDelete(id) {
+  var r = oaRules.filter(function (x) { return x.id === id; })[0];
+  if (!confirm('Delete rule "' + (r ? r.name : id) + '"? Past sends stay in the Send Log.')) return;
+  google.script.run
+    .withSuccessHandler(function (res) {
+      if (res && res.success) { showToast('Rule deleted', 'success'); oaLoadRules(); }
+      else { showToast(res && res.error ? res.error : 'Failed', 'error'); }
+    })
+    .withFailureHandler(function (e) { showToast('Error: ' + (e.message || e), 'error'); })
+    .deleteRule(_userTeam, id);
+}
+
+/* ── Detail panel: Preview (dry-run) + Run history ──────────────────────── */
+function _oaDetail(id) {
+  var row = document.getElementById('oa-detail-' + id);
+  var body = document.getElementById('oa-detail-body-' + id);
+  if (oaExpandedId && oaExpandedId !== id) {
+    var prev = document.getElementById('oa-detail-' + oaExpandedId);
+    if (prev) prev.style.display = 'none';
+  }
+  oaExpandedId = id;
+  if (row) row.style.display = 'table-row';
+  return body;
+}
+
+function oaPreview(id) {
+  var body = _oaDetail(id);
+  if (!body) return;
+  body.innerHTML = '<div style="font-size:11px;color:var(--ink-4)"><i data-lucide="loader-2" class="spin" style="width:12px;height:12px;vertical-align:-2px"></i> Building preview (resolving segment + templates, no send)…</div>';
+  refreshIcons();
+  google.script.run
+    .withSuccessHandler(function (p) {
+      if (!p || !p.success) { body.innerHTML = '<div style="font-size:11px;color:#be123c">' + esc((p && p.error) || 'Preview failed') + '</div>'; return; }
+      var willSend = p.aborts && p.aborts.length ? 0 : p.willSend;
+      var head = '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px">'
+        + '<span style="font-size:13px;font-weight:700">' + (willSend ? ('Would send to ' + willSend) : 'Would send to 0') + '</span>'
+        + '<span style="font-size:10px;color:var(--ink-4)">' + esc(p.matched) + ' matched · cap ' + esc(p.cap) + ' · ' + esc(p.alreadySent.length) + ' already sent this month · ' + esc(p.blocked.length) + ' blocked</span>'
+        + '<button class="btn-ghost" style="margin-left:auto;padding:3px 10px;font-size:10px" onclick="oaHistory(\'' + id + '\')">Run history</button>'
+        + '</div>';
+      var aborts = (p.aborts && p.aborts.length)
+        ? '<div style="border:1px solid #fecaca;background:#fff1f2;border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:11px;color:#be123c"><b>Will NOT send — </b>' + p.aborts.map(esc).join('<br>') + '</div>'
+        : '';
+      var sendable = p.sendable.length
+        ? '<div style="margin-bottom:8px"><div class="oa-sub">Recipients (' + p.sendable.length + ')</div><div style="max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:8px">'
+          + '<table class="nx-table"><thead><tr><th>Partner</th><th>Lang</th><th>Emails</th><th>Subject</th></tr></thead><tbody>'
+          + p.sendable.map(function (s) {
+              return '<tr><td style="font-weight:500">' + esc(s.partner) + '</td><td>' + esc(s.lang) + '</td><td style="font-size:10px;color:var(--ink-4)">' + esc((s.emails || []).join(', ')) + '</td><td style="font-size:10px;color:var(--ink-3)">' + esc(s.subject) + '</td></tr>';
+            }).join('')
+          + '</tbody></table></div></div>'
+        : '';
+      var blocked = p.blocked.length
+        ? '<div style="margin-bottom:8px"><div class="oa-sub">Blocked — these will be skipped (' + p.blocked.length + ')</div><div style="max-height:140px;overflow:auto;border:1px solid #fde68a;border-radius:8px">'
+          + '<table class="nx-table"><thead><tr><th>Partner</th><th>Reason</th></tr></thead><tbody>'
+          + p.blocked.map(function (b) { return '<tr><td style="font-weight:500">' + esc(b.partner) + '</td><td style="font-size:10px;color:#b45309">' + esc(b.reason) + '</td></tr>'; }).join('')
+          + '</tbody></table></div></div>'
+        : '';
+      body.innerHTML = head + aborts + sendable + blocked
+        + '<div style="margin-top:6px;text-align:right"><button class="btn-ghost" style="padding:3px 10px;font-size:10px" onclick="document.getElementById(\'oa-detail-' + id + '\').style.display=\'none\';oaExpandedId=null">Close</button></div>';
+      refreshIcons();
+    })
+    .withFailureHandler(function (e) { body.innerHTML = '<div style="font-size:11px;color:#be123c">Error: ' + esc(e.message || e) + '</div>'; })
+    .previewRule(_userTeam, id, 'broadcast');
+}
+
+function oaRunNow(id) {
+  var r = oaRules.filter(function (x) { return x.id === id; })[0];
+  if (!confirm('Run "' + (r ? r.name : id) + '" now? It will SEND emails to every matching partner not already sent this month (after all safety checks). Use Preview first if unsure.')) return;
+  showToast('Running…', 'success');
+  google.script.run
+    .withSuccessHandler(function (res) {
+      if (!res || !res.success) { showToast(res && res.error ? res.error : 'Run failed', 'error'); return; }
+      var s = res.summary || {};
+      var msg = _oaStatusLabel(s.status) + ' — ' + (s.reason || '');
+      showToast(msg, (s.status === 'sent') ? 'success' : (s.status === 'aborted' ? 'error' : 'success'));
+      oaLoadRules();
+    })
+    .withFailureHandler(function (e) { showToast('Error: ' + (e.message || e), 'error'); })
+    .runRuleNow(_userTeam, id, 'broadcast');
+}
+
+function oaHistory(id) {
+  var body = _oaDetail(id);
+  if (!body) return;
+  body.innerHTML = '<div style="font-size:11px;color:var(--ink-4)"><i data-lucide="loader-2" class="spin" style="width:12px;height:12px;vertical-align:-2px"></i> Loading run history…</div>';
+  refreshIcons();
+  google.script.run
+    .withSuccessHandler(function (h) {
+      var runs = (h && h.runs) || [];
+      var rows = runs.length
+        ? runs.map(function (x) {
+            return '<tr><td>' + esc(_oaPeriodLabel(x.period)) + '</td><td>' + esc(x.role) + '</td><td style="text-align:right;color:#15803d">' + esc(x.sent) + '</td><td style="text-align:right;color:#be123c">' + esc(x.errors) + '</td><td style="text-align:right;color:#b45309">' + esc(x.skipped) + '</td><td style="font-size:10px;color:var(--ink-4)">' + esc(_oaWhen(x.lastSent)) + '</td></tr>';
+          }).join('')
+        : '<tr><td colspan="6" style="padding:16px;text-align:center;color:var(--ink-4)">No runs recorded yet.</td></tr>';
+      body.innerHTML = '<div class="oa-sub">Run history</div>'
+        + '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden"><table class="nx-table"><thead><tr><th>Month</th><th>Phase</th><th style="text-align:right">Sent</th><th style="text-align:right">Errors</th><th style="text-align:right">Skipped</th><th>Last</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+        + '<div style="margin-top:6px;text-align:right"><button class="btn-ghost" style="padding:3px 10px;font-size:10px" onclick="oaPreview(\'' + id + '\')">Back to preview</button> <button class="btn-ghost" style="padding:3px 10px;font-size:10px" onclick="document.getElementById(\'oa-detail-' + id + '\').style.display=\'none\';oaExpandedId=null">Close</button></div>';
+      refreshIcons();
+    })
+    .withFailureHandler(function (e) { body.innerHTML = '<div style="font-size:11px;color:#be123c">Error: ' + esc(e.message || e) + '</div>'; })
+    .getRuleRunHistory(_userTeam, id);
+}
+
+function _oaPeriodLabel(p) {
+  if (!p || p.length !== 6) return p || '';
+  var months = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return (months[parseInt(p.slice(4, 6), 10)] || '') + ' ' + p.slice(0, 4);
+}
+</script>
+
+<style>
+  .oa-lbl { display:block;font-size:10px;font-weight:600;color:var(--ink-3);margin-bottom:4px }
+  .oa-sub { font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-4);margin-bottom:6px }
+</style>
+
+<!-- ══ OUTREACH AUTOMATION VIEW ══ -->
+<div id="view-outreachauto" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0">
+  <div id="outreachGate" style="display:none;flex:1;align-items:center;justify-content:center;flex-direction:column;gap:8px">
+    <i data-lucide="shield-off" style="width:32px;height:32px;color:var(--ink-4)"></i>
+    <div style="font-size:13px;font-weight:600;color:var(--ink-3)">Access restricted</div>
+    <div style="font-size:11px;color:var(--ink-4)">Admin account required.</div>
+  </div>
+
+  <div id="outreachContent" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+    <div class="filter-bar" style="justify-content:space-between;border-radius:0;border-left:none;border-right:none">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:13px;font-weight:700">Outreach Automation</span>
+        <span id="oaTeamLabel" style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:var(--bg);border:1px solid var(--border);padding:3px 10px;border-radius:6px;color:var(--ink-3)"></span>
+        <span style="font-size:10px;color:var(--ink-4)">Scheduled, fail-closed sends to partner segments</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn-ghost" style="padding:5px 12px;font-size:11px" onclick="oaLoadRules()"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> Refresh</button>
+        <button class="btn-primary" style="padding:6px 14px;font-size:12px" onclick="oaNew()"><i data-lucide="plus" style="width:13px;height:13px"></i> New automation</button>
+      </div>
+    </div>
+
+    <div style="flex:1;overflow:auto;padding:16px 24px">
+      <div class="kpi-grid" id="oaKpis" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px"></div>
+
+      <div id="oaFormPanel" style="display:none;margin-bottom:16px"></div>
+
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <table class="nx-table">
+          <thead><tr><th>Name</th><th>Status</th><th>Schedule</th><th>Segment</th><th>Template</th><th>Last run</th><th>Actions</th></tr></thead>
+          <tbody id="oaRulesBody"><tr><td colspan="7" style="padding:24px;text-align:center;font-size:11px;color:var(--ink-4)">Loading…</td></tr></tbody>
+        </table>
+      </div>
+
+      <div style="margin-top:14px;font-size:10px;color:var(--ink-4);line-height:1.7">
+        <b>How it works.</b> A rule fires on its day-of-month (Europe/Lisbon) from a daily check — Apps Script has no native "Nth of the month", so the day is set to 1–28.
+        Each partner gets the template in their own language (English fallback optional). A partner already sent this month is never sent again, so a re-run or a retry is safe.
+        If the template, segment, transport, or recipient cap isn't right, the rule sends <b>nothing</b> and records why. Always <b>Preview</b> before relying on a new rule.
+      </div>
+    </div>
+  </div>
+</div>

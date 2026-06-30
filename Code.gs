@@ -166,6 +166,51 @@ function _removeTeamTrigger_(handlerName) {
   return { removed: removed, handler: handlerName };
 }
 
+// ── Outreach Automation (V3.21 — admin-only scheduled outreach) ─────────────
+// One DAILY clock trigger per team. The handler calls NX.runDueRules, which
+// date-gates each rule's phases (Apps Script has no "on the Nth of the month",
+// so the cadence is daily + an in-code day-of-month check in Europe/Lisbon).
+// Install ONCE per team from the GAS editor WHILE LOGGED IN AS THE PRODUCTION
+// SEND ACCOUNT (commercialsupport@) — whoever installs becomes the trigger's
+// execution identity, and that identity must be the one allowed to send.
+//
+//   installAllOutreachTriggersAM(7)   → all teams, fires daily ~07:00 Lisbon
+//   installOutreachTriggerAM_Carlos() → just Carlos (default hour 7)
+//   removeOutreachTriggersAM_Carlos() → uninstall
+//
+// runDueRulesAM_<team> are also runnable by hand from the editor to test.
+
+// Handlers — thin, zero-arg, top-level (one per team)
+function runDueRulesAM_Carlos() { return NX.runDueRules(HUB, 'Carlos'); }
+function runDueRulesAM_Daniel() { return NX.runDueRules(HUB, 'Daniel'); }
+function runDueRulesAM_Tanya()  { return NX.runDueRules(HUB, 'Tanya');  }
+
+// Installers — dedupe-then-create a once-daily trigger at hour H (Lisbon)
+function installOutreachTriggerAM_Carlos(h) { return _installDailyTrigger_('runDueRulesAM_Carlos', h); }
+function installOutreachTriggerAM_Daniel(h) { return _installDailyTrigger_('runDueRulesAM_Daniel', h); }
+function installOutreachTriggerAM_Tanya(h)  { return _installDailyTrigger_('runDueRulesAM_Tanya',  h); }
+
+function installAllOutreachTriggersAM(h) {
+  return {
+    Carlos: installOutreachTriggerAM_Carlos(h),
+    Daniel: installOutreachTriggerAM_Daniel(h),
+    Tanya:  installOutreachTriggerAM_Tanya(h),
+  };
+}
+
+function removeOutreachTriggersAM_Carlos() { return _removeTeamTrigger_('runDueRulesAM_Carlos'); }
+function removeOutreachTriggersAM_Daniel() { return _removeTeamTrigger_('runDueRulesAM_Daniel'); }
+function removeOutreachTriggersAM_Tanya()  { return _removeTeamTrigger_('runDueRulesAM_Tanya');  }
+
+function _installDailyTrigger_(handlerName, hour) {
+  var H = (hour == null || isNaN(hour)) ? 7 : Math.max(0, Math.min(23, parseInt(hour, 10)));
+  ScriptApp.getProjectTriggers().forEach(function(tr) {
+    if (tr.getHandlerFunction() === handlerName) ScriptApp.deleteTrigger(tr);
+  });
+  ScriptApp.newTrigger(handlerName).timeBased().everyDays(1).atHour(H).create();
+  return { installed: handlerName, atHour: H };
+}
+
 // ── CRM Writes ──────────────────────────────────────────────────────────────
 function updateDealFromDashboard(d) { return NX.updateDealFromDashboard(HUB, d); }
 function createEvent(eventData)     { return NX.createEvent(HUB, eventData); }
@@ -310,6 +355,16 @@ function addPriority(team, payload)               { return NX.addPriority(HUB, t
 function editPriority(team, id, payload)          { return NX.editPriority(HUB, team, id, payload); }
 function setPriorityStatus(team, id, status)      { return NX.setPriorityStatus(HUB, team, id, status); }
 function deletePriority(team, id)                 { return NX.deletePriority(HUB, team, id); }
+
+// ── Outreach Automation Rules (V3.21 — ADMIN-only; library asserts the role) ──
+function initRulesTab(team)                       { return NX.initRulesTab(HUB, team); }
+function getRules(team)                           { return NX.getRules(HUB, team); }
+function saveRule(team, rule)                     { return NX.saveRule(HUB, team, rule); }
+function setRuleStatus(team, id, status)          { return NX.setRuleStatus(HUB, team, id, status); }
+function deleteRule(team, id)                     { return NX.deleteRule(HUB, team, id); }
+function previewRule(team, id, role)             { return NX.previewRule(HUB, team, id, role); }
+function runRuleNow(team, id, role)              { return NX.runRuleNow(HUB, team, id, role); }
+function getRuleRunHistory(team, id)             { return NX.getRuleRunHistory(HUB, team, id); }
 
 // ── Head dashboard (V3.9 — manager-only cross-team view) ───────────────────
 function getHeadDashboardData(weeks)              { return NX.getHeadDashboardData(HUB, weeks); }
