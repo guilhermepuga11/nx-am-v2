@@ -507,6 +507,13 @@ function renderWizTplPicker() {
       html += '</div>';
     });
 
+    // V3.20 — empty-state (templates are sheet-exclusive; an unseeded sheet is a real state)
+    if (!Object.keys(EMAIL_TEMPLATES).length) {
+      html += '<div style="padding:18px;color:var(--ink-4);font-size:12px;line-height:1.6">'
+        + 'No templates loaded yet. Templates come from the Email Templates spreadsheet — '
+        + 'add or activate templates there, then press <b>Reload</b> below.</div>';
+    }
+
     // Reload templates button
     html += '<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);font-size:10.5px;color:var(--ink-4);display:flex;align-items:center;justify-content:space-between">'
       + '<span>Templates loaded from sheet · ' + Object.keys(EMAIL_TEMPLATES).length + ' available</span>'
@@ -724,6 +731,7 @@ function loadPreviewsAndAdvance() {
           partnerName: rec.partnerName, partnerRow: rec.partnerRow,
           account_manager: deal ? (deal.account_manager || '') : '',
           subject: subject, body: body,
+          _rawSubject: resolved.subject, _rawBody: resolved.body,  // re-resolved on Send-from change (signature)
           unresolved: checkUnresolved(subject).concat(checkUnresolved(body)),
           partner_language: partnerLang,
           language_used: resolved.language_used,
@@ -741,6 +749,7 @@ function loadPreviewsAndAdvance() {
         partnerName: rec.partnerName, partnerRow: rec.partnerRow,
         account_manager: deal ? (deal.account_manager || '') : '',
         subject: fbSubj, body: fbBody,
+        _rawSubject: fb ? fb.subject : '', _rawBody: fb ? fb.body : '',
         unresolved: fb ? checkUnresolved(fbSubj).concat(checkUnresolved(fbBody)) : [],
         partner_language: partnerLang,
         language_used: fb ? 'EN' : '',
@@ -776,6 +785,7 @@ function loadPreviewsAndAdvance() {
           partnerName: p.partnerName, partnerRow: p.partnerRow,
           account_manager: deal ? (deal.account_manager || '') : '',  // V3.8 — for shared-send CC resolution
           subject: subj, body: body,
+          _rawSubject: p.subject, _rawBody: p.body,  // re-resolved on Send-from change (signature)
           unresolved: checkUnresolved(subj).concat(checkUnresolved(body))
         };
       });
@@ -785,6 +795,23 @@ function loadPreviewsAndAdvance() {
     })
     .withFailureHandler(function(e) { showToast('Preview failed: ' + (e.message || e), 'error'); })
     .buildCampaignPreview(audience, options);
+}
+
+// Previews bake the resolved text (incl. the {{sender_name}} signature, which
+// depends on the Send-from choice) at build time. When the user switches
+// Send-from on Step 3, re-resolve each preview from its stored raw template so
+// the signature (and the send) reflect the new choice. Wired to sendFromSelect
+// onchange in nexus.html.
+function applyWizSendFromSignature() {
+  if (typeof wiz === 'undefined' || !wiz || !wiz.previews) return;
+  wiz.previews.forEach(function(p) {
+    if (!p || !p.emails || !p.emails.length || p._rawSubject == null) return;
+    var deal = (typeof P !== 'undefined' && P) ? P.find(function(x) { return x.row === p.partnerRow; }) : null;
+    p.subject = deal ? applyPlaceholders(p._rawSubject, deal) : p._rawSubject;
+    p.body = deal ? applyPlaceholders(p._rawBody, deal) : p._rawBody;
+    p.unresolved = checkUnresolved(p.subject).concat(checkUnresolved(p.body));
+  });
+  if (wiz.step === 3 && typeof renderWizStep3 === 'function') renderWizStep3();
 }
 
 function renderWizStep3() {

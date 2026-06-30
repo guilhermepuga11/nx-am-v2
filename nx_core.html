@@ -67,10 +67,10 @@ var _permsApplied = false;
    EMAIL_TEMPLATES used to be a flat object: { key: { subject, body, icon } }.
    It's now nested: { key: { display_name, category, icon, languages: { LANG: {subject, body} } } }.
 
-   On boot we async-fetch the registry from the Templates sheet and replace
-   the in-memory object. Until that fetch returns, the hardcoded fallback
-   below is used so the app never has zero templates (e.g. boot-time API
-   failure or sheet not yet seeded).
+   On boot we async-fetch the registry from the templates spreadsheet and
+   replace the in-memory object. Until that fetch returns EMAIL_TEMPLATES is
+   empty ({}); there is NO hardcoded fallback. If the sheet is unseeded or the
+   fetch fails, the gallery stays empty by design (templates are sheet-only).
 
    Lookup helper resolveTemplate_(key, lang) is the canonical entry point.
    It applies the resolution rule:
@@ -121,11 +121,10 @@ function resolveTemplate_(key, lang) {
   return { found: false, available: available, requested: lang };
 }
 
-// V3.10 — EMAIL_TEMPLATES holds nested {key: {display_name, category, icon, languages}}
-// Hardcoded fallback (current EN bodies) — replaced at boot by sheet contents.
-// Keeping the fallback lets the app render a usable gallery even if the
-// Templates sheet is missing or fails to load. AMs see English-only until
-// the sheet is seeded; no functional regression vs pre-V3.10.
+// V3.20 — EMAIL_TEMPLATES holds nested {key:{display_name,category,icon,languages}}.
+// Loaded EXCLUSIVELY from the Email Templates sheet at boot (loadTemplatesFromSheet_,
+// below). No template copy is hardcoded any more: it starts empty and the gallery
+// shows whatever the sheet returns (empty if the sheet is missing / unreachable).
 var EMAIL_TEMPLATES = {};
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -181,7 +180,7 @@ function loadTemplatesFromSheet_() {
   google.script.run
     .withSuccessHandler(function(res) {
       if (!res || !res.templates || !Object.keys(res.templates).length) {
-        // Sheet empty / not seeded yet — keep the fallback
+        // Sheet empty / not seeded yet — leave EMAIL_TEMPLATES as {} (gallery shows 0 templates).
         return;
       }
       EMAIL_TEMPLATES = res.templates;
@@ -340,9 +339,9 @@ window.onload = function() {
           }
         }
 
-        // V3.10 — Pull the multi-language templates registry from the sheet.
-        // Fire-and-forget: if it fails or sheet is empty, the hardcoded
-        // fallback in EMAIL_TEMPLATES stays in place.
+        // V3.20 — Pull the multi-language templates registry from the sheet.
+        // Fire-and-forget: if it fails or the sheet is empty, EMAIL_TEMPLATES
+        // stays {} and the gallery renders empty (no hardcoded fallback).
         loadTemplatesFromSheet_();
 
         // Build team dropdown
@@ -1206,6 +1205,14 @@ function updatePendingBadge() {
 /* ═══════════════════════════════════════      
    PLACEHOLDER RESOLUTION      
 ═══════════════════════════════════════ */      
+// Offline-stock % for the {{offline_pct}} placeholder — from cy_offline_pct
+// (fraction), falling back to 1 - units_online/units_total. Blank if no data.
+function _offlinePctStr(deal){
+  var f = (deal.cy_offline_pct != null && deal.cy_offline_pct !== '') ? Number(deal.cy_offline_pct)
+        : ((deal.cy_units_tot || 0) > 0 ? 1 - (Number(deal.cy_units_on) || 0) / Number(deal.cy_units_tot) : null);
+  return (f != null && !isNaN(f)) ? (f * 100).toFixed(1) + '%' : '';
+}
+
 function applyPlaceholders(text, deal) {      
   var contact = contactMap[(deal.company || '').toLowerCase()];      
   var cn = (contact && contact.name) ? contact.name : ((deal.company || 'Partner') + ' team');      
@@ -1219,11 +1226,18 @@ function applyPlaceholders(text, deal) {
   var composeFromEl = document.getElementById('composeSendFrom');
   var isShared = false;
   
-  var composeModal = document.getElementById('composeModal');
-  if (composeModal && composeModal.style.display !== 'none' && composeFromEl) {
+  // Read whichever Send-from control is actually ON SCREEN. The compose select
+  // sits inside a CSS-hidden modal during the wizard, so its inline style.display
+  // is empty (not 'none') and the old check wrongly read it — leaving the wizard
+  // stuck on 'signed as me'. offsetParent is null when an element (or an ancestor)
+  // is display:none, so it reliably tells us which control is visible.
+  var _vis = function(el){ return !!(el && el.offsetParent !== null); };
+  if (_vis(composeFromEl)) {
     isShared = composeFromEl.value === 'shared';
+  } else if (_vis(sendFromEl)) {
+    isShared = sendFromEl.value === 'shared';
   } else {
-    isShared = sendFromEl && sendFromEl.value === 'shared';
+    isShared = (sendFromEl && sendFromEl.value === 'shared') || (composeFromEl && composeFromEl.value === 'shared');
   }
 
   var rawSender = _userEmail ? _userEmail.split('@')[0].split('.').map(function(w){ return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ') : '';
@@ -1237,7 +1251,8 @@ function applyPlaceholders(text, deal) {
     'sender_name': rawSender,      
     'partner_name': deal.company || '', 'partner': deal.company || '', 'store': deal.company || '',      
     'contact_name': cn, 'contact': cn, 'contact_email': ce, 'contact_role': contact ? contact.role || '' : '',      
-    'ytd_yoy': varStr, 'var_pct': varStr,      
+    'ytd_yoy': varStr, 'var_pct': varStr,
+    'offline_pct': _offlinePctStr(deal), 'offline': _offlinePctStr(deal),
     'today': now.toLocaleDateString('en-IE'), 'month': months[now.getMonth()],      
     'year': String(now.getFullYear()), 'quarter': 'Q' + (Math.floor(now.getMonth() / 3) + 1),      
     'stage': deal.stage || '', 'model': deal.model || '', 'country': deal.country || '',      

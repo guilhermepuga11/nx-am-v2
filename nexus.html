@@ -479,7 +479,7 @@
             <div style="flex:1"><div style="font-size:10px;font-weight:600;color:var(--ink-3);margin-bottom:3px" id="sendProgressLabel">Sending…</div><div class="send-progress-bar"><div class="send-progress-fill" id="sendProgressFill" style="width:0%"></div></div></div>
           </div>
           <span style="font-size:10px;font-weight:600;color:var(--ink-4)" id="emailSelCount">0 selected</span>
-          <select id="sendFromSelect" style="font-size:10px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--ink-2);font-weight:600;display:none" title="Send from">
+          <select id="sendFromSelect" onchange="applyWizSendFromSignature()" style="font-size:10px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--ink-2);font-weight:600;display:none" title="Send from">
             <option value="shared_personal" selected>📧 Shared (signed as me)</option>
             <option value="shared">📧 Commercial Support</option>
             <option value="personal">👤 My Account</option>
